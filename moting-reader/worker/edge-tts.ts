@@ -6,17 +6,85 @@
 import type { WordBoundary } from "../lib/speech-timeline";
 
 const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-const SEC_MS_GEC_VERSION = "1-143.0.3650.75";
 const WIN_EPOCH_SECONDS = 11644473600n;
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
 const ORIGIN = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
 const SYNTHESIS_TIMEOUT_MS = 30000;
+
+const EDGE_UPDATES_URL = "https://edgeupdates.microsoft.com/api/products";
+const EDGE_VERSION_CACHE_KEY = "https://moting-reader.internal/edge-version";
+const EDGE_VERSION_TTL_SECONDS = 86400;
+const EDGE_VERSION_PATTERN = /^\d+\.\d+\.\d+\.\d+$/;
+/** 只在版本接口也连不上时兜底，正常路径一律用运行时解析出来的版本。 */
+const FALLBACK_EDGE_VERSION = "150.0.4078.105";
 
 export interface SynthesisResult {
   audio: Uint8Array;
   boundaries: WordBoundary[];
 }
+
+export interface EdgeProduct {
+  Product: string;
+  Releases: {
+    Platform: string;
+    Architecture: string;
+    ProductVersion: string;
+  }[];
+}
+
+/** 服务端按 Edge 版本校验请求，取官方更新接口里的 Windows x64 稳定版。 */
+export function pickStableWindowsVersion(products: EdgeProduct[]): string | null {
+  const version = products
+    .find((product) => product.Product === "Stable")
+    ?.Releases.find(
+      (release) =>
+        release.Platform === "Windows" && release.Architecture === "x64"
+    )?.ProductVersion;
+  return version && EDGE_VERSION_PATTERN.test(version) ? version : null;
+}
+
+async function fetchLatestEdgeVersion(): Promise<string | null> {
+  const response = await fetch(EDGE_UPDATES_URL, {
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok) return null;
+  return pickStableWindowsVersion((await response.json()) as EdgeProduct[]);
+}
+
+/**
+ * 版本号缓存一天。握手被拒多半是版本过期，这时传 refresh 强制重取，
+ * 让服务自己跟上微软的版本轮换，不用改代码重新发布。
+ */
+async function edgeVersion(refresh: boolean): Promise<string> {
+  const cache = caches.default;
+  const key = new Request(EDGE_VERSION_CACHE_KEY);
+
+  if (!refresh) {
+    const cached = await cache.match(key);
+    if (cached) return cached.text();
+  }
+
+  const version = await fetchLatestEdgeVersion().catch(() => null);
+  if (!version) return FALLBACK_EDGE_VERSION;
+
+  await cache.put(
+    key,
+    new Response(version, {
+      headers: { "cache-control": `max-age=${EDGE_VERSION_TTL_SECONDS}` },
+    })
+  );
+  return version;
+}
+
+function userAgentFor(version: string): string {
+  const major = version.split(".")[0];
+  return (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    `(KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36 Edg/${major}.0.0.0`
+  );
+}
+
+/** 只有握手阶段被拒才值得换版本重试，合成中途出错重试也没用。 */
+class HandshakeError extends Error {}
 
 /** token 按 5 分钟粒度取整，随 Edge 版本轮换，接口 403 时多半是这里过期了。 */
 async function securityToken(): Promise<string> {
@@ -60,23 +128,24 @@ function escapeXml(text: string): string {
  * 一律按原速合成，变速交给客户端的 playbackRate：
  * 同一段文本只需合成、缓存一份，调速也能瞬时生效。
  */
-export async function synthesizeSpeech(
+async function synthesizeOnce(
   text: string,
-  voice: string
+  voice: string,
+  version: string
 ): Promise<SynthesisResult> {
   const connectionId = crypto.randomUUID().replace(/-/g, "");
   const url =
     "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1" +
     `?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}` +
     `&Sec-MS-GEC=${await securityToken()}` +
-    `&Sec-MS-GEC-Version=${SEC_MS_GEC_VERSION}` +
+    `&Sec-MS-GEC-Version=1-${version}` +
     `&ConnectionId=${connectionId}`;
 
   const response = await fetch(url, {
     headers: {
       Upgrade: "websocket",
       Origin: ORIGIN,
-      "User-Agent": USER_AGENT,
+      "User-Agent": userAgentFor(version),
       "Accept-Language": "en-US,en;q=0.9",
       Pragma: "no-cache",
       "Cache-Control": "no-cache",
@@ -86,7 +155,7 @@ export async function synthesizeSpeech(
   const socket = (response as unknown as { webSocket: WebSocket | null })
     .webSocket;
   if (!socket) {
-    throw new Error(`朗读服务握手失败：HTTP ${response.status}`);
+    throw new HandshakeError(`朗读服务握手失败：HTTP ${response.status}`);
   }
   socket.accept();
 
@@ -188,4 +257,20 @@ export async function synthesizeSpeech(
   }
 
   return { audio, boundaries };
+}
+
+/** 握手被拒时刷新版本号再试一次，让微软轮换版本后服务能自愈。 */
+export async function synthesizeSpeech(
+  text: string,
+  voice: string
+): Promise<SynthesisResult> {
+  const version = await edgeVersion(false);
+  try {
+    return await synthesizeOnce(text, voice, version);
+  } catch (error) {
+    if (!(error instanceof HandshakeError)) throw error;
+    const fresh = await edgeVersion(true);
+    if (fresh === version) throw error;
+    return synthesizeOnce(text, voice, fresh);
+  }
 }
