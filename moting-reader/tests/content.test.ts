@@ -41,8 +41,44 @@ test("识别章节并保留段落顺序", () => {
   assert.equal(chapters[1].title, "第二章 继续");
 });
 
+test("章内小标题保留为标题块而不是另起一章", () => {
+  const chapters = chaptersFromPlainText(
+    "# 第一章 起点\n\n开场的话。\n\n### 第一节 小标题\n\n小节正文。\n\n第二节 另一个\n\n又一段。"
+  );
+
+  assert.equal(chapters.length, 1);
+  assert.deepEqual(
+    chapters[0].paragraphs.map((paragraph) => paragraph.kind),
+    ["text", "heading", "text", "heading", "text"]
+  );
+  assert.equal(chapters[0].paragraphs[1].level, 3);
+  assert.equal(chapters[0].paragraphs[1].sentences[0].text, "第一节 小标题");
+  // 标题也要能被朗读，所以仍然进句子流。
+  assert.equal(chapters[0].sentenceCount, 5);
+});
+
+test("正文块默认是 text，标题块夹带层级", () => {
+  const chapter = createChapter(
+    "第一章",
+    [
+      { text: "正文一句。" },
+      { kind: "heading", level: 9, text: "越界的层级" },
+      { kind: "quote", text: "引文一句。" },
+      { kind: "list", text: "列表一项。" },
+    ],
+    0
+  );
+  assert.ok(chapter);
+  assert.deepEqual(
+    chapter.paragraphs.map((paragraph) => paragraph.kind),
+    ["text", "heading", "quote", "list"]
+  );
+  assert.equal(chapter.paragraphs[1].level, 6);
+  assert.equal(chapter.paragraphs[0].level, undefined);
+});
+
 test("整段合成一条朗读块并记录每句偏移", () => {
-  const chapter = createChapter("第一章", ["甲。乙。", "丙。"], 0);
+  const chapter = createChapter("第一章", [{ text: "甲。乙。" }, { text: "丙。" }], 0);
   assert.ok(chapter);
 
   const blocks = buildSpeechBlocks(chapter);
@@ -70,7 +106,7 @@ test("整段合成一条朗读块并记录每句偏移", () => {
 });
 
 test("从句子中途续播时重新对齐偏移", () => {
-  const chapter = createChapter("第一章", ["甲。乙。丙。"], 0);
+  const chapter = createChapter("第一章", [{ text: "甲。乙。丙。" }], 0);
   assert.ok(chapter);
 
   const block = buildSpeechBlocks(chapter)[0];
@@ -84,7 +120,7 @@ test("从句子中途续播时重新对齐偏移", () => {
 
 test("超长段落按句子边界切成多块", () => {
   const long = Array.from({ length: 40 }, (_, index) => `第${index}句内容填充。`).join("");
-  const chapter = createChapter("第一章", [long], 0);
+  const chapter = createChapter("第一章", [{ text: long }], 0);
   assert.ok(chapter);
 
   const blocks = buildSpeechBlocks(chapter);
@@ -96,8 +132,8 @@ test("超长段落按句子边界切成多块", () => {
 });
 
 test("阅读位置能够跨章节移动并计算进度", () => {
-  const first = createChapter("第一章", ["甲。乙。"], 0);
-  const second = createChapter("第二章", ["丙。丁。"], 1);
+  const first = createChapter("第一章", [{ text: "甲。乙。" }], 0);
+  const second = createChapter("第二章", [{ text: "丙。丁。" }], 1);
   assert.ok(first);
   assert.ok(second);
 

@@ -16,9 +16,15 @@ export interface Sentence {
   order: number;
 }
 
+/** 正文里的块级结构。解析时保留，渲染和朗读都按它区分对待。 */
+export type BlockKind = "text" | "heading" | "quote" | "list";
+
 export interface Paragraph {
   id: string;
   order: number;
+  kind: BlockKind;
+  /** 仅 heading 使用，1-6，决定渲染出的标题层级。 */
+  level?: number;
   sentences: Sentence[];
 }
 

@@ -1112,14 +1112,55 @@ input[type="range"] {
   font-size: 11px;
 }
 
-.reader-article > p {
+.reader-article .reader-block {
   margin: 0 0 1.25em;
   font-size: var(--reader-font-size);
   line-height: var(--reader-line-height);
   text-align: justify;
 }
 
-.reader-article > p > span {
+.reader-article .reader-block.is-heading {
+  margin: 2em 0 0.9em;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: initial;
+}
+
+.reader-article h2.reader-block {
+  font-size: calc(var(--reader-font-size) * 1.28);
+}
+
+.reader-article h3.reader-block {
+  font-size: calc(var(--reader-font-size) * 1.12);
+}
+
+.reader-article h4.reader-block,
+.reader-article h5.reader-block,
+.reader-article h6.reader-block {
+  font-size: var(--reader-font-size);
+  color: var(--reader-muted);
+}
+
+.reader-article .reader-block.is-quote {
+  padding-left: 1.1em;
+  border-left: 2px solid var(--reader-line);
+  color: var(--reader-muted);
+}
+
+.reader-article .reader-block.is-list {
+  padding-left: 1.4em;
+  text-indent: -1.4em;
+}
+
+.reader-article .reader-block.is-list::before {
+  content: "·";
+  display: inline-block;
+  width: 1.4em;
+  text-indent: 0;
+  text-align: center;
+}
+
+.reader-article .reader-block > span {
   border-radius: 3px;
   /* 句子换行时每个行片段各自成形，否则高亮会连成一条横跨整行的色块。 */
   -webkit-box-decoration-break: clone;
@@ -1130,12 +1171,12 @@ input[type="range"] {
     box-shadow 150ms ease;
 }
 
-.reader-article > p > span.is-selected {
+.reader-article .reader-block > span.is-selected {
   box-shadow: inset 0 -0.16em rgb(113 128 145 / 22%);
 }
 
 /* 用 box-shadow 而不是 padding 撑开朗读高亮，避免逐句推进时正文抖动。 */
-.reader-article > p > span.is-speaking {
+.reader-article .reader-block > span.is-speaking {
   background: rgb(113 128 145 / 17%);
   box-shadow: 0 0 0 3px rgb(113 128 145 / 17%);
 }

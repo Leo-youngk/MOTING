@@ -1,4 +1,5 @@
 import type {
+  BlockKind,
   Book,
   BookFormat,
   BookPosition,
@@ -8,6 +9,13 @@ import type {
   SpeechBlock,
   SpeechSpan,
 } from "./types";
+
+/** 解析器交给内容层的块，`kind` 省略时按正文处理。 */
+export interface BlockInput {
+  text: string;
+  kind?: BlockKind;
+  level?: number;
+}
 
 const ACCENTS = ["#718091", "#85766b", "#788271", "#8b6e64", "#6f7d87"];
 
@@ -63,8 +71,11 @@ export function splitIntoSentences(value: string): string[] {
   return sentences.length ? sentences : [clean];
 }
 
-export function createParagraph(text: string, order: number): Paragraph | null {
-  const sentenceTexts = splitIntoSentences(text);
+export function createParagraph(
+  block: BlockInput,
+  order: number
+): Paragraph | null {
+  const sentenceTexts = splitIntoSentences(block.text);
   if (!sentenceTexts.length) return null;
 
   const sentences: Sentence[] = sentenceTexts.map((sentence, sentenceOrder) => ({
@@ -74,20 +85,25 @@ export function createParagraph(text: string, order: number): Paragraph | null {
     order: sentenceOrder,
   }));
 
-  return {
+  const paragraph: Paragraph = {
     id: makeId("paragraph"),
     order,
+    kind: block.kind ?? "text",
     sentences,
   };
+  if (paragraph.kind === "heading") {
+    paragraph.level = Math.min(6, Math.max(1, block.level ?? 3));
+  }
+  return paragraph;
 }
 
 export function createChapter(
   title: string,
-  paragraphTexts: string[],
+  blocks: BlockInput[],
   order: number
 ): Chapter | null {
-  const paragraphs = paragraphTexts
-    .map((text, paragraphOrder) => createParagraph(text, paragraphOrder))
+  const paragraphs = blocks
+    .map((block, paragraphOrder) => createParagraph(block, paragraphOrder))
     .filter((paragraph): paragraph is Paragraph => Boolean(paragraph));
 
   if (!paragraphs.length) return null;
@@ -107,10 +123,18 @@ export function createChapter(
 }
 
 const CHAPTER_PATTERN =
-  /^(?:#{1,4}\s+.+|第[〇零一二三四五六七八九十百千万两0-9]+[章节卷部篇回]\s*.{0,40}|(?:chapter|part)\s+[\divxlcdm]+.*)$/i;
+  /^(?:#{1,2}\s+.+|第[〇零一二三四五六七八九十百千万两0-9]+[章卷部篇回]\s*.{0,40}|(?:chapter|part)\s+[\divxlcdm]+.*)$/i;
+
+/** 章内小标题：不另起一章，但也不该降级成正文段落。 */
+const HEADING_PATTERN =
+  /^(?:#{3,6}\s+.+|第[〇零一二三四五六七八九十百千万两0-9]+[节節]\s*.{0,40})$/;
 
 function stripHeadingMarker(value: string): string {
-  return normalizeWhitespace(value.replace(/^#{1,4}\s+/, ""));
+  return normalizeWhitespace(value.replace(/^#{1,6}\s+/, ""));
+}
+
+function headingLevelOf(value: string): number {
+  return value.match(/^(#{1,6})\s/)?.[1].length ?? 3;
 }
 
 export function chaptersFromPlainText(
@@ -129,26 +153,32 @@ export function chaptersFromPlainText(
     .map((block) => normalizeWhitespace(block.replace(/\n+/g, " ")))
     .filter(Boolean);
 
-  const sections: Array<{ title: string; paragraphs: string[] }> = [];
-  let current = { title: fallbackTitle, paragraphs: [] as string[] };
+  const sections: Array<{ title: string; paragraphs: BlockInput[] }> = [];
+  let current = { title: fallbackTitle, paragraphs: [] as BlockInput[] };
 
   for (const block of blocks) {
     if (CHAPTER_PATTERN.test(block) && block.length <= 64) {
       if (current.paragraphs.length) sections.push(current);
       current = { title: stripHeadingMarker(block), paragraphs: [] };
+    } else if (HEADING_PATTERN.test(block) && block.length <= 64) {
+      current.paragraphs.push({
+        kind: "heading",
+        level: headingLevelOf(block),
+        text: stripHeadingMarker(block),
+      });
     } else {
-      current.paragraphs.push(block);
+      current.paragraphs.push({ text: block });
     }
   }
   if (current.paragraphs.length) sections.push(current);
 
   if (sections.length <= 1 && blocks.join("").length > 16000) {
-    const chunks: Array<{ title: string; paragraphs: string[] }> = [];
-    let chunk: string[] = [];
+    const chunks: Array<{ title: string; paragraphs: BlockInput[] }> = [];
+    let chunk: BlockInput[] = [];
     let length = 0;
-    for (const block of blocks) {
+    for (const block of sections[0]?.paragraphs ?? []) {
       chunk.push(block);
-      length += block.length;
+      length += block.text.length;
       if (length >= 8000) {
         chunks.push({
           title: `${fallbackTitle} · ${chunks.length + 1}`,

@@ -790,6 +790,8 @@ function SettingsScreen({
   );
 }
 
+const HEADING_TAGS = ["h2", "h2", "h3", "h4", "h5", "h6"] as const;
+
 function ReaderScreen({
   book,
   settings,
@@ -962,22 +964,47 @@ function ReaderScreen({
           <p>{book.title}</p>
         </div>
 
-        {chapter?.paragraphs.map((paragraph) => (
-          <p key={paragraph.id}>
-            {paragraph.sentences.map((sentence) => (
-              <span
-                key={sentence.id}
-                data-sentence-id={sentence.id}
-                data-sentence-index={sentenceIndexById.get(sentence.id)}
-                className={`${
-                  sentence.id === selectedSentenceId ? "is-selected" : ""
-                } ${sentence.id === currentSentenceId ? "is-speaking" : ""}`}
-              >
-                {sentence.text}
-              </span>
-            ))}
-          </p>
-        ))}
+        {chapter?.paragraphs.map((paragraph) => {
+          const sentenceSpans = paragraph.sentences.map((sentence) => (
+            <span
+              key={sentence.id}
+              data-sentence-id={sentence.id}
+              data-sentence-index={sentenceIndexById.get(sentence.id)}
+              className={`${
+                sentence.id === selectedSentenceId ? "is-selected" : ""
+              } ${sentence.id === currentSentenceId ? "is-speaking" : ""}`}
+            >
+              {sentence.text}
+            </span>
+          ));
+
+          if (paragraph.kind === "heading") {
+            // 章节名已经占了 h1，章内小标题从 h2 起排。
+            const Heading = HEADING_TAGS[(paragraph.level ?? 3) - 1] ?? "h3";
+            return (
+              <Heading key={paragraph.id} className="reader-block is-heading">
+                {sentenceSpans}
+              </Heading>
+            );
+          }
+          if (paragraph.kind === "quote") {
+            return (
+              <blockquote key={paragraph.id} className="reader-block is-quote">
+                {sentenceSpans}
+              </blockquote>
+            );
+          }
+          return (
+            <p
+              key={paragraph.id}
+              className={`reader-block ${
+                paragraph.kind === "list" ? "is-list" : ""
+              }`}
+            >
+              {sentenceSpans}
+            </p>
+          );
+        })}
 
         <div className="reader-chapter-nav">
           <button
@@ -1572,7 +1599,9 @@ export default function MotingApp() {
         if (!cancelled) setReady(true);
       });
 
-    if ("serviceWorker" in navigator) {
+    // 开发时不注册：离线外壳按缓存优先取同源资源，而 dev 下的 URL 不带哈希，
+    // 改完样式和脚本会一直读到旧版本。
+    if ("serviceWorker" in navigator && !import.meta.env.DEV) {
       navigator.serviceWorker.register("/sw.js").catch(() => undefined);
     }
     return () => {

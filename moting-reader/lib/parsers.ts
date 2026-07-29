@@ -3,12 +3,14 @@
 import JSZip from "jszip";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
+  type BlockInput,
   chaptersFromPlainText,
   createBook,
   createChapter,
   normalizeWhitespace,
 } from "./content";
 import type {
+  BlockKind,
   Book,
   BookFormat,
   Chapter,
@@ -69,9 +71,23 @@ function parseDocument(raw: string, type: DOMParserSupportedType): Document {
   return new DOMParser().parseFromString(raw, type);
 }
 
+const BLOCK_SELECTOR =
+  "p,div,h1,h2,h3,h4,h5,h6,blockquote,li,dd,figcaption,pre,td";
+
+function blockKindOf(element: Element): { kind: BlockKind; level?: number } {
+  const tag = element.tagName.toLowerCase();
+  const headingLevel = /^h([1-6])$/.exec(tag);
+  if (headingLevel) {
+    return { kind: "heading", level: Number(headingLevel[1]) };
+  }
+  if (element.closest("blockquote")) return { kind: "quote" };
+  if (tag === "li" || tag === "dd") return { kind: "list" };
+  return { kind: "text" };
+}
+
 function extractTextBlocks(raw: string): {
   title: string;
-  paragraphs: string[];
+  blocks: BlockInput[];
 } {
   const document = parseDocument(raw, "text/html");
   document
@@ -80,25 +96,66 @@ function extractTextBlocks(raw: string): {
     )
     .forEach((node) => node.remove());
 
-  const heading = document.querySelector("h1,h2,h3,title");
-  const title = normalizeWhitespace(heading?.textContent ?? "");
-  const candidates = Array.from(
-    document.querySelectorAll("p,blockquote,li,h1,h2,h3,h4")
+  // 只取不再包含其他块元素的"叶子"，否则 blockquote>p 这类嵌套会重复出一份正文。
+  const leaves = Array.from(document.querySelectorAll(BLOCK_SELECTOR)).filter(
+    (element) => !element.querySelector(BLOCK_SELECTOR)
   );
-  const paragraphs = candidates
-    .map((node) => normalizeWhitespace(node.textContent ?? ""))
-    .filter((text, index, all) => {
-      if (!text || text.length < 2) return false;
-      if (/^\d{1,4}$/.test(text)) return false;
-      return index === 0 || text !== all[index - 1];
-    });
 
-  if (!paragraphs.length) {
-    const fallback = normalizeWhitespace(document.body?.textContent ?? "");
-    if (fallback) paragraphs.push(fallback);
+  const titleElement =
+    leaves.find((element) => /^h[1-3]$/i.test(element.tagName)) ?? null;
+  const title = normalizeWhitespace(
+    titleElement?.textContent ?? document.querySelector("title")?.textContent ?? ""
+  );
+
+  const blocks: BlockInput[] = [];
+  for (const element of leaves) {
+    // 标题已经作为章节名单独展示，正文里再出一遍就成了重复。
+    if (element === titleElement) continue;
+    const text = normalizeWhitespace(element.textContent ?? "");
+    if (!text || text.length < 2) continue;
+    if (/^\d{1,4}$/.test(text)) continue;
+    if (blocks.length && blocks[blocks.length - 1].text === text) continue;
+    blocks.push({ text, ...blockKindOf(element) });
   }
 
-  return { title, paragraphs };
+  if (!blocks.length) {
+    const fallback = normalizeWhitespace(document.body?.textContent ?? "");
+    if (fallback) blocks.push({ text: fallback });
+  }
+
+  return { title, blocks };
+}
+
+/** 目录里的章节名比从正文里猜第一个标题可靠，EPUB2 用 ncx，EPUB3 用 nav。 */
+function tocTitles(
+  raw: string,
+  tocPath: string,
+  isNcx: boolean
+): Map<string, string> {
+  const titles = new Map<string, string>();
+  const document = parseDocument(raw, isNcx ? "application/xml" : "text/html");
+
+  const entries: Array<{ href: string | null; label: string }> = isNcx
+    ? Array.from(document.getElementsByTagNameNS("*", "navPoint")).map(
+        (point) => ({
+          href: point
+            .getElementsByTagNameNS("*", "content")[0]
+            ?.getAttribute("src"),
+          label: point.getElementsByTagNameNS("*", "text")[0]?.textContent ?? "",
+        })
+      )
+    : Array.from(document.querySelectorAll("nav a, a")).map((anchor) => ({
+        href: anchor.getAttribute("href"),
+        label: anchor.textContent ?? "",
+      }));
+
+  for (const entry of entries) {
+    const label = normalizeWhitespace(entry.label);
+    if (!entry.href || !label) continue;
+    const path = resolveZipPath(tocPath, entry.href.split("#")[0]);
+    if (path && !titles.has(path)) titles.set(path, label);
+  }
+  return titles;
 }
 
 async function blobToDataUrl(blob: Blob): Promise<string> {
@@ -172,6 +229,25 @@ async function parseEpub(
   }
 
   report(onProgress, "content", "正在整理章节与正文", 28);
+
+  const navItem = Array.from(manifest.values()).find((item) =>
+    item.properties.split(/\s+/).includes("nav")
+  );
+  const ncxItem = Array.from(manifest.entries()).find(
+    ([, item]) => item.mediaType === "application/x-dtbncx+xml"
+  );
+  let titles = new Map<string, string>();
+  for (const [item, isNcx] of [
+    [navItem, false],
+    [ncxItem?.[1], true],
+  ] as const) {
+    if (!item || titles.size) continue;
+    const tocPath = resolveZipPath(opfPath, item.href);
+    const tocEntry = zip.file(tocPath);
+    if (!tocEntry) continue;
+    titles = tocTitles(await tocEntry.async("text"), tocPath, isNcx);
+  }
+
   const spineIds = Array.from(
     opf.getElementsByTagNameNS("*", "itemref")
   )
@@ -197,8 +273,10 @@ async function parseEpub(
     if (!entry) continue;
     const extracted = extractTextBlocks(await entry.async("text"));
     const chapter = createChapter(
-      extracted.title || `第 ${chapters.length + 1} 章`,
-      extracted.paragraphs,
+      titles.get(itemPath) ||
+        extracted.title ||
+        `第 ${chapters.length + 1} 章`,
+      extracted.blocks,
       chapters.length
     );
     if (chapter && chapter.characterCount > 8) chapters.push(chapter);
