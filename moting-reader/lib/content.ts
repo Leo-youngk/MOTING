@@ -5,6 +5,8 @@ import type {
   Chapter,
   Paragraph,
   Sentence,
+  SpeechBlock,
+  SpeechSpan,
 } from "./types";
 
 const ACCENTS = ["#718091", "#85766b", "#788271", "#8b6e64", "#6f7d87"];
@@ -211,6 +213,66 @@ export function createBook(input: {
 
 export function flattenChapter(chapter: Chapter): Sentence[] {
   return chapter.paragraphs.flatMap((paragraph) => paragraph.sentences);
+}
+
+const MAX_SPEECH_BLOCK_LENGTH = 240;
+
+export function buildSpeechBlocks(chapter: Chapter): SpeechBlock[] {
+  const blocks: SpeechBlock[] = [];
+  let sentenceIndex = 0;
+
+  for (const paragraph of chapter.paragraphs) {
+    let text = "";
+    let spans: SpeechSpan[] = [];
+
+    const flush = () => {
+      if (spans.length && text.trim()) blocks.push({ text, spans });
+      text = "";
+      spans = [];
+    };
+
+    for (const sentence of paragraph.sentences) {
+      const speakable = sentence.speakableText || sentence.text;
+      if (text && text.length + speakable.length > MAX_SPEECH_BLOCK_LENGTH) {
+        flush();
+      }
+      const separator =
+        !text || /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
+      const start = text.length + separator.length;
+      text += separator + speakable;
+      spans.push({
+        sentenceId: sentence.id,
+        sentenceIndex,
+        start,
+        end: text.length,
+      });
+      sentenceIndex += 1;
+    }
+
+    flush();
+  }
+
+  return blocks;
+}
+
+export function sliceSpeechBlock(
+  block: SpeechBlock,
+  fromSentenceIndex: number
+): SpeechBlock {
+  const spanIndex = block.spans.findIndex(
+    (span) => span.sentenceIndex >= fromSentenceIndex
+  );
+  if (spanIndex <= 0) return block;
+
+  const offset = block.spans[spanIndex].start;
+  return {
+    text: block.text.slice(offset),
+    spans: block.spans.slice(spanIndex).map((span) => ({
+      ...span,
+      start: span.start - offset,
+      end: span.end - offset,
+    })),
+  };
 }
 
 export function findSentence(

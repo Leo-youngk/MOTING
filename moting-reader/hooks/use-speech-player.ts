@@ -1,12 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { flattenChapter, initialPosition, positionFor } from "../lib/content";
+import {
+  buildSpeechBlocks,
+  flattenChapter,
+  initialPosition,
+  positionFor,
+  sliceSpeechBlock,
+} from "../lib/content";
 import type {
   Book,
   BookPosition,
+  Chapter,
   ReaderSettings,
+  SpeechBlock,
   SpeechLocation,
+  SpeechSpan,
 } from "../lib/types";
 
 export type SleepMode = "off" | "15" | "30" | "45" | "chapter";
@@ -31,6 +40,39 @@ interface SpeechPlayerState {
   skipSentences: (delta: number) => void;
   changeChapter: (delta: number) => void;
   setSleepMode: (mode: SleepMode) => void;
+}
+
+const NATURAL_VOICE_PATTERN =
+  /natural|neural|premium|enhanced|online|siri|自然|在线/i;
+
+function voiceScore(voice: SpeechSynthesisVoice): number {
+  const lang = voice.lang.toLowerCase().replace(/_/g, "-");
+  let score = 0;
+  if (lang === "zh" || /^zh-(cn|hans|sg)/.test(lang)) score += 100;
+  else if (lang.startsWith("zh")) score += 60;
+  if (NATURAL_VOICE_PATTERN.test(voice.name)) score += 30;
+  return score;
+}
+
+const CJK_CHARS_PER_SECOND = 5.2;
+const LATIN_CHARS_PER_SECOND = 15;
+
+function estimateCharsPerSecond(text: string, rate: number): number {
+  const cjk = text.match(/[㐀-鿿]/g)?.length ?? 0;
+  const ratio = text.length ? cjk / text.length : 1;
+  return (
+    (ratio * CJK_CHARS_PER_SECOND + (1 - ratio) * LATIN_CHARS_PER_SECOND) *
+    Math.max(rate, 0.1)
+  );
+}
+
+function spanAt(spans: SpeechSpan[], charIndex: number): SpeechSpan {
+  let match = spans[0];
+  for (const span of spans) {
+    if (span.start <= charIndex) match = span;
+    else break;
+  }
+  return match;
 }
 
 function locationAfter(
@@ -84,6 +126,10 @@ export function useSpeechPlayer({
   const tokenRef = useRef(0);
   const sleepModeRef = useRef<SleepMode>("off");
   const sleepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const estimateRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const blocksCacheRef = useRef(new Map<string, SpeechBlock[]>());
+  const blockedVoicesRef = useRef(new Set<string>());
   const playAtRef = useRef<
     ((bookId: string, chapterIndex: number, sentenceIndex: number) => void) | null
   >(null);
@@ -106,11 +152,9 @@ export function useSpeechPlayer({
       const nextVoices = window.speechSynthesis
         .getVoices()
         .slice()
-        .sort((a, b) => {
-          const aChinese = /^zh/i.test(a.lang) ? 0 : 1;
-          const bChinese = /^zh/i.test(b.lang) ? 0 : 1;
-          return aChinese - bChinese || a.name.localeCompare(b.name);
-        });
+        .sort(
+          (a, b) => voiceScore(b) - voiceScore(a) || a.name.localeCompare(b.name)
+        );
       setVoices(nextVoices);
     };
     update();
@@ -120,14 +164,34 @@ export function useSpeechPlayer({
     };
   }, []);
 
+  const clearTimers = useCallback(() => {
+    if (keepAliveRef.current) {
+      clearInterval(keepAliveRef.current);
+      keepAliveRef.current = null;
+    }
+    if (estimateRef.current) {
+      clearInterval(estimateRef.current);
+      estimateRef.current = null;
+    }
+  }, []);
+
   const stop = useCallback(() => {
     tokenRef.current += 1;
     playingRef.current = false;
+    clearTimers();
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
     setIsPlaying(false);
     setIsPaused(false);
+  }, [clearTimers]);
+
+  const blocksFor = useCallback((chapter: Chapter): SpeechBlock[] => {
+    const cached = blocksCacheRef.current.get(chapter.id);
+    if (cached) return cached;
+    const blocks = buildSpeechBlocks(chapter);
+    blocksCacheRef.current.set(chapter.id, blocks);
+    return blocks;
   }, []);
 
   const playAt = useCallback(
@@ -149,50 +213,88 @@ export function useSpeechPlayer({
       }
 
       const chapter = book.chapters[chapterIndex];
-      const sentence = chapter && flattenChapter(chapter)[sentenceIndex];
-      if (!chapter || !sentence) {
+      const blocks = chapter ? blocksFor(chapter) : [];
+      if (!chapter || !blocks.length) {
         setError("当前章节没有可朗读内容");
         stop();
         return;
       }
 
+      const advanceChapter = () => {
+        if (chapterIndex + 1 >= book.chapters.length) {
+          stop();
+          return;
+        }
+        playAtRef.current?.(bookId, chapterIndex + 1, 0);
+      };
+
+      let blockIndex = blocks.findIndex(
+        (block) => block.spans[block.spans.length - 1].sentenceIndex >= sentenceIndex
+      );
+      if (blockIndex < 0) {
+        advanceChapter();
+        return;
+      }
+
+      let segment = sliceSpeechBlock(blocks[blockIndex], sentenceIndex);
+      while (!segment.text.trim() && blockIndex + 1 < blocks.length) {
+        blockIndex += 1;
+        segment = blocks[blockIndex];
+      }
+      if (!segment.text.trim()) {
+        advanceChapter();
+        return;
+      }
+
       tokenRef.current += 1;
       const token = tokenRef.current;
+      clearTimers();
       window.speechSynthesis.cancel();
       setError("");
 
-      const nextLocation: SpeechLocation = {
-        bookId,
-        chapterIndex,
-        sentenceIndex,
-        sentenceId: sentence.id,
+      const applySpan = (span: SpeechSpan) => {
+        if (token !== tokenRef.current) return;
+        if (locationRef.current?.sentenceId === span.sentenceId) return;
+        const nextLocation: SpeechLocation = {
+          bookId,
+          chapterIndex,
+          sentenceIndex: span.sentenceIndex,
+          sentenceId: span.sentenceId,
+        };
+        locationRef.current = nextLocation;
+        setLocation(nextLocation);
+        setCurrentSentenceId(span.sentenceId);
+        onProgressRef.current(
+          bookId,
+          positionFor(book, chapterIndex, span.sentenceIndex)
+        );
       };
-      locationRef.current = nextLocation;
-      setLocation(nextLocation);
-      setCurrentSentenceId(sentence.id);
-      const position = positionFor(book, chapterIndex, sentenceIndex);
-      onProgressRef.current(bookId, position);
 
-      const utterance = new SpeechSynthesisUtterance(
-        sentence.speakableText || sentence.text
+      applySpan(segment.spans[0]);
+
+      const utterance = new SpeechSynthesisUtterance(segment.text);
+      const usableVoices = voices.filter(
+        (voice) => !blockedVoicesRef.current.has(voice.voiceURI)
       );
       const selectedVoice =
-        voices.find(
+        usableVoices.find(
           (voice) => voice.voiceURI === settingsRef.current.voiceURI
         ) ??
-        voices.find((voice) => /^zh-(CN|Hans)/i.test(voice.lang)) ??
-        voices.find((voice) => /^zh/i.test(voice.lang));
+        usableVoices.find((voice) => voiceScore(voice) >= 100) ??
+        usableVoices.find((voice) => voiceScore(voice) >= 60);
       if (selectedVoice) {
         utterance.voice = selectedVoice;
         utterance.lang = selectedVoice.lang;
       } else {
-        utterance.lang = /[\u3400-\u9fff]/.test(sentence.text)
+        utterance.lang = /[㐀-鿿]/.test(segment.text)
           ? "zh-CN"
           : "en-US";
       }
       utterance.rate = settingsRef.current.speechRate;
       utterance.pitch = 1;
       utterance.volume = 1;
+
+      let boundarySeen = false;
 
       utterance.onstart = () => {
         if (token !== tokenRef.current) return;
@@ -201,40 +303,49 @@ export function useSpeechPlayer({
         setIsPaused(false);
       };
 
+      utterance.onboundary = (event) => {
+        if (token !== tokenRef.current) return;
+        boundarySeen = true;
+        if (estimateRef.current) {
+          clearInterval(estimateRef.current);
+          estimateRef.current = null;
+        }
+        applySpan(spanAt(segment.spans, event.charIndex));
+      };
+
       utterance.onend = () => {
         if (token !== tokenRef.current || !playingRef.current) return;
-        const latestBook = booksRef.current.find((item) => item.id === bookId);
-        if (!latestBook) {
-          stop();
-          return;
-        }
-        const currentChapterSentences = flattenChapter(
-          latestBook.chapters[chapterIndex]
-        );
-        const atChapterEnd =
-          sentenceIndex >= currentChapterSentences.length - 1;
+        clearTimers();
+        const lastSentenceIndex =
+          segment.spans[segment.spans.length - 1].sentenceIndex;
+        const atChapterEnd = lastSentenceIndex >= chapter.sentenceCount - 1;
         if (sleepModeRef.current === "chapter" && atChapterEnd) {
           stop();
           setSleepModeState("off");
           sleepModeRef.current = "off";
           return;
         }
-        const next = locationAfter(
-          latestBook,
-          chapterIndex,
-          sentenceIndex,
-          1
-        );
-        if (!next) {
-          stop();
+        if (atChapterEnd) {
+          advanceChapter();
           return;
         }
-        playAtRef.current?.(bookId, next.chapterIndex, next.sentenceIndex);
+        playAtRef.current?.(bookId, chapterIndex, lastSentenceIndex + 1);
       };
 
       utterance.onerror = (event) => {
         if (token !== tokenRef.current) return;
         if (event.error === "canceled" || event.error === "interrupted") return;
+        clearTimers();
+        // 在线神经音色断网时会报这几种错，把它拉黑后用本地音色重试一次，避免离线时完全不能听。
+        const recoverable =
+          event.error === "network" ||
+          event.error === "synthesis-failed" ||
+          event.error === "synthesis-unavailable";
+        if (recoverable && selectedVoice && !selectedVoice.localService) {
+          blockedVoicesRef.current.add(selectedVoice.voiceURI);
+          playAtRef.current?.(bookId, chapterIndex, sentenceIndex);
+          return;
+        }
         setError("系统朗读被中断，请重新播放");
         stop();
       };
@@ -243,8 +354,31 @@ export function useSpeechPlayer({
       setIsPlaying(true);
       setIsPaused(false);
       window.speechSynthesis.speak(utterance);
+
+      // Chrome 播放单条 utterance 约 15 秒后会静默截断，定期 pause/resume 可以让它继续念完整段。
+      keepAliveRef.current = setInterval(() => {
+        if (token !== tokenRef.current) return;
+        const synth = window.speechSynthesis;
+        if (synth.speaking && !synth.paused) {
+          synth.pause();
+          synth.resume();
+        }
+      }, 10000);
+
+      // iOS Safari 不派发 boundary 事件，用朗读速度估算高亮位置，等真实事件到达后立刻交还控制权。
+      const charsPerSecond = estimateCharsPerSecond(
+        segment.text,
+        utterance.rate
+      );
+      let elapsed = 0;
+      estimateRef.current = setInterval(() => {
+        if (token !== tokenRef.current || boundarySeen) return;
+        if (window.speechSynthesis.paused) return;
+        elapsed += 250;
+        applySpan(spanAt(segment.spans, (elapsed / 1000) * charsPerSecond));
+      }, 250);
     },
-    [stop, voices]
+    [blocksFor, clearTimers, stop, voices]
   );
 
   useEffect(() => {
@@ -340,6 +474,8 @@ export function useSpeechPlayer({
   useEffect(
     () => () => {
       if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
+      if (keepAliveRef.current) clearInterval(keepAliveRef.current);
+      if (estimateRef.current) clearInterval(estimateRef.current);
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }

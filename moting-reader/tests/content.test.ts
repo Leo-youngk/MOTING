@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildSpeechBlocks,
   chaptersFromPlainText,
   createBook,
   createChapter,
   movePosition,
   positionFor,
+  sliceSpeechBlock,
   splitIntoSentences,
   toSpeakableText,
 } from "../lib/content.ts";
@@ -37,6 +39,60 @@ test("识别章节并保留段落顺序", () => {
   assert.equal(chapters[0].title, "第一章 起点");
   assert.equal(chapters[0].sentenceCount, 2);
   assert.equal(chapters[1].title, "第二章 继续");
+});
+
+test("整段合成一条朗读块并记录每句偏移", () => {
+  const chapter = createChapter("第一章", ["甲。乙。", "丙。"], 0);
+  assert.ok(chapter);
+
+  const blocks = buildSpeechBlocks(chapter);
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0].text, "甲。乙。");
+  assert.deepEqual(
+    blocks[0].spans.map((span) => [span.sentenceIndex, span.start, span.end]),
+    [
+      [0, 0, 2],
+      [1, 2, 4],
+    ]
+  );
+  assert.equal(blocks[1].spans[0].sentenceIndex, 2);
+
+  for (const block of blocks) {
+    for (const span of block.spans) {
+      assert.equal(
+        block.text.slice(span.start, span.end),
+        chapter.paragraphs
+          .flatMap((paragraph) => paragraph.sentences)
+          [span.sentenceIndex].speakableText
+      );
+    }
+  }
+});
+
+test("从句子中途续播时重新对齐偏移", () => {
+  const chapter = createChapter("第一章", ["甲。乙。丙。"], 0);
+  assert.ok(chapter);
+
+  const block = buildSpeechBlocks(chapter)[0];
+  const sliced = sliceSpeechBlock(block, 1);
+
+  assert.equal(sliced.text, "乙。丙。");
+  assert.equal(sliced.spans[0].sentenceIndex, 1);
+  assert.equal(sliced.spans[0].start, 0);
+  assert.equal(sliced.text.slice(sliced.spans[1].start, sliced.spans[1].end), "丙。");
+});
+
+test("超长段落按句子边界切成多块", () => {
+  const long = Array.from({ length: 40 }, (_, index) => `第${index}句内容填充。`).join("");
+  const chapter = createChapter("第一章", [long], 0);
+  assert.ok(chapter);
+
+  const blocks = buildSpeechBlocks(chapter);
+  assert.ok(blocks.length >= 2);
+  assert.equal(
+    blocks.map((block) => block.text).join(""),
+    chapter.paragraphs[0].sentences.map((sentence) => sentence.speakableText).join("")
+  );
 });
 
 test("阅读位置能够跨章节移动并计算进度", () => {

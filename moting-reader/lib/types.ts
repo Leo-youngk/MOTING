@@ -90,6 +90,18 @@ export interface ImportProgress {
   percent: number;
 }
 
+export interface SpeechSpan {
+  sentenceId: string;
+  sentenceIndex: number;
+  start: number;
+  end: number;
+}
+
+export interface SpeechBlock {
+  text: string;
+  spans: SpeechSpan[];
+}
+
 export interface SpeechLocation {
   bookId: string;
   chapterIndex: number;
