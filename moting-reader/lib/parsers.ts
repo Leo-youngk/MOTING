@@ -7,19 +7,28 @@ import {
   chaptersFromPlainText,
   createBook,
   createChapter,
+  makeId,
   normalizeWhitespace,
 } from "./content";
 import type {
   BlockKind,
   Book,
   BookFormat,
+  BookImage,
   Chapter,
   ImportProgress,
 } from "./types";
 
 type ProgressCallback = (progress: ImportProgress) => void;
 
+/** 解析结果：插图不塞进 Book，避免整书对象被图片撑大。 */
+export interface ParsedBook {
+  book: Book;
+  images: BookImage[];
+}
+
 const MAX_FILE_SIZE = 80 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 24 * 1024 * 1024;
 
 function report(
   callback: ProgressCallback | undefined,
@@ -85,6 +94,24 @@ function blockKindOf(element: Element): { kind: BlockKind; level?: number } {
   return { kind: "text" };
 }
 
+/** 段落里的图排在文字前还是后，取决于它前面还有没有实际文字。 */
+function hasTextBefore(container: Element, image: Element): boolean {
+  const walker = container.ownerDocument.createTreeWalker(
+    container,
+    NodeFilter.SHOW_TEXT
+  );
+  let node = walker.nextNode();
+  while (node) {
+    if (node.textContent?.trim()) {
+      return Boolean(
+        image.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING
+      );
+    }
+    node = walker.nextNode();
+  }
+  return false;
+}
+
 function extractTextBlocks(raw: string): {
   title: string;
   blocks: BlockInput[];
@@ -96,25 +123,59 @@ function extractTextBlocks(raw: string): {
     )
     .forEach((node) => node.remove());
 
+  // 图片一起查出来是为了拿到文档顺序，插图才能落回它原本所在的位置。
+  const candidates = Array.from(
+    document.querySelectorAll(`${BLOCK_SELECTOR},img`)
+  );
   // 只取不再包含其他块元素的"叶子"，否则 blockquote>p 这类嵌套会重复出一份正文。
-  const leaves = Array.from(document.querySelectorAll(BLOCK_SELECTOR)).filter(
-    (element) => !element.querySelector(BLOCK_SELECTOR)
+  const leaves = new Set(
+    candidates.filter(
+      (element) =>
+        element.tagName.toLowerCase() !== "img" &&
+        !element.querySelector(BLOCK_SELECTOR)
+    )
   );
 
   const titleElement =
-    leaves.find((element) => /^h[1-3]$/i.test(element.tagName)) ?? null;
+    Array.from(leaves).find((element) => /^h[1-3]$/i.test(element.tagName)) ??
+    null;
   const title = normalizeWhitespace(
     titleElement?.textContent ?? document.querySelector("title")?.textContent ?? ""
   );
 
   const blocks: BlockInput[] = [];
-  for (const element of leaves) {
+  let lastLeaf: Element | null = null;
+  let lastLeafIndex = 0;
+
+  for (const element of candidates) {
+    if (element.tagName.toLowerCase() === "img") {
+      const source = element.getAttribute("src");
+      if (!source) continue;
+      // 此处先塞原始 src，等能访问压缩包时再换成图片库里的 id。
+      const block: BlockInput = {
+        kind: "image",
+        text: "",
+        imageId: source,
+        alt: element.getAttribute("alt") ?? "",
+      };
+      const owner = element.closest(BLOCK_SELECTOR);
+      if (owner && owner === lastLeaf && !hasTextBefore(owner, element)) {
+        blocks.splice(lastLeafIndex, 0, block);
+      } else {
+        blocks.push(block);
+      }
+      continue;
+    }
+    if (!leaves.has(element)) continue;
     // 标题已经作为章节名单独展示，正文里再出一遍就成了重复。
     if (element === titleElement) continue;
     const text = normalizeWhitespace(element.textContent ?? "");
     if (!text || text.length < 2) continue;
     if (/^\d{1,4}$/.test(text)) continue;
-    if (blocks.length && blocks[blocks.length - 1].text === text) continue;
+    const previous = blocks[blocks.length - 1];
+    if (previous && previous.text === text) continue;
+    lastLeaf = element;
+    lastLeafIndex = blocks.length;
     blocks.push({ text, ...blockKindOf(element) });
   }
 
@@ -170,7 +231,7 @@ async function blobToDataUrl(blob: Blob): Promise<string> {
 async function parseEpub(
   file: File,
   onProgress?: ProgressCallback
-): Promise<Book> {
+): Promise<ParsedBook> {
   report(onProgress, "metadata", "正在读取 EPUB 结构", 12);
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
   const container = zip.file("META-INF/container.xml");
@@ -254,6 +315,47 @@ async function parseEpub(
     .map((item) => item.getAttribute("idref"))
     .filter((id): id is string => Boolean(id));
 
+  const mediaTypes = new Map(
+    Array.from(manifest.values()).map((item) => [
+      resolveZipPath(opfPath, item.href),
+      item.mediaType,
+    ])
+  );
+  const images: BookImage[] = [];
+  const assetIds = new Map<string, string>();
+  let imageBytes = 0;
+
+  /** 把块里的原始 src 换成图片库 id；取不到的块留空 id，后面会被丢弃。 */
+  async function resolveImages(blocks: BlockInput[], basePath: string) {
+    for (const block of blocks) {
+      if (block.kind !== "image" || !block.imageId) continue;
+      if (/^(?:https?:|data:)/i.test(block.imageId)) {
+        block.imageId = undefined;
+        continue;
+      }
+      const path = resolveZipPath(basePath, block.imageId);
+      const known = assetIds.get(path);
+      if (known) {
+        block.imageId = known;
+        continue;
+      }
+      const entry = imageBytes < MAX_IMAGE_BYTES ? zip.file(path) : null;
+      if (!entry) {
+        block.imageId = undefined;
+        continue;
+      }
+      const raw = await entry.async("blob");
+      const blob = new Blob([raw], {
+        type: mediaTypes.get(path) || raw.type || "image/jpeg",
+      });
+      imageBytes += blob.size;
+      const assetId = makeId("image");
+      assetIds.set(path, assetId);
+      images.push({ id: assetId, bookId: "", blob });
+      block.imageId = assetId;
+    }
+  }
+
   const chapters: Chapter[] = [];
   for (let index = 0; index < spineIds.length; index++) {
     const item = manifest.get(spineIds[index]);
@@ -272,6 +374,7 @@ async function parseEpub(
     const entry = zip.file(itemPath);
     if (!entry) continue;
     const extracted = extractTextBlocks(await entry.async("text"));
+    await resolveImages(extracted.blocks, itemPath);
     const chapter = createChapter(
       titles.get(itemPath) ||
         extracted.title ||
@@ -291,7 +394,7 @@ async function parseEpub(
 
   if (!chapters.length) throw new Error("EPUB 中没有识别到可阅读正文");
 
-  return createBook({
+  const book = createBook({
     title,
     author,
     format: "epub",
@@ -299,6 +402,20 @@ async function parseEpub(
     fileName: file.name,
     coverDataUrl,
   });
+  const used = new Set(
+    chapters.flatMap((chapter) =>
+      chapter.paragraphs
+        .map((paragraph) => paragraph.imageId)
+        .filter((id): id is string => Boolean(id))
+    )
+  );
+
+  return {
+    book,
+    images: images
+      .filter((image) => used.has(image.id))
+      .map((image) => ({ ...image, bookId: book.id })),
+  };
 }
 
 function mergePdfPageLines(items: unknown[]): string[] {
@@ -436,7 +553,7 @@ async function parsePlainText(
 export async function parseBookFile(
   file: File,
   onProgress?: ProgressCallback
-): Promise<Book> {
+): Promise<ParsedBook> {
   if (file.size > MAX_FILE_SIZE) {
     throw new Error("文件超过 80 MB，请先压缩或拆分后再导入");
   }
@@ -445,11 +562,15 @@ export async function parseBookFile(
   report(onProgress, "reading", "正在读取文件", 4);
 
   if (extension === "epub") return parseEpub(file, onProgress);
-  if (extension === "pdf") return parsePdf(file, onProgress);
-  if (extension === "txt")
-    return parsePlainText(file, "txt", onProgress);
-  if (extension === "md" || extension === "markdown")
-    return parsePlainText(file, "md", onProgress);
+  if (extension === "pdf") {
+    return { book: await parsePdf(file, onProgress), images: [] };
+  }
+  if (extension === "txt") {
+    return { book: await parsePlainText(file, "txt", onProgress), images: [] };
+  }
+  if (extension === "md" || extension === "markdown") {
+    return { book: await parsePlainText(file, "md", onProgress), images: [] };
+  }
 
   throw new Error("目前支持 EPUB、文字型 PDF、TXT 和 Markdown");
 }

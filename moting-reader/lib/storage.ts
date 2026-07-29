@@ -1,11 +1,12 @@
-import type { Book, BookNote, ReaderSettings } from "./types";
+import type { Book, BookImage, BookNote, ReaderSettings } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
 
 const DB_NAME = "moting-reader";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const BOOK_STORE = "books";
 const NOTE_STORE = "notes";
 const SETTINGS_STORE = "settings";
+const IMAGE_STORE = "images";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -47,8 +48,20 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(SETTINGS_STORE)) {
         db.createObjectStore(SETTINGS_STORE);
       }
+      if (!db.objectStoreNames.contains(IMAGE_STORE)) {
+        const images = db.createObjectStore(IMAGE_STORE, { keyPath: "id" });
+        images.createIndex("bookId", "bookId", { unique: false });
+      }
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      // 别的页面要升级数据库时让出连接，否则它会一直卡在 blocked。
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     request.onerror = () =>
       reject(request.error ?? new Error("无法打开浏览器本地书库"));
     request.onblocked = () =>
@@ -74,23 +87,47 @@ export async function saveBook(book: Book): Promise<void> {
   await transactionDone(transaction);
 }
 
-export async function removeBook(bookId: string): Promise<void> {
-  const db = await openDatabase();
-  const transaction = db.transaction(
-    [BOOK_STORE, NOTE_STORE],
-    "readwrite"
-  );
-  transaction.objectStore(BOOK_STORE).delete(bookId);
-  const noteStore = transaction.objectStore(NOTE_STORE);
-  const index = noteStore.index("bookId");
-  const request = index.openCursor(IDBKeyRange.only(bookId));
+function deleteByBookId(store: IDBObjectStore, bookId: string): void {
+  const request = store.index("bookId").openCursor(IDBKeyRange.only(bookId));
   request.onsuccess = () => {
     const cursor = request.result;
     if (!cursor) return;
     cursor.delete();
     cursor.continue();
   };
+}
+
+export async function removeBook(bookId: string): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(
+    [BOOK_STORE, NOTE_STORE, IMAGE_STORE],
+    "readwrite"
+  );
+  transaction.objectStore(BOOK_STORE).delete(bookId);
+  deleteByBookId(transaction.objectStore(NOTE_STORE), bookId);
+  deleteByBookId(transaction.objectStore(IMAGE_STORE), bookId);
   await transactionDone(transaction);
+}
+
+export async function saveBookImages(images: BookImage[]): Promise<void> {
+  if (!images.length) return;
+  const db = await openDatabase();
+  const transaction = db.transaction(IMAGE_STORE, "readwrite");
+  const store = transaction.objectStore(IMAGE_STORE);
+  for (const image of images) store.put(image);
+  await transactionDone(transaction);
+}
+
+export async function getBookImage(
+  imageId: string
+): Promise<BookImage | undefined> {
+  const db = await openDatabase();
+  const transaction = db.transaction(IMAGE_STORE, "readonly");
+  return requestToPromise(
+    transaction.objectStore(IMAGE_STORE).get(imageId) as IDBRequest<
+      BookImage | undefined
+    >
+  );
 }
 
 export async function getAllNotes(): Promise<BookNote[]> {
@@ -137,11 +174,12 @@ export async function saveSettings(
 export async function clearLibrary(): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(
-    [BOOK_STORE, NOTE_STORE, SETTINGS_STORE],
+    [BOOK_STORE, NOTE_STORE, SETTINGS_STORE, IMAGE_STORE],
     "readwrite"
   );
   transaction.objectStore(BOOK_STORE).clear();
   transaction.objectStore(NOTE_STORE).clear();
   transaction.objectStore(SETTINGS_STORE).clear();
+  transaction.objectStore(IMAGE_STORE).clear();
   await transactionDone(transaction);
 }

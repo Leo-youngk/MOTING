@@ -15,6 +15,8 @@ export interface BlockInput {
   text: string;
   kind?: BlockKind;
   level?: number;
+  imageId?: string;
+  alt?: string;
 }
 
 const ACCENTS = ["#718091", "#85766b", "#788271", "#8b6e64", "#6f7d87"];
@@ -75,6 +77,18 @@ export function createParagraph(
   block: BlockInput,
   order: number
 ): Paragraph | null {
+  if (block.kind === "image") {
+    if (!block.imageId) return null;
+    return {
+      id: makeId("paragraph"),
+      order,
+      kind: "image",
+      imageId: block.imageId,
+      alt: normalizeWhitespace(block.alt ?? ""),
+      sentences: [],
+    };
+  }
+
   const sentenceTexts = splitIntoSentences(block.text);
   if (!sentenceTexts.length) return null;
 
@@ -106,9 +120,10 @@ export function createChapter(
     .map((block, paragraphOrder) => createParagraph(block, paragraphOrder))
     .filter((paragraph): paragraph is Paragraph => Boolean(paragraph));
 
-  if (!paragraphs.length) return null;
-
   const sentences = paragraphs.flatMap((paragraph) => paragraph.sentences);
+  // 阅读位置全靠句子下标定位，没有句子的纯插图页不能当成一章。
+  if (!sentences.length) return null;
+
   return {
     id: makeId("chapter"),
     title: normalizeWhitespace(title) || `第 ${order + 1} 章`,

@@ -17,7 +17,7 @@ export interface Sentence {
 }
 
 /** 正文里的块级结构。解析时保留，渲染和朗读都按它区分对待。 */
-export type BlockKind = "text" | "heading" | "quote" | "list";
+export type BlockKind = "text" | "heading" | "quote" | "list" | "image";
 
 export interface Paragraph {
   id: string;
@@ -25,7 +25,18 @@ export interface Paragraph {
   kind: BlockKind;
   /** 仅 heading 使用，1-6，决定渲染出的标题层级。 */
   level?: number;
+  /** 仅 image 使用，指向图片库里的一条记录。 */
+  imageId?: string;
+  /** 仅 image 使用，替代文本，不进朗读。 */
+  alt?: string;
   sentences: Sentence[];
+}
+
+/** 插图单独存一张表：书本身每次开机全量读出来，图片则按需取。 */
+export interface BookImage {
+  id: string;
+  bookId: string;
+  blob: Blob;
 }
 
 export interface Chapter {

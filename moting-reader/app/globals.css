@@ -1147,6 +1147,17 @@ input[type="range"] {
   color: var(--reader-muted);
 }
 
+.reader-article .reader-block.is-image {
+  margin: 1.8em 0;
+  text-align: center;
+}
+
+.reader-article .reader-block.is-image img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
 .reader-article .reader-block.is-list {
   padding-left: 1.4em;
   text-indent: -1.4em;

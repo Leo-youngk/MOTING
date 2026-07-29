@@ -77,6 +77,36 @@ test("正文块默认是 text，标题块夹带层级", () => {
   assert.equal(chapter.paragraphs[0].level, undefined);
 });
 
+test("插图成块但不进句子流，缺图源的插图直接丢掉", () => {
+  const chapter = createChapter(
+    "第一章",
+    [
+      { text: "正文一句。" },
+      { kind: "image", text: "", imageId: "image-1", alt: "一张插图" },
+      { kind: "image", text: "" },
+      { text: "正文二句。" },
+    ],
+    0
+  );
+  assert.ok(chapter);
+
+  assert.deepEqual(
+    chapter.paragraphs.map((paragraph) => paragraph.kind),
+    ["text", "image", "text"]
+  );
+  assert.equal(chapter.paragraphs[1].alt, "一张插图");
+  assert.equal(chapter.paragraphs[1].sentences.length, 0);
+  assert.equal(chapter.sentenceCount, 2);
+  assert.equal(buildSpeechBlocks(chapter).length, 2);
+});
+
+test("只有插图没有正文时不算一章", () => {
+  assert.equal(
+    createChapter("插图页", [{ kind: "image", text: "", imageId: "image-1" }], 0),
+    null
+  );
+});
+
 test("整段合成一条朗读块并记录每句偏移", () => {
   const chapter = createChapter("第一章", [{ text: "甲。乙。" }, { text: "丙。" }], 0);
   assert.ok(chapter);

@@ -54,10 +54,12 @@ import {
   clearLibrary,
   getAllBooks,
   getAllNotes,
+  getBookImage,
   getSettings,
   removeBook,
   removeNote,
   saveBook,
+  saveBookImages,
   saveNote,
   saveSettings,
 } from "../lib/storage";
@@ -792,6 +794,31 @@ function SettingsScreen({
 
 const HEADING_TAGS = ["h2", "h2", "h3", "h4", "h5", "h6"] as const;
 
+function ReaderImage({ imageId, alt }: { imageId: string; alt: string }) {
+  const [url, setUrl] = useState("");
+
+  useEffect(() => {
+    let objectUrl = "";
+    getBookImage(imageId)
+      .then((image) => {
+        if (!image) return;
+        objectUrl = URL.createObjectURL(image.blob);
+        setUrl(objectUrl);
+      })
+      .catch(() => undefined);
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [imageId]);
+
+  if (!url) return null;
+  return (
+    <figure className="reader-block is-image">
+      <img src={url} alt={alt} loading="lazy" />
+    </figure>
+  );
+}
+
 function ReaderScreen({
   book,
   settings,
@@ -965,6 +992,16 @@ function ReaderScreen({
         </div>
 
         {chapter?.paragraphs.map((paragraph) => {
+          if (paragraph.kind === "image") {
+            return (
+              <ReaderImage
+                key={paragraph.id}
+                imageId={paragraph.imageId ?? ""}
+                alt={paragraph.alt ?? ""}
+              />
+            );
+          }
+
           const sentenceSpans = paragraph.sentences.map((sentence) => (
             <span
               key={sentence.id}
@@ -1676,12 +1713,13 @@ export default function MotingApp() {
         percent: 1,
       });
       try {
-        const book = await parseBookFile(file, setImportProgress);
+        const { book, images } = await parseBookFile(file, setImportProgress);
         setImportProgress({
           stage: "saving",
           label: "正在保存到本地书架",
           percent: 94,
         });
+        await saveBookImages(images);
         await saveBook(book);
         setBooks((current) => [book, ...current]);
         setImportProgress({
