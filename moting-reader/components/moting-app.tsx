@@ -1833,9 +1833,25 @@ export default function MotingApp() {
       });
 
     // 开发时不注册：离线外壳按缓存优先取同源资源，而 dev 下的 URL 不带哈希，
-    // 改完样式和脚本会一直读到旧版本。
-    if ("serviceWorker" in navigator && !import.meta.env.DEV) {
-      navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    // 改完样式和脚本会一直读到旧版本。早期 dev 注册过的 SW 还要主动注销并清缓存，
+    // 否则它会把旧模块一直供下去，刷新也没用。
+    if ("serviceWorker" in navigator) {
+      if (import.meta.env.DEV) {
+        navigator.serviceWorker
+          .getRegistrations()
+          .then((registrations) =>
+            registrations.forEach((registration) => registration.unregister())
+          )
+          .catch(() => undefined);
+        if ("caches" in window) {
+          window.caches
+            .keys()
+            .then((keys) => keys.forEach((key) => window.caches.delete(key)))
+            .catch(() => undefined);
+        }
+      } else {
+        navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      }
     }
     return () => {
       cancelled = true;
