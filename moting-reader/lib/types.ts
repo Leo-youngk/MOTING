@@ -91,12 +91,16 @@ export interface BookNote {
 
 export type ReaderTheme = "paper" | "white" | "night";
 
+/** scroll = 上下滑动连续阅读，page = 左右翻页分页阅读。 */
+export type ReadingMode = "scroll" | "page";
+
 export interface ReaderSettings {
   fontSize: number;
   lineHeight: number;
   contentWidth: number;
   fontFamily: "serif" | "sans";
   theme: ReaderTheme;
+  readingMode: ReadingMode;
   speechRate: number;
   voiceURI: string;
 }
@@ -146,6 +150,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   contentWidth: 720,
   fontFamily: "serif",
   theme: "paper",
+  readingMode: "scroll",
   speechRate: 1,
   voiceURI: "",
 };

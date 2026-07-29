@@ -32,9 +32,11 @@ import {
   type ChangeEvent,
   type CSSProperties,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -847,6 +849,16 @@ function ReaderScreen({
   const [showSettings, setShowSettings] = useState(false);
   const articleRef = useRef<HTMLElement>(null);
   const savedSentenceRef = useRef(initial.sentenceId);
+  const paged = settings.readingMode === "page";
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageCount, setPageCount] = useState(1);
+  const [pageStep, setPageStep] = useState(0);
+  // 连按翻页时 state 还没重渲染，只能靠 ref 记住已经翻到第几页。
+  const pageIndexRef = useRef(0);
+  const goToPage = (next: number) => {
+    pageIndexRef.current = next;
+    setPageIndex(next);
+  };
   const chapter = book.chapters[chapterIndex];
   const sentences = useMemo(
     () => (chapter ? flattenChapter(chapter) : []),
@@ -858,7 +870,65 @@ function ReaderScreen({
     return map;
   }, [sentences]);
 
+  // 进入章节时要落到哪一页：句子 id、章末，或者不动。
+  const restoreRef = useRef<string | "last" | null>(
+    book.readingPosition?.sentenceId ?? null
+  );
+
+  useLayoutEffect(() => {
+    const article = articleRef.current;
+    if (!paged || !article) {
+      // 切回滚动模式要把分页时写进去的栏宽抹掉，否则正文还留在多栏容器里。
+      article?.style.removeProperty("column-width");
+      setPageStep(0);
+      setPageCount(1);
+      return;
+    }
+
+    const measure = () => {
+      const width = article.clientWidth;
+      if (!width) return;
+      // 每一栏正好一页宽，多出来的内容就横向溢出成后面几页。
+      article.style.columnWidth = `${width}px`;
+      const gap = Number.parseFloat(getComputedStyle(article).columnGap) || 0;
+      const step = width + gap;
+      const count = Math.max(1, Math.round((article.scrollWidth + gap) / step));
+      setPageStep(step);
+      setPageCount(count);
+
+      // 没有指定落点时锚回当前这句，这样改字号、转屏之后还停在原处。
+      const restore = restoreRef.current ?? savedSentenceRef.current;
+      restoreRef.current = null;
+      if (restore === "last") {
+        goToPage(count - 1);
+        return;
+      }
+      const target = article.querySelector<HTMLElement>(
+        `[data-sentence-id="${restore}"]`
+      );
+      const offset = target
+        ? target.getBoundingClientRect().left -
+          article.getBoundingClientRect().left
+        : pageIndexRef.current * step;
+      goToPage(Math.max(0, Math.min(count - 1, Math.round(offset / step))));
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(article);
+    return () => observer.disconnect();
+  }, [
+    paged,
+    chapterIndex,
+    book.id,
+    settings.fontSize,
+    settings.lineHeight,
+    settings.fontFamily,
+    settings.contentWidth,
+  ]);
+
   useEffect(() => {
+    if (paged) return;
     const targetId = book.readingPosition?.sentenceId;
     if (!targetId) return;
     const timer = setTimeout(() => {
@@ -869,9 +939,30 @@ function ReaderScreen({
     return () => clearTimeout(timer);
     // Only restore when entering a chapter, not after each persisted update.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [book.id, chapterIndex]);
+  }, [book.id, chapterIndex, paged]);
+
+  // 分页模式下没有滚动事件，进度改从当前页上的第一句话推出来。
+  useEffect(() => {
+    const article = articleRef.current;
+    if (!paged || !article) return;
+    const timer = setTimeout(() => {
+      // 正文整体被平移过，当前页的左边界要把平移量加回去才算得对。
+      const left =
+        article.getBoundingClientRect().left + pageIndex * pageStep;
+      const target = Array.from(
+        article.querySelectorAll<HTMLElement>("[data-sentence-id]")
+      ).find((element) => element.getBoundingClientRect().right > left + 1);
+      const id = target?.dataset.sentenceId;
+      const index = Number(target?.dataset.sentenceIndex);
+      if (!id || Number.isNaN(index) || savedSentenceRef.current === id) return;
+      savedSentenceRef.current = id;
+      onProgress(positionFor(book, chapterIndex, index));
+    }, 320);
+    return () => clearTimeout(timer);
+  }, [paged, pageIndex, pageStep, pageCount, book, chapterIndex, onProgress]);
 
   useEffect(() => {
+    if (paged) return;
     if (!articleRef.current || !("IntersectionObserver" in window)) return;
     let pending: ReturnType<typeof setTimeout> | null = null;
     const observer = new IntersectionObserver(
@@ -902,7 +993,7 @@ function ReaderScreen({
       if (pending) clearTimeout(pending);
       observer.disconnect();
     };
-  }, [book, chapterIndex, onProgress]);
+  }, [book, chapterIndex, onProgress, paged]);
 
   const chooseSentence = (sentenceId: string, sentenceIndex: number) => {
     setSelectedSentenceId(sentenceId);
@@ -912,6 +1003,11 @@ function ReaderScreen({
   };
 
   const handleArticleClick = (event: MouseEvent<HTMLElement>) => {
+    // 刚翻过页就别再顺手把那一下当成选句子。
+    if (turnedRef.current) {
+      turnedRef.current = false;
+      return;
+    }
     // 划词时不要改选句子，否则刚拉出来的选区会被重新渲染打断。
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed) return;
@@ -925,14 +1021,73 @@ function ReaderScreen({
     chooseSentence(sentenceId, sentenceIndex);
   };
 
-  const changeChapter = (nextIndex: number) => {
+  const changeChapter = (nextIndex: number, landing: "first" | "last" = "first") => {
     const safe = Math.max(0, Math.min(book.chapters.length - 1, nextIndex));
     setChapterIndex(safe);
     const position = positionFor(book, safe, 0);
     setSelectedSentenceId(position.sentenceId);
     savedSentenceRef.current = position.sentenceId;
     onProgress(position);
+    restoreRef.current = landing === "last" ? "last" : null;
+    goToPage(0);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const turnPage = (delta: number) => {
+    const next = pageIndexRef.current + delta;
+    if (next < 0) {
+      if (chapterIndex > 0) changeChapter(chapterIndex - 1, "last");
+      return;
+    }
+    if (next >= pageCount) {
+      if (chapterIndex < book.chapters.length - 1) changeChapter(chapterIndex + 1);
+      return;
+    }
+    goToPage(next);
+  };
+
+  useEffect(() => {
+    if (!paged) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === "ArrowRight" || event.key === "PageDown") turnPage(1);
+      else if (event.key === "ArrowLeft" || event.key === "PageUp") turnPage(-1);
+      else return;
+      event.preventDefault();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  const swipeRef = useRef<{ x: number; y: number } | null>(null);
+  const turnedRef = useRef(false);
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    swipeRef.current = { x: event.clientX, y: event.clientY };
+  };
+
+  const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = swipeRef.current;
+    swipeRef.current = null;
+    if (!paged || !start) return;
+    const dx = event.clientX - start.x;
+    const dy = event.clientY - start.y;
+    if (Math.abs(dx) > 44 && Math.abs(dx) > Math.abs(dy)) {
+      turnedRef.current = true;
+      turnPage(dx < 0 ? 1 : -1);
+      return;
+    }
+    // 版心以外的留白整片都用来翻页，版心里只在左右各留两成，中间照旧点句子。
+    // 比例得按版心算：窗口宽的时候版心只占中间一条，拿窗口宽度算会把正文首字也吞进翻页区。
+    const article = articleRef.current;
+    if (article && Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+      const pageLeft =
+        article.getBoundingClientRect().left + pageIndex * pageStep;
+      const ratio = (event.clientX - pageLeft) / article.clientWidth;
+      if (ratio >= 0.2 && ratio <= 0.8) return;
+      turnedRef.current = true;
+      turnPage(ratio < 0.2 ? -1 : 1);
+    }
   };
 
   const selectedIndex = sentences.findIndex(
@@ -947,7 +1102,12 @@ function ReaderScreen({
   } as CSSProperties;
 
   return (
-    <div className={`reader-shell reader-theme--${settings.theme}`} style={readerStyle}>
+    <div
+      className={`reader-shell reader-theme--${settings.theme} ${
+        paged ? "is-paged" : "is-scroll"
+      }`}
+      style={readerStyle}
+    >
       <header className="reader-header">
         <button
           type="button"
@@ -975,13 +1135,23 @@ function ReaderScreen({
         </button>
       </header>
 
-      <article
-        ref={articleRef}
-        className={`reader-article ${
-          settings.fontFamily === "serif" ? "is-serif" : "is-sans"
-        }`}
-        onClick={handleArticleClick}
+      <div
+        className="reader-viewport"
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
       >
+        <article
+          ref={articleRef}
+          className={`reader-article ${
+            settings.fontFamily === "serif" ? "is-serif" : "is-sans"
+          }`}
+          style={
+            paged
+              ? { transform: `translateX(${-pageIndex * pageStep}px)` }
+              : undefined
+          }
+          onClick={handleArticleClick}
+        >
         <div className="reader-title">
           <span>
             {String(chapterIndex + 1).padStart(2, "0")} /{" "}
@@ -1043,26 +1213,38 @@ function ReaderScreen({
           );
         })}
 
-        <div className="reader-chapter-nav">
-          <button
-            type="button"
-            disabled={chapterIndex === 0}
-            onClick={() => changeChapter(chapterIndex - 1)}
-          >
-            <ChevronLeft size={18} />
-            上一章
-          </button>
-          <span>{book.readingPosition?.percent ?? 0}%</span>
-          <button
-            type="button"
-            disabled={chapterIndex >= book.chapters.length - 1}
-            onClick={() => changeChapter(chapterIndex + 1)}
-          >
-            下一章
-            <ChevronRight size={18} />
-          </button>
+        {paged ? null : (
+          <div className="reader-chapter-nav">
+            <button
+              type="button"
+              disabled={chapterIndex === 0}
+              onClick={() => changeChapter(chapterIndex - 1)}
+            >
+              <ChevronLeft size={18} />
+              上一章
+            </button>
+            <span>{book.readingPosition?.percent ?? 0}%</span>
+            <button
+              type="button"
+              disabled={chapterIndex >= book.chapters.length - 1}
+              onClick={() => changeChapter(chapterIndex + 1)}
+            >
+              下一章
+              <ChevronRight size={18} />
+            </button>
+          </div>
+        )}
+        </article>
+      </div>
+
+      {paged ? (
+        <div className="reader-pager">
+          <span>{chapter?.title}</span>
+          <span>
+            {pageIndex + 1} / {pageCount}
+          </span>
         </div>
-      </article>
+      ) : null}
 
       {selected ? (
         <div className="reader-selection-bar">
@@ -1163,6 +1345,20 @@ function ReaderScreen({
               />
               <strong>{settings.lineHeight.toFixed(1)}</strong>
             </label>
+            <div className="segmented-control">
+              {(["scroll", "page"] as const).map((mode) => (
+                <button
+                  type="button"
+                  key={mode}
+                  className={settings.readingMode === mode ? "is-active" : ""}
+                  onClick={() =>
+                    onSettingsChange({ ...settings, readingMode: mode })
+                  }
+                >
+                  {mode === "scroll" ? "上下滑动" : "左右翻页"}
+                </button>
+              ))}
+            </div>
             <div className="segmented-control">
               {(["paper", "white", "night"] as const).map((theme) => (
                 <button

@@ -19,9 +19,11 @@
   --font-sans:
     -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC",
     "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  /* 拉丁字体排在前面：它没有汉字，中文会自动落到后面的宋体上，
+     这样中英混排时两种字形各自用对的那一套。 */
   --font-serif:
-    "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC",
-    Georgia, serif;
+    Georgia, "Songti SC", "STSong", "Noto Serif CJK SC",
+    "Source Han Serif SC", "Noto Serif SC", SimSun, serif;
 }
 
 * {
@@ -1076,6 +1078,57 @@ input[type="range"] {
   padding: 54px 0 145px;
 }
 
+/* 左右翻页：正文用多栏排出来，一栏正好一页，横向平移切页。
+   栏宽由脚本按实际宽度写进 column-width，纯 CSS 没法引用这个长度。 */
+.reader-shell.is-paged {
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.reader-shell.is-paged .reader-viewport {
+  height: calc(100dvh - 62px - env(safe-area-inset-top) - 46px);
+  overflow: hidden;
+  /* 横向手势归翻页，别让浏览器抢去做后退。 */
+  touch-action: pan-y;
+}
+
+.reader-shell.is-paged .reader-article {
+  height: 100%;
+  padding: 26px 0 0;
+  column-fill: auto;
+  column-gap: 48px;
+  transition: transform 260ms cubic-bezier(0.32, 0.72, 0, 1);
+  will-change: transform;
+}
+
+.reader-shell.is-paged .reader-title {
+  margin-bottom: 28px;
+}
+
+.reader-pager {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  height: calc(46px + env(safe-area-inset-bottom));
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 22px env(safe-area-inset-bottom);
+  border-top: 1px solid var(--reader-line);
+  background: var(--reader-background);
+  color: var(--reader-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
+.reader-pager span:first-child {
+  overflow: hidden;
+  max-width: 60%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .reader-article.is-serif {
   font-family: var(--font-serif);
 }
@@ -1113,16 +1166,25 @@ input[type="range"] {
 }
 
 .reader-article .reader-block {
-  margin: 0 0 1.25em;
+  margin: 0 0 1em;
   font-size: var(--reader-font-size);
   line-height: var(--reader-line-height);
+  /* 中文段落靠首行缩进分段，这是纸书的默认写法。 */
+  text-indent: 2em;
   text-align: justify;
+  /* 行首行尾的全角标点压掉多余的半个字宽，中文排版最明显的一处细节。 */
+  text-spacing-trim: trim-start;
+  /* 中英之间自动留出四分之一空，省得手动敲空格。 */
+  text-autospace: normal;
+  /* 不让段末单独掉下来一个字。 */
+  text-wrap: pretty;
 }
 
 .reader-article .reader-block.is-heading {
   margin: 2em 0 0.9em;
   font-weight: 600;
   line-height: 1.5;
+  text-indent: 0;
   text-align: initial;
 }
 
@@ -1145,10 +1207,12 @@ input[type="range"] {
   padding-left: 1.1em;
   border-left: 2px solid var(--reader-line);
   color: var(--reader-muted);
+  text-indent: 0;
 }
 
 .reader-article .reader-block.is-image {
   margin: 1.8em 0;
+  text-indent: 0;
   text-align: center;
 }
 
