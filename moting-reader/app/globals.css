@@ -1119,25 +1119,23 @@ input[type="range"] {
   text-align: justify;
 }
 
-.reader-article > p > button {
-  display: inline;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: inherit;
+.reader-article > p > span {
   border-radius: 3px;
+  /* 句子换行时每个行片段各自成形，否则高亮会连成一条横跨整行的色块。 */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  -webkit-tap-highlight-color: transparent;
   transition:
     background 150ms ease,
     box-shadow 150ms ease;
 }
 
-.reader-article > p > button.is-selected {
+.reader-article > p > span.is-selected {
   box-shadow: inset 0 -0.16em rgb(113 128 145 / 22%);
 }
 
-.reader-article > p > button.is-speaking {
+/* 用 box-shadow 而不是 padding 撑开朗读高亮，避免逐句推进时正文抖动。 */
+.reader-article > p > span.is-speaking {
   background: rgb(113 128 145 / 17%);
   box-shadow: 0 0 0 3px rgb(113 128 145 / 17%);
 }

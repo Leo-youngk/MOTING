@@ -31,9 +31,11 @@ import {
 import {
   type ChangeEvent,
   type CSSProperties,
+  type MouseEvent,
   type ReactNode,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -817,7 +819,15 @@ function ReaderScreen({
   const articleRef = useRef<HTMLElement>(null);
   const savedSentenceRef = useRef(initial.sentenceId);
   const chapter = book.chapters[chapterIndex];
-  const sentences = chapter ? flattenChapter(chapter) : [];
+  const sentences = useMemo(
+    () => (chapter ? flattenChapter(chapter) : []),
+    [chapter]
+  );
+  const sentenceIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    sentences.forEach((sentence, index) => map.set(sentence.id, index));
+    return map;
+  }, [sentences]);
 
   useEffect(() => {
     const targetId = book.readingPosition?.sentenceId;
@@ -870,6 +880,20 @@ function ReaderScreen({
     const position = positionFor(book, chapterIndex, sentenceIndex);
     savedSentenceRef.current = sentenceId;
     onProgress(position);
+  };
+
+  const handleArticleClick = (event: MouseEvent<HTMLElement>) => {
+    // 划词时不要改选句子，否则刚拉出来的选区会被重新渲染打断。
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) return;
+
+    const target = (event.target as HTMLElement).closest<HTMLElement>(
+      "[data-sentence-id]"
+    );
+    const sentenceId = target?.dataset.sentenceId;
+    const sentenceIndex = Number(target?.dataset.sentenceIndex);
+    if (!sentenceId || Number.isNaN(sentenceIndex)) return;
+    chooseSentence(sentenceId, sentenceIndex);
   };
 
   const changeChapter = (nextIndex: number) => {
@@ -927,6 +951,7 @@ function ReaderScreen({
         className={`reader-article ${
           settings.fontFamily === "serif" ? "is-serif" : "is-sans"
         }`}
+        onClick={handleArticleClick}
       >
         <div className="reader-title">
           <span>
@@ -939,27 +964,18 @@ function ReaderScreen({
 
         {chapter?.paragraphs.map((paragraph) => (
           <p key={paragraph.id}>
-            {paragraph.sentences.map((sentence) => {
-              const sentenceIndex = sentences.findIndex(
-                (item) => item.id === sentence.id
-              );
-              const selectedSentence = sentence.id === selectedSentenceId;
-              const speaking = sentence.id === currentSentenceId;
-              return (
-                <button
-                  key={sentence.id}
-                  type="button"
-                  data-sentence-id={sentence.id}
-                  data-sentence-index={sentenceIndex}
-                  className={`${selectedSentence ? "is-selected" : ""} ${
-                    speaking ? "is-speaking" : ""
-                  }`}
-                  onClick={() => chooseSentence(sentence.id, sentenceIndex)}
-                >
-                  {sentence.text}
-                </button>
-              );
-            })}
+            {paragraph.sentences.map((sentence) => (
+              <span
+                key={sentence.id}
+                data-sentence-id={sentence.id}
+                data-sentence-index={sentenceIndexById.get(sentence.id)}
+                className={`${
+                  sentence.id === selectedSentenceId ? "is-selected" : ""
+                } ${sentence.id === currentSentenceId ? "is-speaking" : ""}`}
+              >
+                {sentence.text}
+              </span>
+            ))}
           </p>
         ))}
 
