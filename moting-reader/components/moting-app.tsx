@@ -67,6 +67,7 @@ import {
   type BookPosition,
   type ImportProgress,
   type MainView,
+  type PlayerVoice,
   type ReaderSettings,
 } from "../lib/types";
 
@@ -652,7 +653,7 @@ function SettingsScreen({
   onClear,
 }: {
   settings: ReaderSettings;
-  voices: SpeechSynthesisVoice[];
+  voices: PlayerVoice[];
   books: Book[];
   onChange: (settings: ReaderSettings) => void;
   onClear: () => void;
@@ -679,8 +680,8 @@ function SettingsScreen({
         </div>
         <label className="settings-row settings-row--stack">
           <span>
-            <strong>系统语音</strong>
-            <small>不同设备提供的语音会有所不同</small>
+            <strong>朗读音色</strong>
+            <small>云端音色更自然，系统语音可离线使用</small>
           </span>
           <select
             value={settings.voiceURI}
@@ -688,7 +689,7 @@ function SettingsScreen({
               onChange({ ...settings, voiceURI: event.target.value })
             }
           >
-            <option value="">自动选择中文语音</option>
+            <option value="">自动选择（云端晓晓）</option>
             {voices.map((voice) => (
               <option key={voice.voiceURI} value={voice.voiceURI}>
                 {voice.name} · {voice.lang}
@@ -1106,7 +1107,7 @@ function ReaderScreen({
 }
 
 interface PlayerControls {
-  voices: SpeechSynthesisVoice[];
+  voices: PlayerVoice[];
   isPlaying: boolean;
   isPaused: boolean;
   location: {
@@ -1428,7 +1429,7 @@ function PlayerScreen({
               >
                 <span>
                   <strong>自动选择</strong>
-                  <small>优先使用设备中的中文语音</small>
+                  <small>默认使用云端自然人声</small>
                 </span>
                 {!settings.voiceURI ? <Check size={18} /> : null}
               </button>

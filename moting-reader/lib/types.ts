@@ -102,6 +102,20 @@ export interface SpeechBlock {
   spans: SpeechSpan[];
 }
 
+export interface SpeechBoundary {
+  /** 该词在音频中的起始秒数。 */
+  time: number;
+  /** 该词在朗读文本中的起始字符下标。 */
+  charIndex: number;
+}
+
+/** 播放器对外暴露的音色，既可能是云端音色也可能是设备自带语音。 */
+export interface PlayerVoice {
+  voiceURI: string;
+  name: string;
+  lang: string;
+}
+
 export interface SpeechLocation {
   bookId: string;
   chapterIndex: number;
