@@ -3,7 +3,6 @@
 import {
   ArrowLeft,
   BookOpen,
-  BookOpenText,
   Bookmark,
   Check,
   ChevronDown,
@@ -15,10 +14,10 @@ import {
   FileText,
   Headphones,
   Highlighter,
+  Home,
   Library,
   List,
-  Minus,
-  NotebookPen,
+  MoreHorizontal,
   Pause,
   PencilLine,
   Play,
@@ -83,17 +82,59 @@ import {
   type MainView,
   type PlayerVoice,
   type ReaderSettings,
+  type ReaderTheme,
 } from "../lib/types";
+
+type ReaderFont = ReaderSettings["fontFamily"];
+
+/** 四款正文字体，全部走 iOS 自带系统字，label 用各自的字体渲染出来给用户比对。 */
+const READER_FONTS: { value: ReaderFont; label: string; cssVar: string }[] = [
+  { value: "serif", label: "宋体", cssVar: "var(--font-serif)" },
+  { value: "sans", label: "黑体", cssVar: "var(--font-sans)" },
+  { value: "kai", label: "楷体", cssVar: "var(--font-kai)" },
+  { value: "yuan", label: "圆体", cssVar: "var(--font-yuan)" },
+];
+
+const READER_THEMES: { value: ReaderTheme; label: string }[] = [
+  { value: "paper", label: "纸张" },
+  { value: "white", label: "纯白" },
+  { value: "night", label: "夜间" },
+];
+
+function FontPicker({
+  value,
+  onChange,
+}: {
+  value: ReaderFont;
+  onChange: (value: ReaderFont) => void;
+}) {
+  return (
+    <div className="font-picker">
+      {READER_FONTS.map((font) => (
+        <button
+          type="button"
+          key={font.value}
+          className={`font-picker__item ${
+            value === font.value ? "is-active" : ""
+          }`}
+          style={{ fontFamily: font.cssVar }}
+          onClick={() => onChange(font.value)}
+        >
+          <span className="font-picker__name">{font.label}</span>
+          {value === font.value ? <Check size={15} /> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 const NAV_ITEMS: Array<{
   id: MainView;
   label: string;
   icon: typeof Library;
 }> = [
-  { id: "reading-now", label: "现在阅读", icon: BookOpenText },
+  { id: "home", label: "主页", icon: Home },
   { id: "library", label: "书库", icon: Library },
-  { id: "listen", label: "听书", icon: Headphones },
-  { id: "notes", label: "笔记", icon: NotebookPen },
 ];
 
 const HIGHLIGHT_COLORS: Array<{ id: HighlightColor; label: string }> = [
@@ -204,16 +245,18 @@ function Modal({
   children,
   onClose,
   wide = false,
+  className = "",
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
+  className?: string;
 }) {
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
-        className={`modal-sheet ${wide ? "modal-sheet--wide" : ""}`}
+        className={`modal-sheet ${wide ? "modal-sheet--wide" : ""} ${className}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -336,30 +379,94 @@ function ShelfCard({
   );
 }
 
-function ReadingNowScreen({
+function HomeCard({
+  book,
+  meta,
+  onOpen,
+  onPlay,
+}: {
+  book: Book;
+  meta: string;
+  onOpen: (book: Book) => void;
+  onPlay?: (book: Book) => void;
+}) {
+  return (
+    <article
+      className="home-card"
+      style={{ "--book-accent": book.accent } as CSSProperties}
+    >
+      <button
+        type="button"
+        className="home-card__open"
+        onClick={() => onOpen(book)}
+      >
+        <BookCover book={book} size="small" />
+        <span className="home-card__meta">
+          <strong>{book.title}</strong>
+          <small>{book.author}</small>
+          <em>{meta}</em>
+        </span>
+      </button>
+      {onPlay ? (
+        <button
+          type="button"
+          className="home-card__play"
+          aria-label={`收听${book.title}`}
+          onClick={() => onPlay(book)}
+        >
+          <Play size={16} fill="currentColor" />
+        </button>
+      ) : null}
+    </article>
+  );
+}
+
+function HomeScreen({
   books,
   onOpenReader,
   onPlay,
+  onOpenPlayer,
   onImport,
   onOpenSettings,
 }: {
   books: Book[];
   onOpenReader: (book: Book) => void;
   onPlay: (book: Book) => void;
+  onOpenPlayer: (book: Book) => void;
   onImport: () => void;
   onOpenSettings: () => void;
 }) {
-  const started = books.filter(
-    (book) => book.readingPosition || book.listeningPosition
-  );
-  const rest = books.filter(
-    (book) => !book.readingPosition && !book.listeningPosition
-  );
+  const reading = books
+    .filter(
+      (book) =>
+        book.readingPosition && (book.readingPosition.percent ?? 0) < 99
+    )
+    .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
+  const listening = books
+    .filter((book) => book.listeningPosition)
+    .sort(
+      (a, b) =>
+        (b.listeningPosition?.updatedAt ?? 0) -
+        (a.listeningPosition?.updatedAt ?? 0)
+    );
+  const readingIds = new Set(reading.map((book) => book.id));
+  const previous = books
+    .filter((book) => !readingIds.has(book.id) && book.readingPosition)
+    .sort(
+      (a, b) =>
+        (b.readingPosition?.updatedAt ?? 0) -
+        (a.readingPosition?.updatedAt ?? 0)
+    );
+  const untouched =
+    !reading.length && !listening.length && !previous.length ? books : [];
+
+  const readMeta = (book: Book) =>
+    `图书 · ${Math.round(book.readingPosition?.percent ?? 0)}%`;
 
   return (
     <div className="screen">
       <LargeHeader
-        title="现在阅读"
+        title="主页"
         actions={
           <button
             type="button"
@@ -386,31 +493,69 @@ function ReadingNowScreen({
         />
       ) : (
         <>
-          {started.length ? (
-            <Shelf title="当前">
-              {started.map((book) => (
-                <ShelfCard
-                  key={book.id}
-                  book={book}
-                  size="large"
-                  onOpen={onOpenReader}
-                  onPlay={onPlay}
-                />
-              ))}
-            </Shelf>
+          {reading.length ? (
+            <section className="home-row">
+              <h2 className="home-row__title">继续阅读</h2>
+              <div className="home-row__track">
+                {reading.map((book) => (
+                  <HomeCard
+                    key={book.id}
+                    book={book}
+                    meta={readMeta(book)}
+                    onOpen={onOpenReader}
+                  />
+                ))}
+              </div>
+            </section>
           ) : null}
 
-          {rest.length ? (
-            <Shelf title={started.length ? "接下来阅读" : "从这里开始"}>
-              {rest.map((book) => (
-                <ShelfCard
-                  key={book.id}
-                  book={book}
-                  size="medium"
-                  onOpen={onOpenReader}
-                />
-              ))}
-            </Shelf>
+          {listening.length ? (
+            <section className="home-row">
+              <h2 className="home-row__title">继续收听</h2>
+              <div className="home-row__track">
+                {listening.map((book) => (
+                  <HomeCard
+                    key={book.id}
+                    book={book}
+                    meta={formatRemaining(book, book.listeningPosition)}
+                    onOpen={onOpenPlayer}
+                    onPlay={onPlay}
+                  />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {previous.length ? (
+            <section className="home-row">
+              <h2 className="home-row__title">之前读过</h2>
+              <div className="home-row__track">
+                {previous.map((book) => (
+                  <HomeCard
+                    key={book.id}
+                    book={book}
+                    meta={readMeta(book)}
+                    onOpen={onOpenReader}
+                  />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {untouched.length ? (
+            <section className="home-row">
+              <h2 className="home-row__title">从这里开始</h2>
+              <div className="home-row__track">
+                {untouched.map((book) => (
+                  <HomeCard
+                    key={book.id}
+                    book={book}
+                    meta={book.author}
+                    onOpen={onOpenReader}
+                  />
+                ))}
+              </div>
+            </section>
           ) : null}
 
           <div className="ios-inset-list">
@@ -460,16 +605,20 @@ function LibraryScreen({
   books,
   onImport,
   onOpen,
+  onPlay,
+  onOpenNotes,
   onDelete,
 }: {
   books: Book[];
   onImport: () => void;
   onOpen: (book: Book) => void;
+  onPlay: (book: Book) => void;
+  onOpenNotes: (book: Book) => void;
   onDelete: (book: Book) => void;
 }) {
   const [query, setQuery] = useState("");
   const [collection, setCollection] = useState<Collection>("all");
-  const [editing, setEditing] = useState(false);
+  const [sheetBook, setSheetBook] = useState<Book | null>(null);
 
   const filtered = books.filter(
     (book) =>
@@ -484,25 +633,14 @@ function LibraryScreen({
       <LargeHeader
         title="书库"
         actions={
-          <>
-            {books.length ? (
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => setEditing((value) => !value)}
-              >
-                {editing ? "完成" : "编辑"}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="导入书籍"
-              onClick={onImport}
-            >
-              <Plus size={21} />
-            </button>
-          </>
+          <button
+            type="button"
+            className="icon-button icon-button--filled"
+            aria-label="导入书籍"
+            onClick={onImport}
+          >
+            <Plus size={20} />
+          </button>
         }
       />
 
@@ -540,30 +678,39 @@ function LibraryScreen({
           </div>
 
           {filtered.length ? (
-            <div className={`book-grid ${editing ? "is-editing" : ""}`}>
-              {filtered.map((book) => (
-                <article className="grid-book" key={book.id}>
-                  <button
-                    type="button"
-                    className="grid-book__main"
-                    onClick={() => onOpen(book)}
-                  >
-                    <BookCover book={book} size="medium" />
-                    <strong>{book.title}</strong>
-                    <small>{book.author}</small>
-                  </button>
-                  {editing ? (
+            <div className="book-grid">
+              {filtered.map((book) => {
+                const percent = Math.round(book.readingPosition?.percent ?? 0);
+                const isNew = !book.readingPosition && !book.listeningPosition;
+                const progressLabel = isNew
+                  ? "未读"
+                  : percent >= 99
+                    ? "已读完"
+                    : `已读 ${percent}%`;
+                return (
+                  <article className="grid-book" key={book.id}>
                     <button
                       type="button"
-                      className="grid-book__remove"
-                      aria-label={`删除${book.title}`}
-                      onClick={() => onDelete(book)}
+                      className="grid-book__cover"
+                      onClick={() => onOpen(book)}
                     >
-                      <Minus size={14} strokeWidth={3} />
+                      <BookCover book={book} size="large" />
+                      {isNew ? <span className="grid-book__badge">新增</span> : null}
                     </button>
-                  ) : null}
-                </article>
-              ))}
+                    <div className="grid-book__footer">
+                      <span className="grid-book__progress">{progressLabel}</span>
+                      <button
+                        type="button"
+                        className="grid-book__more"
+                        aria-label={`${book.title}的更多操作`}
+                        onClick={() => setSheetBook(book)}
+                      >
+                        <MoreHorizontal size={18} />
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           ) : (
             <p className="no-results">这个收藏集里还没有书。</p>
@@ -594,6 +741,62 @@ function LibraryScreen({
           </section>
         </>
       )}
+
+      {sheetBook ? (
+        <Modal title={sheetBook.title} onClose={() => setSheetBook(null)}>
+          <div className="book-actions">
+            <p className="book-actions__author">{sheetBook.author}</p>
+            <button
+              type="button"
+              className="book-action"
+              onClick={() => {
+                const book = sheetBook;
+                setSheetBook(null);
+                onOpen(book);
+              }}
+            >
+              <BookOpen size={19} />
+              <span>阅读</span>
+            </button>
+            <button
+              type="button"
+              className="book-action"
+              onClick={() => {
+                const book = sheetBook;
+                setSheetBook(null);
+                onPlay(book);
+              }}
+            >
+              <Headphones size={19} />
+              <span>听书</span>
+            </button>
+            <button
+              type="button"
+              className="book-action"
+              onClick={() => {
+                const book = sheetBook;
+                setSheetBook(null);
+                onOpenNotes(book);
+              }}
+            >
+              <PencilLine size={19} />
+              <span>笔记与划线</span>
+            </button>
+            <button
+              type="button"
+              className="book-action book-action--danger"
+              onClick={() => {
+                const book = sheetBook;
+                setSheetBook(null);
+                onDelete(book);
+              }}
+            >
+              <Trash2 size={19} />
+              <span>从书库删除</span>
+            </button>
+          </div>
+        </Modal>
+      ) : null}
     </div>
   );
 }
@@ -895,6 +1098,34 @@ function SettingsPanel({
     <div className="settings-panel">
       <section className="settings-group">
         <div className="settings-group__title">
+          <Home size={18} />
+          <h2>书架外观</h2>
+        </div>
+        <p className="settings-hint">
+          只影响主页和书库的底色，跟阅读器内的主题相互独立。
+        </p>
+        <div className="segmented-control">
+          {(
+            [
+              ["white", "白色"],
+              ["cream", "米白"],
+              ["black", "纯黑"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              type="button"
+              key={value}
+              className={settings.shellTheme === value ? "is-active" : ""}
+              onClick={() => onChange({ ...settings, shellTheme: value })}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="settings-group">
+        <div className="settings-group__title">
           <Volume2 size={18} />
           <h2>默认朗读</h2>
         </div>
@@ -955,27 +1186,15 @@ function SettingsPanel({
             </button>
           ))}
         </div>
-        <div className="settings-row">
+        <div className="settings-row settings-row--stack">
           <span>
             <strong>正文字体</strong>
-            <small>中文阅读更推荐衬线字体</small>
+            <small>四款 iOS 系统字体，阅读页里可随时切换</small>
           </span>
-          <div className="compact-toggle">
-            <button
-              type="button"
-              className={settings.fontFamily === "serif" ? "is-active" : ""}
-              onClick={() => onChange({ ...settings, fontFamily: "serif" })}
-            >
-              宋体
-            </button>
-            <button
-              type="button"
-              className={settings.fontFamily === "sans" ? "is-active" : ""}
-              onClick={() => onChange({ ...settings, fontFamily: "sans" })}
-            >
-              黑体
-            </button>
-          </div>
+          <FontPicker
+            value={settings.fontFamily}
+            onChange={(fontFamily) => onChange({ ...settings, fontFamily })}
+          />
         </div>
       </section>
 
@@ -1232,6 +1451,8 @@ function ReaderScreen({
   const selectedSentenceId = selectedPos.sentenceId;
   const [showChapters, setShowChapters] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // 沉浸阅读：默认露出浮层控件，点空白处收起，只留正文。
+  const [chromeVisible, setChromeVisible] = useState(true);
   const [popup, setPopup] = useState<ReaderPopupState | null>(null);
   const [thoughtDraft, setThoughtDraft] = useState<{
     note: BookNote;
@@ -1597,6 +1818,8 @@ function ReaderScreen({
     const sentenceIndex = Number(target?.dataset.sentenceIndex);
     const chIndex = Number(target?.dataset.chapterIndex);
     if (!sentenceId || Number.isNaN(sentenceIndex) || Number.isNaN(chIndex)) {
+      // 点在版心留白/段落之间就当成切换沉浸模式，露出或收起浮层控件。
+      setChromeVisible((value) => !value);
       return;
     }
     chooseSentence(sentenceId, sentenceIndex, chIndex);
@@ -1716,39 +1939,39 @@ function ReaderScreen({
     "--reader-width": `${settings.contentWidth}px`,
   } as CSSProperties;
 
+  const remainingPages = Math.max(0, pageCount - pageIndex - 1);
+  const readPercent = Math.round(
+    book.readingPosition?.percent ?? initial.percent ?? 0
+  );
+
   return (
     <div
       className={`reader-shell reader-theme--${settings.theme} ${
         paged ? "is-paged" : "is-scroll"
-      }`}
+      } ${chromeVisible ? "" : "chrome-hidden"}`}
       style={readerStyle}
     >
-      <header className="reader-header">
+      <div className="reader-chrome reader-chrome--top">
         <button
           type="button"
-          className="icon-button"
-          aria-label="返回书架"
-          onClick={onBack}
-        >
-          <ArrowLeft size={21} />
-        </button>
-        <button
-          type="button"
-          className="reader-header__chapter"
+          className="reader-chrome__chapter"
           onClick={() => setShowChapters(true)}
         >
           <span>{chapter?.title ?? "正文"}</span>
           <ChevronDown size={15} />
         </button>
+        <span className="reader-chrome__remain">
+          {paged ? `本章还剩 ${remainingPages} 页` : ""}
+        </span>
         <button
           type="button"
-          className="icon-button"
-          aria-label="阅读设置"
-          onClick={() => setShowSettings(true)}
+          className="reader-chrome__close"
+          aria-label="返回书架"
+          onClick={onBack}
         >
-          <SlidersHorizontal size={20} />
+          <X size={20} />
         </button>
-      </header>
+      </div>
 
       <div
         className="reader-viewport"
@@ -1757,9 +1980,7 @@ function ReaderScreen({
       >
         <article
           ref={articleRef}
-          className={`reader-article ${
-            settings.fontFamily === "serif" ? "is-serif" : "is-sans"
-          }`}
+          className={`reader-article is-font-${settings.fontFamily}`}
           style={
             paged
               ? { transform: `translateX(${-pageIndex * pageStep}px)` }
@@ -1867,29 +2088,37 @@ function ReaderScreen({
         </article>
       </div>
 
-      {paged ? (
-        <div className="reader-pager">
-          <span>{chapter?.title}</span>
-          <span>
-            {pageIndex + 1} / {pageCount}
-          </span>
-        </div>
-      ) : null}
-
-      {popup ? null : (
+      <div className="reader-chrome reader-chrome--bottom">
+        <span className="reader-chrome__pos">
+          {paged ? `${pageIndex + 1} / ${pageCount} 页` : `已读 ${readPercent}%`}
+        </span>
+        {popup ? null : (
+          <button
+            type="button"
+            className="reader-listen-pill"
+            onClick={() =>
+              onStartListening(
+                positionFor(
+                  book,
+                  selectedPos.chapterIndex,
+                  selectedPos.sentenceIndex
+                )
+              )
+            }
+          >
+            <Headphones size={16} />
+            从这一句开始听
+          </button>
+        )}
         <button
           type="button"
-          className="reader-listen-pill"
-          onClick={() =>
-            onStartListening(
-              positionFor(book, selectedPos.chapterIndex, selectedPos.sentenceIndex)
-            )
-          }
+          className="reader-chrome__menu"
+          aria-label="阅读设置"
+          onClick={() => setShowSettings(true)}
         >
-          <Headphones size={16} />
-          从这一句开始听
+          <SlidersHorizontal size={20} />
         </button>
-      )}
+      </div>
 
       {popup ? (
         <ReaderPopover
@@ -1964,66 +2193,126 @@ function ReaderScreen({
       ) : null}
 
       {showChapters ? (
-        <Modal title="章节目录" onClose={() => setShowChapters(false)}>
-          <div className="chapter-list">
-            {book.chapters.map((item, index) => (
-              <button
-                type="button"
-                key={item.id}
-                className={index === chapterIndex ? "is-active" : ""}
-                onClick={() => {
-                  changeChapter(index);
-                  setShowChapters(false);
-                }}
-              >
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <strong>{item.title}</strong>
-                {index === chapterIndex ? <Check size={17} /> : null}
-              </button>
-            ))}
+        <Modal
+          title="目录"
+          onClose={() => setShowChapters(false)}
+          className="modal-sheet--reader"
+        >
+          <div className="toc">
+            <div className="toc__head">
+              <div className="toc__cover">
+                <BookCover book={book} size="small" />
+              </div>
+              <div className="toc__meta">
+                <strong>{book.title}</strong>
+                <span>{book.author}</span>
+                <small>{`共 ${book.chapters.length} 章`}</small>
+              </div>
+            </div>
+            <div className="toc__list">
+              {book.chapters.map((item, index) => {
+                const startPercent =
+                  book.characterCount > 0
+                    ? Math.round(
+                        (book.chapters
+                          .slice(0, index)
+                          .reduce((sum, c) => sum + c.characterCount, 0) /
+                          book.characterCount) *
+                          100,
+                      )
+                    : 0;
+                const active = index === chapterIndex;
+                return (
+                  <button
+                    type="button"
+                    key={item.id}
+                    className={`toc__item ${active ? "is-active" : ""}`}
+                    onClick={() => {
+                      changeChapter(index);
+                      setShowChapters(false);
+                    }}
+                  >
+                    <span className="toc__title">{item.title}</span>
+                    <span className="toc__page">
+                      {active ? <Check size={16} /> : `${startPercent}%`}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </Modal>
       ) : null}
 
       {showSettings ? (
-        <Modal title="阅读设置" onClose={() => setShowSettings(false)}>
+        <Modal
+          title="主题与设置"
+          onClose={() => setShowSettings(false)}
+          className="modal-sheet--reader"
+        >
           <div className="reader-settings">
-            <div
-              className={`reader-settings__preview ${
-                settings.fontFamily === "serif" ? "is-serif" : "is-sans"
-              }`}
-            >
-              阅读应该让工具安静下来，让文字重新成为中心。
+            <div className="rset-themes">
+              {READER_THEMES.map((opt) => (
+                <button
+                  type="button"
+                  key={opt.value}
+                  className={`rset-theme rset-theme--${opt.value} ${
+                    settings.theme === opt.value ? "is-active" : ""
+                  }`}
+                  aria-label={opt.label}
+                  onClick={() =>
+                    onSettingsChange({ ...settings, theme: opt.value })
+                  }
+                >
+                  <span className="rset-theme__glyph">文</span>
+                  <span className="rset-theme__label">{opt.label}</span>
+                </button>
+              ))}
             </div>
-            <div className="reader-settings__row">
-              <span>字号</span>
-              <button
-                type="button"
-                onClick={() =>
-                  onSettingsChange({
-                    ...settings,
-                    fontSize: Math.max(15, settings.fontSize - 1),
-                  })
-                }
-              >
-                <Minus size={17} />
-              </button>
-              <strong>{settings.fontSize}</strong>
-              <button
-                type="button"
-                onClick={() =>
-                  onSettingsChange({
-                    ...settings,
-                    fontSize: Math.min(28, settings.fontSize + 1),
-                  })
-                }
-              >
-                <Plus size={17} />
-              </button>
+
+            <FontPicker
+              value={settings.fontFamily}
+              onChange={(fontFamily) =>
+                onSettingsChange({ ...settings, fontFamily })
+              }
+            />
+
+            <div className="rset-row">
+              <span className="rset-row__label">字号</span>
+              <div className="rset-stepper">
+                <button
+                  type="button"
+                  aria-label="减小字号"
+                  disabled={settings.fontSize <= 15}
+                  onClick={() =>
+                    onSettingsChange({
+                      ...settings,
+                      fontSize: Math.max(15, settings.fontSize - 1),
+                    })
+                  }
+                >
+                  <span className="rset-a rset-a--sm">A</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label="增大字号"
+                  disabled={settings.fontSize >= 28}
+                  onClick={() =>
+                    onSettingsChange({
+                      ...settings,
+                      fontSize: Math.min(28, settings.fontSize + 1),
+                    })
+                  }
+                >
+                  <span className="rset-a rset-a--lg">A</span>
+                </button>
+              </div>
             </div>
-            <label className="reader-settings__slider">
-              <span>行距</span>
+
+            <label className="rset-row">
+              <span className="rset-row__label">行距</span>
               <input
+                className="rset-slider"
                 type="range"
                 min="1.4"
                 max="2.4"
@@ -2036,23 +2325,9 @@ function ReaderScreen({
                   })
                 }
               />
-              <strong>{settings.lineHeight.toFixed(1)}</strong>
             </label>
-            <div className="segmented-control">
-              {(["serif", "sans"] as const).map((family) => (
-                <button
-                  type="button"
-                  key={family}
-                  className={settings.fontFamily === family ? "is-active" : ""}
-                  onClick={() =>
-                    onSettingsChange({ ...settings, fontFamily: family })
-                  }
-                >
-                  {family === "serif" ? "宋体" : "黑体"}
-                </button>
-              ))}
-            </div>
-            <div className="segmented-control">
+
+            <div className="compact-toggle rset-layout">
               {(["scroll", "page"] as const).map((mode) => (
                 <button
                   type="button"
@@ -2063,22 +2338,6 @@ function ReaderScreen({
                   }
                 >
                   {mode === "scroll" ? "上下滑动" : "左右翻页"}
-                </button>
-              ))}
-            </div>
-            <div className="segmented-control">
-              {(["paper", "white", "night"] as const).map((theme) => (
-                <button
-                  type="button"
-                  key={theme}
-                  className={settings.theme === theme ? "is-active" : ""}
-                  onClick={() => onSettingsChange({ ...settings, theme })}
-                >
-                  {theme === "paper"
-                    ? "纸张"
-                    : theme === "white"
-                      ? "纯白"
-                      : "夜间"}
                 </button>
               ))}
             </div>
@@ -2500,7 +2759,7 @@ export default function MotingApp() {
   const [notes, setNotes] = useState<BookNote[]>([]);
   const [settings, setSettings] =
     useState<ReaderSettings>(DEFAULT_SETTINGS);
-  const [view, setView] = useState<AppView>({ name: "reading-now" });
+  const [view, setView] = useState<AppView>({ name: "home" });
   const [showSettings, setShowSettings] = useState(false);
   const [ready, setReady] = useState(false);
   const [importProgress, setImportProgress] =
@@ -2571,6 +2830,10 @@ export default function MotingApp() {
   useEffect(() => {
     document.documentElement.dataset.readerTheme = settings.theme;
   }, [settings.theme]);
+
+  useEffect(() => {
+    document.documentElement.dataset.shell = settings.shellTheme;
+  }, [settings.shellTheme]);
 
   const updateBook = useCallback((updated: Book) => {
     setBooks((current) =>
@@ -2815,7 +3078,7 @@ export default function MotingApp() {
     setSettings(DEFAULT_SETTINGS);
     setConfirmClear(false);
     setShowSettings(false);
-    setView({ name: "reading-now" });
+    setView({ name: "home" });
     showToast("本地书库已清空，已保留一份使用指南");
   };
 
@@ -2853,7 +3116,7 @@ export default function MotingApp() {
               ? player.currentSentenceId
               : ""
           }
-          onBack={() => setView({ name: "reading-now" })}
+          onBack={() => setView({ name: "home" })}
           onProgress={(position) => handleReadProgress(selectedBook, position)}
           onStartListening={(position) => {
             player.start(selectedBook.id, position);
@@ -2890,17 +3153,28 @@ export default function MotingApp() {
             </div>
           </div>
 
-          <BottomNavigation
-            active={activeMainView}
-            onChange={(name) => setView({ name })}
-          />
+          <div className="bottom-bar">
+            <BottomNavigation
+              active={activeMainView}
+              onChange={(name) => setView({ name })}
+            />
+            <button
+              type="button"
+              className="search-fab"
+              aria-label="搜索"
+              onClick={() => setView({ name: "library" })}
+            >
+              <Search size={22} />
+            </button>
+          </div>
 
           <section className="app-content">
-            {view.name === "reading-now" ? (
-              <ReadingNowScreen
+            {view.name === "home" ? (
+              <HomeScreen
                 books={books}
                 onOpenReader={(book) => openReader(book)}
                 onPlay={(book) => openPlayer(book, true)}
+                onOpenPlayer={(book) => openPlayer(book, false)}
                 onImport={() => fileInputRef.current?.click()}
                 onOpenSettings={() => setShowSettings(true)}
               />
@@ -2909,6 +3183,10 @@ export default function MotingApp() {
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
                 onOpen={(book) => openReader(book)}
+                onPlay={(book) => openPlayer(book, false)}
+                onOpenNotes={(book) =>
+                  setView({ name: "book-notes", bookId: book.id })
+                }
                 onDelete={setDeleteTarget}
               />
             ) : view.name === "listen" ? (
@@ -2921,7 +3199,7 @@ export default function MotingApp() {
               <BookNotesScreen
                 book={selectedBook}
                 notes={selectedBookNotes}
-                onBack={() => setView({ name: "notes" })}
+                onBack={() => setView({ name: "library" })}
                 onOpen={openNote}
                 onDelete={deleteBookNote}
                 onEditThought={(note) => {

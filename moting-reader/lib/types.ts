@@ -2,7 +2,7 @@ export type BookFormat = "epub" | "pdf" | "txt" | "md" | "demo";
 
 export type BookStatus = "ready" | "parsing" | "error";
 
-export type MainView = "reading-now" | "library" | "listen" | "notes";
+export type MainView = "home" | "library" | "listen" | "notes";
 
 export type AppView =
   | { name: MainView }
@@ -101,6 +101,10 @@ export interface BookNote {
 
 export type ReaderTheme = "paper" | "white" | "night";
 
+/** 外壳（主页 / 书库 / tab bar）的底色，跟阅读器主题完全独立：
+ *  换书架不动阅读器，换阅读器不动书架。 */
+export type ShellTheme = "white" | "black" | "cream";
+
 /** scroll = 上下滑动连续阅读，page = 左右翻页分页阅读。 */
 export type ReadingMode = "scroll" | "page";
 
@@ -108,8 +112,10 @@ export interface ReaderSettings {
   fontSize: number;
   lineHeight: number;
   contentWidth: number;
-  fontFamily: "serif" | "sans";
+  /** serif=宋体 sans=黑体 kai=楷体 yuan=圆体，四款都走 iOS 自带 CJK 系统字体，零下载。 */
+  fontFamily: "serif" | "sans" | "kai" | "yuan";
   theme: ReaderTheme;
+  shellTheme: ShellTheme;
   readingMode: ReadingMode;
   speechRate: number;
   voiceURI: string;
@@ -160,6 +166,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   contentWidth: 720,
   fontFamily: "serif",
   theme: "paper",
+  shellTheme: "white",
   readingMode: "scroll",
   speechRate: 1,
   voiceURI: "",
