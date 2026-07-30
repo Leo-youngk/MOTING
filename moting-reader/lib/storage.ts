@@ -136,7 +136,14 @@ export async function getAllNotes(): Promise<BookNote[]> {
   const notes = await requestToPromise(
     transaction.objectStore(NOTE_STORE).getAll() as IDBRequest<BookNote[]>
   );
-  return notes.sort((a, b) => b.createdAt - a.createdAt);
+  return notes
+    .map((note) =>
+      // 早期版本把整句标记存成 kind: "bookmark"，现在统一当成整句划线。
+      (note.kind as string) === "bookmark"
+        ? { ...note, kind: "highlight" as const }
+        : note
+    )
+    .sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function saveNote(note: BookNote): Promise<void> {

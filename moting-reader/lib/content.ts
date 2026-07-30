@@ -418,3 +418,27 @@ export function formatReadingTime(characterCount: number): string {
   const rest = minutes % 60;
   return rest ? `约 ${hours} 小时 ${rest} 分钟` : `约 ${hours} 小时`;
 }
+
+/** 从某个位置往后还剩多少字。当前章按句子比例折算，后面的章整章计入。 */
+export function remainingCharacters(
+  book: Book,
+  position?: BookPosition
+): number {
+  if (!position) return book.characterCount;
+  const chapter = book.chapters[position.chapterIndex];
+  if (!chapter) return book.characterCount;
+  const consumed = chapter.sentenceCount
+    ? chapter.characterCount * (position.sentenceIndex / chapter.sentenceCount)
+    : 0;
+  const later = book.chapters
+    .slice(position.chapterIndex + 1)
+    .reduce((sum, item) => sum + item.characterCount, 0);
+  return Math.max(0, Math.round(chapter.characterCount - consumed + later));
+}
+
+/** 首页那句「剩余 2 小时 14 分」。已经读完就直接说读完。 */
+export function formatRemaining(book: Book, position?: BookPosition): string {
+  if (!position) return `${formatReadingTime(book.characterCount)}读完`;
+  if (position.percent >= 99) return "已读完";
+  return `剩余${formatReadingTime(remainingCharacters(book, position))}`;
+}

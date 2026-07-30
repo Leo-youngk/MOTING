@@ -3,19 +3,24 @@
 import {
   ArrowLeft,
   BookOpen,
+  BookOpenText,
   Bookmark,
   Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Copy,
   Download,
   FileText,
   Headphones,
+  Highlighter,
   Library,
   List,
   Minus,
+  NotebookPen,
   Pause,
+  PencilLine,
   Play,
   Plus,
   Search,
@@ -46,6 +51,7 @@ import {
   findSentence,
   flattenChapter,
   formatReadingTime,
+  formatRemaining,
   initialPosition,
   makeId,
   positionFor,
@@ -71,6 +77,7 @@ import {
   type Book,
   type BookNote,
   type BookPosition,
+  type HighlightColor,
   type ImportProgress,
   type MainView,
   type PlayerVoice,
@@ -82,10 +89,17 @@ const NAV_ITEMS: Array<{
   label: string;
   icon: typeof Library;
 }> = [
-  { id: "library", label: "书架", icon: Library },
+  { id: "reading-now", label: "现在阅读", icon: BookOpenText },
+  { id: "library", label: "书库", icon: Library },
   { id: "listen", label: "听书", icon: Headphones },
-  { id: "notes", label: "笔记", icon: Bookmark },
-  { id: "settings", label: "我的", icon: UserRound },
+  { id: "notes", label: "笔记", icon: NotebookPen },
+];
+
+const HIGHLIGHT_COLORS: Array<{ id: HighlightColor; label: string }> = [
+  { id: "yellow", label: "黄色" },
+  { id: "green", label: "绿色" },
+  { id: "blue", label: "蓝色" },
+  { id: "pink", label: "粉色" },
 ];
 
 function formatDate(timestamp: number): string {
@@ -243,6 +257,204 @@ function EmptyState({
   );
 }
 
+function LargeHeader({
+  title,
+  actions,
+}: {
+  title: string;
+  actions?: ReactNode;
+}) {
+  return (
+    <header className="ios-header">
+      <h1>{title}</h1>
+      {actions ? <div className="ios-header__actions">{actions}</div> : null}
+    </header>
+  );
+}
+
+function Shelf({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="shelf">
+      <h2 className="shelf__title">{title}</h2>
+      <div className="shelf__track">{children}</div>
+    </section>
+  );
+}
+
+function ShelfCard({
+  book,
+  size,
+  onOpen,
+  onPlay,
+}: {
+  book: Book;
+  size: "large" | "medium";
+  onOpen: (book: Book) => void;
+  onPlay?: (book: Book) => void;
+}) {
+  const position = book.readingPosition ?? book.listeningPosition;
+
+  return (
+    <article className={`shelf-card shelf-card--${size}`}>
+      <div className="shelf-card__art">
+        <button
+          type="button"
+          className="shelf-card__cover"
+          onClick={() => onOpen(book)}
+          aria-label={`阅读${book.title}`}
+        >
+          <BookCover book={book} size={size} />
+        </button>
+        {onPlay ? (
+          <button
+            type="button"
+            className="shelf-card__play"
+            aria-label={`收听${book.title}`}
+            onClick={() => onPlay(book)}
+          >
+            <Play size={15} fill="currentColor" />
+          </button>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        className="shelf-card__text"
+        onClick={() => onOpen(book)}
+      >
+        <strong>{book.title}</strong>
+        <small>{book.author}</small>
+        <em>{formatRemaining(book, position)}</em>
+      </button>
+    </article>
+  );
+}
+
+function ReadingNowScreen({
+  books,
+  onOpenReader,
+  onPlay,
+  onImport,
+  onOpenSettings,
+}: {
+  books: Book[];
+  onOpenReader: (book: Book) => void;
+  onPlay: (book: Book) => void;
+  onImport: () => void;
+  onOpenSettings: () => void;
+}) {
+  const started = books.filter(
+    (book) => book.readingPosition || book.listeningPosition
+  );
+  const rest = books.filter(
+    (book) => !book.readingPosition && !book.listeningPosition
+  );
+
+  return (
+    <div className="screen">
+      <LargeHeader
+        title="现在阅读"
+        actions={
+          <button
+            type="button"
+            className="avatar-button"
+            aria-label="设置"
+            onClick={onOpenSettings}
+          >
+            <UserRound size={19} />
+          </button>
+        }
+      />
+
+      {!books.length ? (
+        <EmptyState
+          icon={<BookOpen size={28} />}
+          title="还没有书"
+          description="导入 EPUB、文字型 PDF、TXT 或 Markdown，就能开始阅读和听书。"
+          action={
+            <button type="button" className="primary-button" onClick={onImport}>
+              <Upload size={17} />
+              导入第一本书
+            </button>
+          }
+        />
+      ) : (
+        <>
+          {started.length ? (
+            <Shelf title="当前">
+              {started.map((book) => (
+                <ShelfCard
+                  key={book.id}
+                  book={book}
+                  size="large"
+                  onOpen={onOpenReader}
+                  onPlay={onPlay}
+                />
+              ))}
+            </Shelf>
+          ) : null}
+
+          {rest.length ? (
+            <Shelf title={started.length ? "接下来阅读" : "从这里开始"}>
+              {rest.map((book) => (
+                <ShelfCard
+                  key={book.id}
+                  book={book}
+                  size="medium"
+                  onOpen={onOpenReader}
+                />
+              ))}
+            </Shelf>
+          ) : null}
+
+          <div className="ios-inset-list">
+            <button type="button" className="ios-row" onClick={onImport}>
+              <span className="ios-row__label ios-row__label--tint">
+                <Plus size={17} />
+                导入新书
+              </span>
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+type Collection = "all" | "reading" | "finished" | "epub" | "pdf" | "text";
+
+const COLLECTIONS: Array<{ id: Collection; label: string }> = [
+  { id: "all", label: "全部图书" },
+  { id: "reading", label: "正在阅读" },
+  { id: "finished", label: "已读完" },
+  { id: "epub", label: "EPUB" },
+  { id: "pdf", label: "PDF" },
+  { id: "text", label: "文本与 Markdown" },
+];
+
+function matchesCollection(book: Book, collection: Collection): boolean {
+  const percent = book.readingPosition?.percent ?? 0;
+  switch (collection) {
+    case "reading":
+      return Boolean(book.readingPosition) && percent < 99;
+    case "finished":
+      return percent >= 99;
+    case "epub":
+      return book.format === "epub";
+    case "pdf":
+      return book.format === "pdf";
+    case "text":
+      return book.format !== "epub" && book.format !== "pdf";
+    default:
+      return true;
+  }
+}
+
 function LibraryScreen({
   books,
   onImport,
@@ -255,149 +467,129 @@ function LibraryScreen({
   onDelete: (book: Book) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [showSearch, setShowSearch] = useState(false);
-  const filtered = books.filter((book) =>
-    `${book.title} ${book.author}`.toLowerCase().includes(query.toLowerCase())
+  const [collection, setCollection] = useState<Collection>("all");
+  const [editing, setEditing] = useState(false);
+
+  const filtered = books.filter(
+    (book) =>
+      matchesCollection(book, collection) &&
+      `${book.title} ${book.author}`.toLowerCase().includes(query.toLowerCase())
   );
-  const current = books[0];
+  const collectionLabel =
+    COLLECTIONS.find((item) => item.id === collection)?.label ?? "全部图书";
 
   return (
-    <div className="screen screen--library">
-      <header className="screen-header">
-        <div>
-          <p className="eyebrow">你的私人阅读空间</p>
-          <h1>书架</h1>
-          <p>继续你的阅读</p>
-        </div>
-        <div className="header-actions">
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="搜索书籍"
-            onClick={() => setShowSearch((value) => !value)}
-          >
-            <Search size={21} />
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="导入书籍"
-            onClick={onImport}
-          >
-            <Plus size={22} />
-          </button>
-        </div>
-      </header>
-
-      {showSearch ? (
-        <label className="search-field">
-          <Search size={18} />
-          <input
-            autoFocus
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索书名或作者"
-          />
-          {query ? (
+    <div className="screen">
+      <LargeHeader
+        title="书库"
+        actions={
+          <>
+            {books.length ? (
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => setEditing((value) => !value)}
+              >
+                {editing ? "完成" : "编辑"}
+              </button>
+            ) : null}
             <button
               type="button"
-              aria-label="清除搜索"
-              onClick={() => setQuery("")}
+              className="icon-button"
+              aria-label="导入书籍"
+              onClick={onImport}
             >
-              <X size={17} />
+              <Plus size={21} />
             </button>
-          ) : null}
-        </label>
-      ) : null}
+          </>
+        }
+      />
+
+      <label className="ios-search">
+        <Search size={16} />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="搜索书名或作者"
+        />
+        {query ? (
+          <button type="button" aria-label="清除搜索" onClick={() => setQuery("")}>
+            <X size={15} />
+          </button>
+        ) : null}
+      </label>
 
       {!books.length ? (
         <EmptyState
-          icon={<BookOpen size={29} />}
-          title="书架还是空的"
-          description="导入 EPUB、文字型 PDF、TXT 或 Markdown，开始阅读和听书。"
+          icon={<Library size={28} />}
+          title="书库还是空的"
+          description="导入的书会保存在这台设备上，不会上传。"
           action={
             <button type="button" className="primary-button" onClick={onImport}>
-              <Upload size={18} />
-              导入第一本书
+              <Upload size={17} />
+              导入书籍
             </button>
           }
         />
       ) : (
         <>
-          {current && !query ? (
-            <section className="continue-reading">
-              <BookCover book={current} size="large" />
-              <div className="continue-reading__content">
-                <span className="section-kicker">正在阅读</span>
-                <h2>{current.title}</h2>
-                <p>{current.author}</p>
-                <strong>{current.readingPosition?.percent ?? 0}%</strong>
-                <ProgressBar value={current.readingPosition?.percent ?? 0} />
-                <p className="chapter-line">
-                  {current.chapters[
-                    current.readingPosition?.chapterIndex ?? 0
-                  ]?.title ?? "正文"}
-                </p>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={() => onOpen(current)}
-                >
-                  继续阅读
-                  <ChevronRight size={18} />
-                </button>
-              </div>
-            </section>
-          ) : null}
+          <div className="grid-heading">
+            <h2>{query ? "搜索结果" : collectionLabel}</h2>
+            <small>{filtered.length} 本</small>
+          </div>
 
-          <section className="library-list-section">
-            <div className="section-heading">
-              <div>
-                <span>{query ? "搜索结果" : "我的书籍"}</span>
-                <small>{filtered.length} 本</small>
-              </div>
-              <button type="button" className="text-button" onClick={onImport}>
-                <Upload size={16} />
-                导入
-              </button>
-            </div>
-
-            <div className="book-list">
+          {filtered.length ? (
+            <div className={`book-grid ${editing ? "is-editing" : ""}`}>
               {filtered.map((book) => (
-                <article className="book-row" key={book.id}>
+                <article className="grid-book" key={book.id}>
                   <button
                     type="button"
-                    className="book-row__main"
+                    className="grid-book__main"
                     onClick={() => onOpen(book)}
                   >
-                    <BookCover book={book} size="small" />
-                    <span className="book-row__details">
-                      <strong>{book.title}</strong>
-                      <small>{book.author}</small>
-                      <span>
-                        {book.readingPosition?.percent ?? 0}% ·{" "}
-                        {book.chapters[
-                          book.readingPosition?.chapterIndex ?? 0
-                        ]?.title ?? `${book.chapters.length} 章`}
-                      </span>
-                      <ProgressBar value={book.readingPosition?.percent ?? 0} />
-                    </span>
+                    <BookCover book={book} size="medium" />
+                    <strong>{book.title}</strong>
+                    <small>{book.author}</small>
                   </button>
-                  <button
-                    type="button"
-                    className="icon-button book-row__menu"
-                    aria-label={`删除${book.title}`}
-                    onClick={() => onDelete(book)}
-                  >
-                    <Trash2 size={17} />
-                  </button>
+                  {editing ? (
+                    <button
+                      type="button"
+                      className="grid-book__remove"
+                      aria-label={`删除${book.title}`}
+                      onClick={() => onDelete(book)}
+                    >
+                      <Minus size={14} strokeWidth={3} />
+                    </button>
+                  ) : null}
                 </article>
               ))}
             </div>
+          ) : (
+            <p className="no-results">这个收藏集里还没有书。</p>
+          )}
 
-            {!filtered.length ? (
-              <p className="no-results">没有找到匹配的书籍。</p>
-            ) : null}
+          <section className="ios-section">
+            <h2 className="ios-section__title">收藏集</h2>
+            <div className="ios-inset-list">
+              {COLLECTIONS.map((item) => (
+                <button
+                  type="button"
+                  key={item.id}
+                  className="ios-row"
+                  onClick={() => setCollection(item.id)}
+                >
+                  <span className="ios-row__label">{item.label}</span>
+                  <span className="ios-row__value">
+                    {books.filter((book) => matchesCollection(book, item.id)).length}
+                  </span>
+                  {collection === item.id ? (
+                    <Check size={17} className="ios-row__check" />
+                  ) : (
+                    <ChevronRight size={16} className="ios-row__chevron" />
+                  )}
+                </button>
+              ))}
+            </div>
           </section>
         </>
       )}
@@ -415,141 +607,90 @@ function ListenScreen({
   onOpenPlayer: (book: Book) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | "recent">("all");
-  const listened = books
+  const started = books
     .filter((book) => book.listeningPosition)
     .sort(
       (a, b) =>
         (b.listeningPosition?.updatedAt ?? 0) -
         (a.listeningPosition?.updatedAt ?? 0)
     );
-  const current = listened[0] ?? books[0];
-  const visible = (filter === "recent" ? listened : books).filter((book) =>
+  const visible = books.filter((book) =>
     `${book.title} ${book.author}`.toLowerCase().includes(query.toLowerCase())
   );
 
   return (
-    <div className="screen screen--listen">
-      <header className="screen-header">
-        <div>
-          <p className="eyebrow">把书带进更多时间</p>
-          <h1>听书</h1>
-          <p>继续收听，或选择一本来听</p>
-        </div>
-      </header>
+    <div className="screen">
+      <LargeHeader title="听书" />
 
-      <label className="search-field search-field--always">
-        <Search size={18} />
+      <label className="ios-search">
+        <Search size={16} />
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="搜索可听书籍"
         />
         {query ? (
-          <button type="button" onClick={() => setQuery("")}>
-            <X size={17} />
+          <button type="button" aria-label="清除搜索" onClick={() => setQuery("")}>
+            <X size={15} />
           </button>
         ) : null}
       </label>
 
       {!books.length ? (
         <EmptyState
-          icon={<Headphones size={29} />}
+          icon={<Headphones size={28} />}
           title="还没有可以听的书"
-          description="先到书架导入一本书，解析完成后会自动出现在这里。"
+          description="先到书库导入一本书，解析完成后会自动出现在这里。"
         />
       ) : (
         <>
-          {current && !query ? (
-            <section className="continue-listening">
-              <button
-                type="button"
-                className="continue-listening__main"
-                onClick={() => onOpenPlayer(current)}
-              >
-                <BookCover book={current} size="medium" />
-                <span className="continue-listening__text">
-                  <small>继续收听</small>
-                  <strong>{current.title}</strong>
-                  <span>
-                    {current.chapters[
-                      current.listeningPosition?.chapterIndex ?? 0
-                    ]?.title ?? "正文"}
-                    {" · "}
-                    第 {(current.listeningPosition?.sentenceIndex ?? 0) + 1} 句
-                  </span>
-                  <ProgressBar
-                    value={current.listeningPosition?.percent ?? 0}
-                  />
-                </span>
-              </button>
-              <button
-                type="button"
-                className="round-play-button"
-                aria-label={`继续播放${current.title}`}
-                onClick={() => onPlay(current)}
-              >
-                <Play size={24} fill="currentColor" />
-              </button>
-            </section>
+          {started.length && !query ? (
+            <Shelf title="继续收听">
+              {started.map((book) => (
+                <ShelfCard
+                  key={book.id}
+                  book={book}
+                  size="large"
+                  onOpen={onOpenPlayer}
+                  onPlay={onPlay}
+                />
+              ))}
+            </Shelf>
           ) : null}
 
-          <section className="listen-library">
-            <div className="filter-tabs" aria-label="听书筛选">
-              <button
-                type="button"
-                className={filter === "all" ? "is-active" : ""}
-                onClick={() => setFilter("all")}
-              >
-                全部
-              </button>
-              <button
-                type="button"
-                className={filter === "recent" ? "is-active" : ""}
-                onClick={() => setFilter("recent")}
-              >
-                最近
-              </button>
-            </div>
-
-            <div className="section-heading">
-              <div>
-                <span>选择一本来听</span>
-                <small>{visible.length} 本可听</small>
-              </div>
-            </div>
-
-            <div className="audio-book-list">
+          <section className="ios-section">
+            <h2 className="ios-section__title">
+              {query ? "搜索结果" : "全部有声书"}
+            </h2>
+            <div className="ios-inset-list">
               {visible.map((book) => (
-                <article className="audio-book-row" key={book.id}>
+                <div className="ios-row ios-row--media" key={book.id}>
                   <button
                     type="button"
-                    className="audio-book-row__main"
+                    className="ios-row__main"
                     onClick={() => onOpenPlayer(book)}
                   >
                     <BookCover book={book} size="small" />
                     <span>
                       <strong>{book.title}</strong>
                       <small>{book.author}</small>
-                      <em>
-                        <Play size={13} fill="currentColor" />
-                        {book.listeningPosition
-                          ? `已听 ${book.listeningPosition.percent}%`
-                          : "可播放"}
-                      </em>
+                      <em>{formatRemaining(book, book.listeningPosition)}</em>
                     </span>
                   </button>
                   <button
                     type="button"
-                    className="inline-play"
+                    className="ios-play-button"
                     aria-label={`播放${book.title}`}
                     onClick={() => onPlay(book)}
                   >
-                    <Play size={18} fill="currentColor" />
+                    <Play size={15} fill="currentColor" />
                   </button>
-                </article>
+                </div>
               ))}
             </div>
+            {!visible.length ? (
+              <p className="no-results">没有找到匹配的书籍。</p>
+            ) : null}
           </section>
         </>
       )}
@@ -560,88 +701,168 @@ function ListenScreen({
 function NotesScreen({
   notes,
   books,
-  onOpen,
-  onDelete,
+  onOpenBook,
 }: {
   notes: BookNote[];
   books: Book[];
-  onOpen: (note: BookNote) => void;
-  onDelete: (note: BookNote) => void;
+  onOpenBook: (book: Book) => void;
 }) {
-  const [filter, setFilter] = useState<"all" | BookNote["kind"]>("all");
-  const visible =
-    filter === "all" ? notes : notes.filter((note) => note.kind === filter);
+  const grouped = books
+    .map((book) => ({
+      book,
+      items: notes.filter((note) => note.bookId === book.id),
+    }))
+    .filter((entry) => entry.items.length)
+    .sort(
+      (a, b) =>
+        Math.max(...b.items.map((note) => note.createdAt)) -
+        Math.max(...a.items.map((note) => note.createdAt))
+    );
 
   return (
-    <div className="screen screen--notes">
-      <header className="screen-header">
-        <div>
-          <p className="eyebrow">把值得保留的句子留下</p>
-          <h1>笔记</h1>
-          <p>阅读书签与听书标记集中在这里</p>
+    <div className="screen">
+      <LargeHeader title="笔记" />
+
+      {!grouped.length ? (
+        <EmptyState
+          icon={<Highlighter size={27} />}
+          title="还没有划线"
+          description="阅读时选中一段文字，就能划线、写想法；听书时也可以随手标记。"
+        />
+      ) : (
+        <div className="ios-inset-list ios-inset-list--top">
+          {grouped.map(({ book, items }) => {
+            const thoughts = items.filter((note) => note.thought).length;
+            const highlights = items.filter(
+              (note) => note.kind === "highlight"
+            ).length;
+            return (
+              <button
+                type="button"
+                className="ios-row ios-row--media"
+                key={book.id}
+                onClick={() => onOpenBook(book)}
+              >
+                <span className="ios-row__main">
+                  <BookCover book={book} size="small" />
+                  <span>
+                    <strong>{book.title}</strong>
+                    <small>{book.author}</small>
+                    <em>
+                      {highlights} 条划线
+                      {thoughts ? ` · ${thoughts} 条想法` : ""}
+                    </em>
+                  </span>
+                </span>
+                <ChevronRight size={16} className="ios-row__chevron" />
+              </button>
+            );
+          })}
         </div>
+      )}
+    </div>
+  );
+}
+
+function BookNotesScreen({
+  book,
+  notes,
+  onBack,
+  onOpen,
+  onDelete,
+  onEditThought,
+}: {
+  book: Book;
+  notes: BookNote[];
+  onBack: () => void;
+  onOpen: (note: BookNote) => void;
+  onDelete: (note: BookNote) => void;
+  onEditThought: (note: BookNote) => void;
+}) {
+  const [filter, setFilter] = useState<"all" | "thought" | "listening-mark">(
+    "all"
+  );
+  const visible = notes.filter((note) => {
+    if (filter === "thought") return Boolean(note.thought);
+    if (filter === "listening-mark") return note.kind === "listening-mark";
+    return true;
+  });
+
+  return (
+    <div className="screen screen--book-notes">
+      <header className="ios-nav-bar">
+        <button type="button" className="ios-back" onClick={onBack}>
+          <ChevronLeft size={22} />
+          笔记
+        </button>
+        <span>{book.title}</span>
       </header>
 
-      <div className="filter-tabs">
-        <button
-          type="button"
-          className={filter === "all" ? "is-active" : ""}
-          onClick={() => setFilter("all")}
-        >
-          全部
-        </button>
-        <button
-          type="button"
-          className={filter === "bookmark" ? "is-active" : ""}
-          onClick={() => setFilter("bookmark")}
-        >
-          阅读书签
-        </button>
-        <button
-          type="button"
-          className={filter === "listening-mark" ? "is-active" : ""}
-          onClick={() => setFilter("listening-mark")}
-        >
-          听书标记
-        </button>
+      <div className="ios-segmented">
+        {(
+          [
+            ["all", "全部"],
+            ["thought", "想法"],
+            ["listening-mark", "听书标记"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            type="button"
+            key={id}
+            className={filter === id ? "is-active" : ""}
+            onClick={() => setFilter(id)}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {!visible.length ? (
         <EmptyState
-          icon={<Bookmark size={28} />}
-          title="还没有标记"
-          description="阅读时选中一句，或听书时点击标记，它会出现在这里。"
+          icon={<Highlighter size={26} />}
+          title="这里还是空的"
+          description="换个筛选，或者回到正文里划一段。"
         />
       ) : (
-        <div className="notes-list">
+        <div className="note-feed">
           {visible.map((note) => {
-            const book = books.find((item) => item.id === note.bookId);
-            if (!book) return null;
             const chapter = book.chapters.find(
               (item) => item.id === note.chapterId
             );
             return (
-              <article className="note-row" key={note.id}>
-                <button type="button" onClick={() => onOpen(note)}>
-                  <span className="note-row__meta">
-                    {note.kind === "bookmark" ? (
-                      <Bookmark size={14} />
-                    ) : (
-                      <Headphones size={14} />
-                    )}
-                    {book.title} · {chapter?.title ?? "正文"}
-                  </span>
-                  <blockquote>{note.excerpt}</blockquote>
-                  <small>{formatDate(note.createdAt)}</small>
-                </button>
+              <article
+                className={`note-card note-card--${note.color ?? "yellow"}`}
+                key={note.id}
+              >
                 <button
                   type="button"
-                  className="icon-button"
-                  aria-label="删除标记"
-                  onClick={() => onDelete(note)}
+                  className="note-card__body"
+                  onClick={() => onOpen(note)}
                 >
-                  <Trash2 size={16} />
+                  <span className="note-card__chapter">
+                    {note.kind === "listening-mark" ? (
+                      <Headphones size={12} />
+                    ) : (
+                      <Highlighter size={12} />
+                    )}
+                    {chapter?.title ?? "正文"}
+                  </span>
+                  <p>{note.excerpt}</p>
+                  {note.thought ? (
+                    <span className="note-card__thought">{note.thought}</span>
+                  ) : null}
+                  <small>{formatDate(note.createdAt)}</small>
                 </button>
+                <div className="note-card__actions">
+                  <button type="button" onClick={() => onEditThought(note)}>
+                    <PencilLine size={14} />
+                    {note.thought ? "改想法" : "写想法"}
+                  </button>
+                  <button type="button" onClick={() => onDelete(note)}>
+                    <Trash2 size={14} />
+                    删除
+                  </button>
+                </div>
               </article>
             );
           })}
@@ -651,7 +872,7 @@ function NotesScreen({
   );
 }
 
-function SettingsScreen({
+function SettingsPanel({
   settings,
   voices,
   books,
@@ -670,15 +891,7 @@ function SettingsScreen({
   );
 
   return (
-    <div className="screen screen--settings">
-      <header className="screen-header">
-        <div>
-          <p className="eyebrow">安静、稳定、属于你</p>
-          <h1>我的</h1>
-          <p>阅读与听书的默认设置</p>
-        </div>
-      </header>
-
+    <div className="settings-panel">
       <section className="settings-group">
         <div className="settings-group__title">
           <Volume2 size={18} />
@@ -796,6 +1009,76 @@ function SettingsScreen({
 
 const HEADING_TAGS = ["h2", "h2", "h3", "h4", "h5", "h6"] as const;
 
+/** 一条划线落在某一句上的片段。跨句选中会拆成多条。 */
+export interface HighlightPart {
+  sentenceId: string;
+  sentenceIndex: number;
+  start: number;
+  end: number;
+  text: string;
+}
+
+/** 选区落在这个元素里的那一截，偏移量按纯文本算，和 sentence.text 对得上。 */
+function offsetsWithin(
+  element: HTMLElement,
+  range: Range
+): { start: number; end: number; text: string } | null {
+  const full = document.createRange();
+  full.selectNodeContents(element);
+  if (range.compareBoundaryPoints(Range.START_TO_END, full) <= 0) return null;
+  if (range.compareBoundaryPoints(Range.END_TO_START, full) >= 0) return null;
+
+  const clipped = range.cloneRange();
+  if (clipped.compareBoundaryPoints(Range.START_TO_START, full) < 0) {
+    clipped.setStart(full.startContainer, full.startOffset);
+  }
+  if (clipped.compareBoundaryPoints(Range.END_TO_END, full) > 0) {
+    clipped.setEnd(full.endContainer, full.endOffset);
+  }
+
+  const lead = document.createRange();
+  lead.setStart(full.startContainer, full.startOffset);
+  lead.setEnd(clipped.startContainer, clipped.startOffset);
+  const text = clipped.toString();
+  const start = lead.toString().length;
+  return { start, end: start + text.length, text };
+}
+
+/** 把一句话按划线切成若干段，命中的部分包一层 mark。 */
+function renderSentence(text: string, marks: BookNote[]): ReactNode {
+  if (!marks.length) return text;
+  const ordered = marks
+    .map((note) => ({
+      note,
+      start: Math.max(0, Math.min(text.length, note.start ?? 0)),
+      end: Math.max(0, Math.min(text.length, note.end ?? text.length)),
+    }))
+    .filter((item) => item.end > item.start)
+    .sort((a, b) => a.start - b.start);
+
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const item of ordered) {
+    if (item.end <= cursor) continue;
+    const from = Math.max(cursor, item.start);
+    if (from > cursor) parts.push(text.slice(cursor, from));
+    parts.push(
+      <mark
+        key={item.note.id}
+        data-note-id={item.note.id}
+        className={`reader-mark reader-mark--${item.note.color ?? "yellow"} ${
+          item.note.thought ? "has-thought" : ""
+        }`}
+      >
+        {text.slice(from, item.end)}
+      </mark>
+    );
+    cursor = item.end;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
+}
+
 function ReaderImage({ imageId, alt }: { imageId: string; alt: string }) {
   const [url, setUrl] = useState("");
 
@@ -821,23 +1104,115 @@ function ReaderImage({ imageId, alt }: { imageId: string; alt: string }) {
   );
 }
 
+type ReaderPopupState =
+  | { kind: "selection"; anchor: DOMRect; parts: HighlightPart[]; text: string }
+  | { kind: "mark"; anchor: DOMRect; note: BookNote };
+
+/** 划词后浮在选区上方的操作条，交互对齐微信读书。 */
+function ReaderPopover({
+  popup,
+  onHighlight,
+  onCopy,
+  onThought,
+  onListen,
+  onDelete,
+}: {
+  popup: ReaderPopupState;
+  onHighlight: (color: HighlightColor) => void;
+  onCopy: () => void;
+  onThought: () => void;
+  onListen: () => void;
+  onDelete: () => void;
+}) {
+  const below = popup.anchor.top < 132;
+  const center = popup.anchor.left + popup.anchor.width / 2;
+  const style: CSSProperties = {
+    left: `${Math.min(Math.max(center, 104), window.innerWidth - 104)}px`,
+    top: below ? `${popup.anchor.bottom + 10}px` : `${popup.anchor.top - 10}px`,
+  };
+
+  return (
+    <div
+      className={`reader-popover ${below ? "is-below" : ""}`}
+      style={style}
+      role="dialog"
+      aria-label="划线操作"
+    >
+      {popup.kind === "mark" ? (
+        <div className="reader-popover__colors">
+          {HIGHLIGHT_COLORS.map((color) => (
+            <button
+              type="button"
+              key={color.id}
+              className={`swatch swatch--${color.id} ${
+                (popup.note.color ?? "yellow") === color.id ? "is-active" : ""
+              }`}
+              aria-label={color.label}
+              onClick={() => onHighlight(color.id)}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      <div className="reader-popover__actions">
+        {popup.kind === "selection" ? (
+          <button type="button" onClick={() => onHighlight("yellow")}>
+            <Highlighter size={16} />
+            划线
+          </button>
+        ) : null}
+        <button type="button" onClick={onThought}>
+          <PencilLine size={16} />
+          {popup.kind === "mark" && popup.note.thought ? "改想法" : "想法"}
+        </button>
+        {popup.kind === "selection" ? (
+          <>
+            <button type="button" onClick={onCopy}>
+              <Copy size={16} />
+              复制
+            </button>
+            <button type="button" onClick={onListen}>
+              <Headphones size={16} />
+              从这里听
+            </button>
+          </>
+        ) : (
+          <button type="button" onClick={onDelete}>
+            <Trash2 size={16} />
+            删除
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ReaderScreen({
   book,
+  notes,
   settings,
   currentSentenceId,
   onBack,
   onProgress,
   onStartListening,
-  onAddNote,
+  onHighlight,
+  onUpdateNote,
+  onDeleteNote,
   onSettingsChange,
 }: {
   book: Book;
+  notes: BookNote[];
   settings: ReaderSettings;
   currentSentenceId: string;
   onBack: () => void;
   onProgress: (position: BookPosition) => void;
   onStartListening: (position: BookPosition) => void;
-  onAddNote: (position: BookPosition, excerpt: string) => void;
+  onHighlight: (
+    parts: HighlightPart[],
+    color: HighlightColor
+  ) => Promise<BookNote | null>;
+  onUpdateNote: (note: BookNote) => void;
+  onDeleteNote: (note: BookNote) => void;
   onSettingsChange: (settings: ReaderSettings) => void;
 }) {
   const initial = book.readingPosition ?? initialPosition(book);
@@ -847,6 +1222,11 @@ function ReaderScreen({
   );
   const [showChapters, setShowChapters] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [popup, setPopup] = useState<ReaderPopupState | null>(null);
+  const [thoughtDraft, setThoughtDraft] = useState<{
+    note: BookNote;
+    value: string;
+  } | null>(null);
   const articleRef = useRef<HTMLElement>(null);
   const savedSentenceRef = useRef(initial.sentenceId);
   const paged = settings.readingMode === "page";
@@ -869,6 +1249,16 @@ function ReaderScreen({
     sentences.forEach((sentence, index) => map.set(sentence.id, index));
     return map;
   }, [sentences]);
+  const marksBySentence = useMemo(() => {
+    const map = new Map<string, BookNote[]>();
+    for (const note of notes) {
+      if (note.kind !== "highlight") continue;
+      const list = map.get(note.sentenceId);
+      if (list) list.push(note);
+      else map.set(note.sentenceId, [note]);
+    }
+    return map;
+  }, [notes]);
 
   // 进入章节时要落到哪一页：句子 id、章末，或者不动。
   const restoreRef = useRef<string | "last" | null>(
@@ -1002,6 +1392,59 @@ function ReaderScreen({
     onProgress(position);
   };
 
+  const captureSelection = () => {
+    const article = articleRef.current;
+    const selection = window.getSelection();
+    if (!article || !selection || selection.isCollapsed || !selection.rangeCount) {
+      return false;
+    }
+    const range = selection.getRangeAt(0);
+    if (!article.contains(range.commonAncestorContainer)) return false;
+
+    const parts: HighlightPart[] = [];
+    article
+      .querySelectorAll<HTMLElement>("[data-sentence-id]")
+      .forEach((element) => {
+        const hit = offsetsWithin(element, range);
+        if (!hit || !hit.text.trim()) return;
+        parts.push({
+          sentenceId: element.dataset.sentenceId ?? "",
+          sentenceIndex: Number(element.dataset.sentenceIndex),
+          start: hit.start,
+          end: hit.end,
+          text: hit.text,
+        });
+      });
+    if (!parts.length) return false;
+
+    setPopup({
+      kind: "selection",
+      anchor: range.getBoundingClientRect(),
+      parts,
+      text: parts.map((part) => part.text).join(""),
+    });
+    return true;
+  };
+
+  const openMarkPopup = (element: HTMLElement, note: BookNote) => {
+    window.getSelection()?.removeAllRanges();
+    setPopup({ kind: "mark", anchor: element.getBoundingClientRect(), note });
+  };
+
+  const applyHighlight = async (color: HighlightColor) => {
+    if (popup?.kind === "mark") {
+      onUpdateNote({ ...popup.note, color });
+      setPopup(null);
+      return;
+    }
+    if (popup?.kind !== "selection") return;
+    const created = await onHighlight(popup.parts, color);
+    window.getSelection()?.removeAllRanges();
+    setPopup(
+      created ? { kind: "mark", anchor: popup.anchor, note: created } : null
+    );
+  };
+
   const handleArticleClick = (event: MouseEvent<HTMLElement>) => {
     // 刚翻过页就别再顺手把那一下当成选句子。
     if (turnedRef.current) {
@@ -1011,6 +1454,18 @@ function ReaderScreen({
     // 划词时不要改选句子，否则刚拉出来的选区会被重新渲染打断。
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed) return;
+
+    const mark = (event.target as HTMLElement).closest<HTMLElement>(
+      "mark[data-note-id]"
+    );
+    if (mark) {
+      const note = notes.find((item) => item.id === mark.dataset.noteId);
+      if (note) {
+        openMarkPopup(mark, note);
+        return;
+      }
+    }
+    setPopup(null);
 
     const target = (event.target as HTMLElement).closest<HTMLElement>(
       "[data-sentence-id]"
@@ -1062,6 +1517,33 @@ function ReaderScreen({
   const swipeRef = useRef<{ x: number; y: number } | null>(null);
   const turnedRef = useRef(false);
 
+  // 选区可能是拖动系统选择手柄结束的，那一下不落在正文元素上，只能听 document。
+  useEffect(() => {
+    const onPointerUp = (event: PointerEvent) => {
+      if ((event.target as HTMLElement | null)?.closest(".reader-popover")) {
+        return;
+      }
+      window.setTimeout(captureSelection, 10);
+    };
+    document.addEventListener("pointerup", onPointerUp);
+    return () => document.removeEventListener("pointerup", onPointerUp);
+  });
+
+  useEffect(() => {
+    const onSelectionChange = () => {
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return;
+      setPopup((current) => (current?.kind === "selection" ? null : current));
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () =>
+      document.removeEventListener("selectionchange", onSelectionChange);
+  }, []);
+
+  useEffect(() => {
+    setPopup(null);
+  }, [chapterIndex, pageIndex]);
+
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     swipeRef.current = { x: event.clientX, y: event.clientY };
   };
@@ -1069,6 +1551,9 @@ function ReaderScreen({
   const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     const start = swipeRef.current;
     swipeRef.current = null;
+    // 正在划词就别把这一下当成翻页手势。
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) return;
     if (!paged || !start) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
@@ -1181,7 +1666,10 @@ function ReaderScreen({
                 sentence.id === selectedSentenceId ? "is-selected" : ""
               } ${sentence.id === currentSentenceId ? "is-speaking" : ""}`}
             >
-              {sentence.text}
+              {renderSentence(
+                sentence.text,
+                marksBySentence.get(sentence.id) ?? []
+              )}
             </span>
           ));
 
@@ -1246,32 +1734,88 @@ function ReaderScreen({
         </div>
       ) : null}
 
-      {selected ? (
-        <div className="reader-selection-bar">
-          <button
-            type="button"
-            onClick={() =>
-              onStartListening(
-                positionFor(book, chapterIndex, Math.max(selectedIndex, 0))
-              )
-            }
-          >
-            <Headphones size={18} />
-            从这里听
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              onAddNote(
-                positionFor(book, chapterIndex, Math.max(selectedIndex, 0)),
-                selected.text
-              )
-            }
-          >
-            <Bookmark size={18} />
-            标记
-          </button>
-        </div>
+      {selected && !popup ? (
+        <button
+          type="button"
+          className="reader-listen-pill"
+          onClick={() =>
+            onStartListening(
+              positionFor(book, chapterIndex, Math.max(selectedIndex, 0))
+            )
+          }
+        >
+          <Headphones size={16} />
+          从这一句开始听
+        </button>
+      ) : null}
+
+      {popup ? (
+        <ReaderPopover
+          popup={popup}
+          onHighlight={applyHighlight}
+          onCopy={() => {
+            const text =
+              popup.kind === "selection" ? popup.text : popup.note.excerpt;
+            navigator.clipboard?.writeText(text).catch(() => undefined);
+            window.getSelection()?.removeAllRanges();
+            setPopup(null);
+          }}
+          onListen={() => {
+            const index =
+              popup.kind === "selection"
+                ? popup.parts[0].sentenceIndex
+                : (sentenceIndexById.get(popup.note.sentenceId) ?? 0);
+            window.getSelection()?.removeAllRanges();
+            setPopup(null);
+            onStartListening(positionFor(book, chapterIndex, index));
+          }}
+          onThought={async () => {
+            const note =
+              popup.kind === "mark"
+                ? popup.note
+                : await onHighlight(popup.parts, "yellow");
+            window.getSelection()?.removeAllRanges();
+            setPopup(null);
+            if (note) setThoughtDraft({ note, value: note.thought ?? "" });
+          }}
+          onDelete={() => {
+            if (popup.kind === "mark") onDeleteNote(popup.note);
+            setPopup(null);
+          }}
+        />
+      ) : null}
+
+      {thoughtDraft ? (
+        <Modal title="写想法" onClose={() => setThoughtDraft(null)}>
+          <div className="thought-editor">
+            <blockquote>{thoughtDraft.note.excerpt}</blockquote>
+            <textarea
+              autoFocus
+              rows={5}
+              value={thoughtDraft.value}
+              placeholder="写点什么…"
+              onChange={(event) =>
+                setThoughtDraft({
+                  note: thoughtDraft.note,
+                  value: event.target.value,
+                })
+              }
+            />
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                onUpdateNote({
+                  ...thoughtDraft.note,
+                  thought: thoughtDraft.value.trim() || undefined,
+                });
+                setThoughtDraft(null);
+              }}
+            >
+              保存想法
+            </button>
+          </div>
+        </Modal>
       ) : null}
 
       {showChapters ? (
@@ -1793,7 +2337,8 @@ export default function MotingApp() {
   const [notes, setNotes] = useState<BookNote[]>([]);
   const [settings, setSettings] =
     useState<ReaderSettings>(DEFAULT_SETTINGS);
-  const [view, setView] = useState<AppView>({ name: "library" });
+  const [view, setView] = useState<AppView>({ name: "reading-now" });
+  const [showSettings, setShowSettings] = useState(false);
   const [ready, setReady] = useState(false);
   const [importProgress, setImportProgress] =
     useState<ImportProgress | null>(null);
@@ -1801,6 +2346,8 @@ export default function MotingApp() {
   const [importError, setImportError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [thoughtTarget, setThoughtTarget] = useState<BookNote | null>(null);
+  const [thoughtDraft, setThoughtDraft] = useState("");
   const [toast, setToast] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1901,9 +2448,18 @@ export default function MotingApp() {
     ? books.find((book) => book.id === player.location?.bookId)
     : undefined;
   const selectedBook =
-    view.name === "reader" || view.name === "player"
+    view.name === "reader" ||
+    view.name === "player" ||
+    view.name === "book-notes"
       ? books.find((book) => book.id === view.bookId)
       : undefined;
+  const selectedBookNotes = useMemo(
+    () =>
+      selectedBook
+        ? notes.filter((note) => note.bookId === selectedBook.id)
+        : [],
+    [notes, selectedBook]
+  );
 
   const changeSettings = (next: ReaderSettings) => {
     setSettings(next);
@@ -1976,17 +2532,16 @@ export default function MotingApp() {
     }
   };
 
-  const addNote = async (
+  const addListeningMark = async (
     book: Book,
     position: BookPosition,
-    excerpt: string,
-    kind: BookNote["kind"]
+    excerpt: string
   ) => {
     const existing = notes.find(
       (note) =>
         note.bookId === book.id &&
         note.sentenceId === position.sentenceId &&
-        note.kind === kind
+        note.kind === "listening-mark"
     );
     if (existing) {
       showToast("这一句已经标记过了");
@@ -1997,13 +2552,51 @@ export default function MotingApp() {
       bookId: book.id,
       chapterId: position.chapterId,
       sentenceId: position.sentenceId,
-      kind,
+      kind: "listening-mark",
       excerpt,
       createdAt: Date.now(),
     };
     await saveNote(note).catch(() => undefined);
     setNotes((current) => [note, ...current]);
-    showToast(kind === "bookmark" ? "已加入阅读书签" : "已标记当前听书位置");
+    showToast("已标记当前听书位置");
+  };
+
+  /** 跨句选中会拆成每句一条划线，返回第一条给弹层继续操作。 */
+  const createHighlights = async (
+    book: Book,
+    parts: HighlightPart[],
+    color: HighlightColor
+  ): Promise<BookNote | null> => {
+    const created = parts.map((part) => {
+      const position = positionFor(
+        book,
+        findSentence(book, part.sentenceId)?.chapterIndex ?? 0,
+        part.sentenceIndex
+      );
+      return {
+        id: makeId("note"),
+        bookId: book.id,
+        chapterId: position.chapterId,
+        sentenceId: part.sentenceId,
+        kind: "highlight" as const,
+        excerpt: part.text,
+        createdAt: Date.now(),
+        start: part.start,
+        end: part.end,
+        color,
+      } satisfies BookNote;
+    });
+    if (!created.length) return null;
+    await Promise.all(created.map((note) => saveNote(note).catch(() => undefined)));
+    setNotes((current) => [...created, ...current]);
+    return created[0];
+  };
+
+  const updateNote = (note: BookNote) => {
+    setNotes((current) =>
+      current.map((item) => (item.id === note.id ? note : item))
+    );
+    saveNote(note).catch(() => undefined);
   };
 
   const handleReadProgress = (book: Book, position: BookPosition) => {
@@ -2058,7 +2651,8 @@ export default function MotingApp() {
     setNotes([]);
     setSettings(DEFAULT_SETTINGS);
     setConfirmClear(false);
-    setView({ name: "library" });
+    setShowSettings(false);
+    setView({ name: "reading-now" });
     showToast("本地书库已清空，已保留一份使用指南");
   };
 
@@ -2067,7 +2661,9 @@ export default function MotingApp() {
       ? "library"
       : view.name === "player"
         ? "listen"
-        : view.name;
+        : view.name === "book-notes"
+          ? "notes"
+          : view.name;
 
   if (!ready) {
     return (
@@ -2087,21 +2683,24 @@ export default function MotingApp() {
       {view.name === "reader" && selectedBook ? (
         <ReaderScreen
           book={selectedBook}
+          notes={selectedBookNotes}
           settings={settings}
           currentSentenceId={
             player.location?.bookId === selectedBook.id
               ? player.currentSentenceId
               : ""
           }
-          onBack={() => setView({ name: "library" })}
+          onBack={() => setView({ name: "reading-now" })}
           onProgress={(position) => handleReadProgress(selectedBook, position)}
           onStartListening={(position) => {
             player.start(selectedBook.id, position);
             setView({ name: "player", bookId: selectedBook.id });
           }}
-          onAddNote={(position, excerpt) =>
-            addNote(selectedBook, position, excerpt, "bookmark")
+          onHighlight={(parts, color) =>
+            createHighlights(selectedBook, parts, color)
           }
+          onUpdateNote={updateNote}
+          onDeleteNote={deleteBookNote}
           onSettingsChange={changeSettings}
         />
       ) : view.name === "player" && selectedBook ? (
@@ -2112,7 +2711,7 @@ export default function MotingApp() {
           onBack={() => setView({ name: "listen" })}
           onOpenReader={(position) => openReader(selectedBook, position)}
           onAddNote={(position, excerpt) =>
-            addNote(selectedBook, position, excerpt, "listening-mark")
+            addListeningMark(selectedBook, position, excerpt)
           }
           onSettingsChange={changeSettings}
         />
@@ -2134,11 +2733,19 @@ export default function MotingApp() {
           />
 
           <section className="app-content">
-            {view.name === "library" ? (
+            {view.name === "reading-now" ? (
+              <ReadingNowScreen
+                books={books}
+                onOpenReader={(book) => openReader(book)}
+                onPlay={(book) => openPlayer(book, true)}
+                onImport={() => fileInputRef.current?.click()}
+                onOpenSettings={() => setShowSettings(true)}
+              />
+            ) : view.name === "library" ? (
               <LibraryScreen
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
-                onOpen={openReader}
+                onOpen={(book) => openReader(book)}
                 onDelete={setDeleteTarget}
               />
             ) : view.name === "listen" ? (
@@ -2147,20 +2754,25 @@ export default function MotingApp() {
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}
               />
-            ) : view.name === "notes" ? (
+            ) : view.name === "book-notes" && selectedBook ? (
+              <BookNotesScreen
+                book={selectedBook}
+                notes={selectedBookNotes}
+                onBack={() => setView({ name: "notes" })}
+                onOpen={openNote}
+                onDelete={deleteBookNote}
+                onEditThought={(note) => {
+                  setThoughtTarget(note);
+                  setThoughtDraft(note.thought ?? "");
+                }}
+              />
+            ) : (
               <NotesScreen
                 notes={notes}
                 books={books}
-                onOpen={openNote}
-                onDelete={deleteBookNote}
-              />
-            ) : (
-              <SettingsScreen
-                settings={settings}
-                voices={player.voices}
-                books={books}
-                onChange={changeSettings}
-                onClear={() => setConfirmClear(true)}
+                onOpenBook={(book) =>
+                  setView({ name: "book-notes", bookId: book.id })
+                }
               />
             )}
           </section>
@@ -2273,6 +2885,47 @@ export default function MotingApp() {
                 清空书库
               </button>
             </div>
+          </div>
+        </Modal>
+      ) : null}
+
+      {showSettings ? (
+        <Modal title="设置" wide onClose={() => setShowSettings(false)}>
+          <SettingsPanel
+            settings={settings}
+            voices={player.voices}
+            books={books}
+            onChange={changeSettings}
+            onClear={() => setConfirmClear(true)}
+          />
+        </Modal>
+      ) : null}
+
+      {thoughtTarget ? (
+        <Modal title="写想法" onClose={() => setThoughtTarget(null)}>
+          <div className="thought-editor">
+            <blockquote>{thoughtTarget.excerpt}</blockquote>
+            <textarea
+              value={thoughtDraft}
+              onChange={(event) => setThoughtDraft(event.target.value)}
+              placeholder="写下此刻的想法"
+              rows={5}
+              autoFocus
+            />
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                const text = thoughtDraft.trim();
+                updateNote({
+                  ...thoughtTarget,
+                  thought: text ? text : undefined,
+                });
+                setThoughtTarget(null);
+              }}
+            >
+              保存想法
+            </button>
           </div>
         </Modal>
       ) : null}

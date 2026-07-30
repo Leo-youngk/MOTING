@@ -2,10 +2,11 @@ export type BookFormat = "epub" | "pdf" | "txt" | "md" | "demo";
 
 export type BookStatus = "ready" | "parsing" | "error";
 
-export type MainView = "library" | "listen" | "notes" | "settings";
+export type MainView = "reading-now" | "library" | "listen" | "notes";
 
 export type AppView =
   | { name: MainView }
+  | { name: "book-notes"; bookId: string }
   | { name: "reader"; bookId: string }
   | { name: "player"; bookId: string };
 
@@ -77,7 +78,10 @@ export interface Book {
   listeningPosition?: BookPosition;
 }
 
-export type NoteKind = "bookmark" | "listening-mark";
+export type NoteKind = "highlight" | "listening-mark";
+
+/** 划线颜色，取值对应 CSS 里 --mark-* 那组变量。 */
+export type HighlightColor = "yellow" | "green" | "blue" | "pink";
 
 export interface BookNote {
   id: string;
@@ -87,6 +91,12 @@ export interface BookNote {
   kind: NoteKind;
   excerpt: string;
   createdAt: number;
+  /** 划线在这句话里的字符区间，缺省表示整句。 */
+  start?: number;
+  end?: number;
+  color?: HighlightColor;
+  /** 用户为这条划线写的想法。 */
+  thought?: string;
 }
 
 export type ReaderTheme = "paper" | "white" | "night";
