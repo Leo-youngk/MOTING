@@ -38,10 +38,13 @@
   box-sizing: border-box;
 }
 
+/* 到顶／到底不要橡皮筋回弹，也不要下拉刷新——回弹会让人觉得页面是浮在容器里的。
+   写在根元素上会传播到视口，body 上再写一遍是给旧 WebKit 兜底。 */
 html {
   min-height: 100%;
   background: var(--paper);
   color-scheme: light;
+  overscroll-behavior-y: none;
 }
 
 html[data-reader-theme="night"] {
@@ -56,6 +59,7 @@ body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  overscroll-behavior-y: none;
 }
 
 button,
@@ -117,11 +121,12 @@ button:disabled {
   padding-bottom: calc(96px + env(safe-area-inset-bottom));
 }
 
+/* 高度和底部留白都交给外面的 .app-content：这里再叠一层 100dvh 或 padding-bottom，
+   就会把它避让 tab bar 的留白顶出视口，短页面也能滑动。 */
 .screen {
   width: min(100%, 780px);
-  min-height: 100dvh;
   margin: 0 auto;
-  padding: calc(14px + env(safe-area-inset-top)) 0 40px;
+  padding: calc(14px + env(safe-area-inset-top)) 0 0;
 }
 
 /* 横向留白统一交给这个变量，横滑书架要能出血到屏幕边缘。 */
@@ -432,6 +437,7 @@ button:disabled {
   display: flex;
   gap: 20px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   padding: 4px 20px 22px;
   scroll-padding-inline: 20px;
   scroll-snap-type: x mandatory;
@@ -1900,6 +1906,7 @@ input[type="range"] {
   width: min(100%, 560px);
   max-height: min(82dvh, 760px);
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 8px 20px calc(22px + env(safe-area-inset-bottom));
   border: 1px solid rgb(204 198 188 / 80%);
   border-bottom: 0;
