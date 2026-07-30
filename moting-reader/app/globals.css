@@ -1982,9 +1982,16 @@ input[type="range"] {
   padding: 17px;
   border-radius: 10px;
   background: var(--paper);
-  font-family: var(--font-serif);
   font-size: 16px;
   line-height: 1.8;
+}
+
+.reader-settings__preview.is-serif {
+  font-family: var(--font-serif);
+}
+
+.reader-settings__preview.is-sans {
+  font-family: var(--font-sans);
 }
 
 .reader-settings__row {

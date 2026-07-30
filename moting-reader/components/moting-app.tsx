@@ -1843,7 +1843,11 @@ function ReaderScreen({
       {showSettings ? (
         <Modal title="阅读设置" onClose={() => setShowSettings(false)}>
           <div className="reader-settings">
-            <div className="reader-settings__preview">
+            <div
+              className={`reader-settings__preview ${
+                settings.fontFamily === "serif" ? "is-serif" : "is-sans"
+              }`}
+            >
               阅读应该让工具安静下来，让文字重新成为中心。
             </div>
             <div className="reader-settings__row">
@@ -1889,6 +1893,20 @@ function ReaderScreen({
               />
               <strong>{settings.lineHeight.toFixed(1)}</strong>
             </label>
+            <div className="segmented-control">
+              {(["serif", "sans"] as const).map((family) => (
+                <button
+                  type="button"
+                  key={family}
+                  className={settings.fontFamily === family ? "is-active" : ""}
+                  onClick={() =>
+                    onSettingsChange({ ...settings, fontFamily: family })
+                  }
+                >
+                  {family === "serif" ? "宋体" : "黑体"}
+                </button>
+              ))}
+            </div>
             <div className="segmented-control">
               {(["scroll", "page"] as const).map((mode) => (
                 <button
