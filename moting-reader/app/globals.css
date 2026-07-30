@@ -1494,34 +1494,36 @@ input[type="range"] {
   box-shadow: 0 0 0 3px rgb(113 128 145 / 17%);
 }
 
-.reader-chapter-nav {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: center;
-  gap: 12px;
+/* 接章用的哨兵。零高度的元素在部分浏览器里不会触发 observer，所以留 1px。 */
+.reader-sentinel {
+  height: 1px;
+  pointer-events: none;
+}
+
+/* 连续滚动里章与章直接相接，靠章首那块标题分隔，不另加分隔线。 */
+.reader-chapter + .reader-chapter .reader-title {
+  margin-top: 104px;
+}
+
+.reader-end {
   margin-top: 72px;
-  padding-top: 22px;
+  padding-top: 26px;
   border-top: 1px solid var(--reader-line);
   font-family: var(--font-sans);
+  text-align: center;
 }
 
-.reader-chapter-nav button {
-  display: flex;
-  min-height: 44px;
-  align-items: center;
-  gap: 5px;
-  background: transparent;
-  color: inherit;
-  font-size: 12px;
-}
-
-.reader-chapter-nav button:last-child {
-  justify-content: flex-end;
-}
-
-.reader-chapter-nav span {
-  color: var(--reader-muted);
+.reader-end span {
+  color: var(--accent);
   font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+.reader-end p {
+  margin: 8px 0 0;
+  color: var(--reader-muted);
+  font-size: 11px;
 }
 
 /* 划线本体：底部一道粗色带，不动行高，也不盖住字。 */

@@ -54,6 +54,7 @@ import {
   formatRemaining,
   initialPosition,
   makeId,
+  nextChapterRange,
   positionFor,
 } from "../lib/content";
 import { createDemoBook } from "../lib/demo";
@@ -1009,8 +1010,14 @@ function SettingsPanel({
 
 const HEADING_TAGS = ["h2", "h2", "h3", "h4", "h5", "h6"] as const;
 
+/** 连续滚动时最多同时挂在 DOM 里的章节数。整本全渲染的话上百章会有几万个句子 span。 */
+const CHAPTER_WINDOW = 5;
+/** 离顶／底还有这么多像素就把相邻章接上，留够缓冲才不会滑到白屏。 */
+const CHAPTER_LOAD_MARGIN = 1200;
+
 /** 一条划线落在某一句上的片段。跨句选中会拆成多条。 */
 export interface HighlightPart {
+  chapterIndex: number;
   sentenceId: string;
   sentenceIndex: number;
   start: number;
@@ -1217,9 +1224,12 @@ function ReaderScreen({
 }) {
   const initial = book.readingPosition ?? initialPosition(book);
   const [chapterIndex, setChapterIndex] = useState(initial.chapterIndex);
-  const [selectedSentenceId, setSelectedSentenceId] = useState(
-    initial.sentenceId
-  );
+  const [selectedPos, setSelectedPos] = useState({
+    sentenceId: initial.sentenceId,
+    chapterIndex: initial.chapterIndex,
+    sentenceIndex: initial.sentenceIndex,
+  });
+  const selectedSentenceId = selectedPos.sentenceId;
   const [showChapters, setShowChapters] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [popup, setPopup] = useState<ReaderPopupState | null>(null);
@@ -1240,15 +1250,31 @@ function ReaderScreen({
     setPageIndex(next);
   };
   const chapter = book.chapters[chapterIndex];
-  const sentences = useMemo(
-    () => (chapter ? flattenChapter(chapter) : []),
-    [chapter]
-  );
-  const sentenceIndexById = useMemo(() => {
-    const map = new Map<string, number>();
-    sentences.forEach((sentence, index) => map.set(sentence.id, index));
+
+  // 滚动模式是连续阅读：range 覆盖的这几章一起挂在 DOM 里，滑到边缘再往外接一章、
+  // 从另一头摘掉一章。分页模式仍旧一次只排当前这一章。
+  const [range, setRange] = useState({
+    start: initial.chapterIndex,
+    end: initial.chapterIndex,
+  });
+  const rangeRef = useRef(range);
+
+  const visibleChapters = useMemo(() => {
+    if (paged) return chapter ? [{ chapter, index: chapterIndex }] : [];
+    return book.chapters
+      .slice(range.start, range.end + 1)
+      .map((item, offset) => ({ chapter: item, index: range.start + offset }));
+  }, [paged, chapter, chapterIndex, book.chapters, range.start, range.end]);
+
+  const sentenceIndexByChapter = useMemo(() => {
+    const map = new Map<number, Map<string, number>>();
+    for (const { chapter: item, index } of visibleChapters) {
+      const inner = new Map<string, number>();
+      flattenChapter(item).forEach((sentence, i) => inner.set(sentence.id, i));
+      map.set(index, inner);
+    }
     return map;
-  }, [sentences]);
+  }, [visibleChapters]);
   const marksBySentence = useMemo(() => {
     const map = new Map<string, BookNote[]>();
     for (const note of notes) {
@@ -1327,9 +1353,10 @@ function ReaderScreen({
         ?.scrollIntoView({ block: "center" });
     }, 80);
     return () => clearTimeout(timer);
-    // Only restore when entering a chapter, not after each persisted update.
+    // 只在进入这本书／切换阅读模式时回到上次的位置。连续滚动里 chapterIndex 会随滑动
+    // 一直变，把它放进依赖会让页面自己跳回去。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [book.id, chapterIndex, paged]);
+  }, [book.id, paged]);
 
   // 分页模式下没有滚动事件，进度改从当前页上的第一句话推出来。
   useEffect(() => {
@@ -1366,12 +1393,16 @@ function ReaderScreen({
           );
         const element = candidates[0]?.target as HTMLElement | undefined;
         const index = Number(element?.dataset.sentenceIndex);
+        // 连续滚动里视口内可能横跨两章，章节号只能从元素上读，不能用闭包里的。
+        const chIndex = Number(element?.dataset.chapterIndex);
         const id = element?.dataset.sentenceId;
-        if (!id || Number.isNaN(index) || savedSentenceRef.current === id) return;
+        if (!id || Number.isNaN(index) || Number.isNaN(chIndex)) return;
+        setChapterIndex(chIndex);
+        if (savedSentenceRef.current === id) return;
         if (pending) clearTimeout(pending);
         pending = setTimeout(() => {
           savedSentenceRef.current = id;
-          onProgress(positionFor(book, chapterIndex, index));
+          onProgress(positionFor(book, chIndex, index));
         }, 500);
       },
       { rootMargin: "-90px 0px -58% 0px", threshold: 0.15 }
@@ -1383,13 +1414,104 @@ function ReaderScreen({
       if (pending) clearTimeout(pending);
       observer.disconnect();
     };
-  }, [book, chapterIndex, onProgress, paged]);
+  }, [book, onProgress, paged, range.start, range.end]);
 
-  const chooseSentence = (sentenceId: string, sentenceIndex: number) => {
-    setSelectedSentenceId(sentenceId);
-    const position = positionFor(book, chapterIndex, sentenceIndex);
+  // 接章／摘章都会改变正文上方的高度，不补偿的话页面会当场跳一下。
+  // 先记住视口里第一章的位置，重排后按它的位移把滚动条推回去。
+  const anchorRef = useRef<{ index: number; top: number } | null>(null);
+  const captureAnchor = () => {
+    const sections = articleRef.current?.querySelectorAll<HTMLElement>(
+      "[data-chapter-section]"
+    );
+    if (!sections) return;
+    for (const section of sections) {
+      const rect = section.getBoundingClientRect();
+      if (rect.bottom > 0) {
+        anchorRef.current = {
+          index: Number(section.dataset.chapterSection),
+          top: rect.top,
+        };
+        return;
+      }
+    }
+  };
+
+  useLayoutEffect(() => {
+    rangeRef.current = range;
+    const anchor = anchorRef.current;
+    anchorRef.current = null;
+    if (!anchor) return;
+    const section = articleRef.current?.querySelector<HTMLElement>(
+      `[data-chapter-section="${anchor.index}"]`
+    );
+    if (!section) return;
+    const delta = section.getBoundingClientRect().top - anchor.top;
+    if (delta) window.scrollBy(0, delta);
+  }, [range]);
+
+  // 正文两端各放一个哨兵，进到缓冲区就接下一章。用 observer 而不是 scroll 事件，
+  // 免得每次滚动都去读 scrollHeight 触发同步布局。
+  const startSentinelRef = useRef<HTMLDivElement>(null);
+  const endSentinelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (paged) return;
+    const article = articleRef.current;
+    const startEl = startSentinelRef.current;
+    const endEl = endSentinelRef.current;
+    if (!article || !startEl || !endEl) return;
+    if (!("IntersectionObserver" in window)) return;
+    const last = book.chapters.length - 1;
+
+    const rectOf = (index: number) =>
+      article
+        .querySelector<HTMLElement>(`[data-chapter-section="${index}"]`)
+        ?.getBoundingClientRect() ?? null;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const current = rangeRef.current;
+        const hit = (target: Element) =>
+          entries.some((entry) => entry.target === target && entry.isIntersecting);
+
+        const next = nextChapterRange(current, {
+          lastChapter: last,
+          hitStart: hit(startEl),
+          hitEnd: hit(endEl),
+          firstBottom: rectOf(current.start)?.bottom ?? null,
+          lastTop: rectOf(current.end)?.top ?? null,
+          viewportHeight: window.innerHeight,
+          margin: CHAPTER_LOAD_MARGIN,
+          windowSize: CHAPTER_WINDOW,
+        });
+        if (next === current) return;
+        captureAnchor();
+        rangeRef.current = next;
+        setRange(next);
+      },
+      { rootMargin: `${CHAPTER_LOAD_MARGIN}px 0px` }
+    );
+    observer.observe(startEl);
+    observer.observe(endEl);
+    return () => observer.disconnect();
+  }, [paged, book.chapters.length, range]);
+
+  // 换书或切换阅读模式时重新以当前章开窗，别把旧窗口带过去。
+  useEffect(() => {
+    const reset = { start: chapterIndex, end: chapterIndex };
+    rangeRef.current = reset;
+    setRange(reset);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [book.id, paged]);
+
+  const chooseSentence = (
+    sentenceId: string,
+    sentenceIndex: number,
+    chIndex: number
+  ) => {
+    setSelectedPos({ sentenceId, chapterIndex: chIndex, sentenceIndex });
     savedSentenceRef.current = sentenceId;
-    onProgress(position);
+    onProgress(positionFor(book, chIndex, sentenceIndex));
   };
 
   const captureSelection = () => {
@@ -1408,6 +1530,7 @@ function ReaderScreen({
         const hit = offsetsWithin(element, range);
         if (!hit || !hit.text.trim()) return;
         parts.push({
+          chapterIndex: Number(element.dataset.chapterIndex),
           sentenceId: element.dataset.sentenceId ?? "",
           sentenceIndex: Number(element.dataset.sentenceIndex),
           start: hit.start,
@@ -1472,19 +1595,31 @@ function ReaderScreen({
     );
     const sentenceId = target?.dataset.sentenceId;
     const sentenceIndex = Number(target?.dataset.sentenceIndex);
-    if (!sentenceId || Number.isNaN(sentenceIndex)) return;
-    chooseSentence(sentenceId, sentenceIndex);
+    const chIndex = Number(target?.dataset.chapterIndex);
+    if (!sentenceId || Number.isNaN(sentenceIndex) || Number.isNaN(chIndex)) {
+      return;
+    }
+    chooseSentence(sentenceId, sentenceIndex, chIndex);
   };
 
   const changeChapter = (nextIndex: number, landing: "first" | "last" = "first") => {
     const safe = Math.max(0, Math.min(book.chapters.length - 1, nextIndex));
     setChapterIndex(safe);
     const position = positionFor(book, safe, 0);
-    setSelectedSentenceId(position.sentenceId);
+    setSelectedPos({
+      sentenceId: position.sentenceId,
+      chapterIndex: safe,
+      sentenceIndex: 0,
+    });
     savedSentenceRef.current = position.sentenceId;
     onProgress(position);
     restoreRef.current = landing === "last" ? "last" : null;
+    setPopup(null);
     goToPage(0);
+    // 跳章是重新开窗，不是接章，所以这里不做锚点补偿，直接回到章首。
+    anchorRef.current = null;
+    rangeRef.current = { start: safe, end: safe };
+    setRange({ start: safe, end: safe });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -1542,7 +1677,7 @@ function ReaderScreen({
 
   useEffect(() => {
     setPopup(null);
-  }, [chapterIndex, pageIndex]);
+  }, [pageIndex]);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     swipeRef.current = { x: event.clientX, y: event.clientY };
@@ -1575,11 +1710,6 @@ function ReaderScreen({
     }
   };
 
-  const selectedIndex = sentences.findIndex(
-    (sentence) => sentence.id === selectedSentenceId
-  );
-  const selected =
-    selectedIndex >= 0 ? sentences[selectedIndex] : sentences[0];
   const readerStyle = {
     "--reader-font-size": `${settings.fontSize}px`,
     "--reader-line-height": String(settings.lineHeight),
@@ -1637,90 +1767,102 @@ function ReaderScreen({
           }
           onClick={handleArticleClick}
         >
-        <div className="reader-title">
-          <span>
-            {String(chapterIndex + 1).padStart(2, "0")} /{" "}
-            {String(book.chapters.length).padStart(2, "0")}
-          </span>
-          <h1>{chapter?.title}</h1>
-          <p>{book.title}</p>
-        </div>
+        {paged ? null : (
+          <div ref={startSentinelRef} className="reader-sentinel" aria-hidden />
+        )}
 
-        {chapter?.paragraphs.map((paragraph) => {
-          if (paragraph.kind === "image") {
-            return (
-              <ReaderImage
-                key={paragraph.id}
-                imageId={paragraph.imageId ?? ""}
-                alt={paragraph.alt ?? ""}
-              />
-            );
-          }
-
-          const sentenceSpans = paragraph.sentences.map((sentence) => (
-            <span
-              key={sentence.id}
-              data-sentence-id={sentence.id}
-              data-sentence-index={sentenceIndexById.get(sentence.id)}
-              className={`${
-                sentence.id === selectedSentenceId ? "is-selected" : ""
-              } ${sentence.id === currentSentenceId ? "is-speaking" : ""}`}
-            >
-              {renderSentence(
-                sentence.text,
-                marksBySentence.get(sentence.id) ?? []
-              )}
-            </span>
-          ));
-
-          if (paragraph.kind === "heading") {
-            // 章节名已经占了 h1，章内小标题从 h2 起排。
-            const Heading = HEADING_TAGS[(paragraph.level ?? 3) - 1] ?? "h3";
-            return (
-              <Heading key={paragraph.id} className="reader-block is-heading">
-                {sentenceSpans}
-              </Heading>
-            );
-          }
-          if (paragraph.kind === "quote") {
-            return (
-              <blockquote key={paragraph.id} className="reader-block is-quote">
-                {sentenceSpans}
-              </blockquote>
-            );
-          }
+        {visibleChapters.map(({ chapter: item, index }) => {
+          const indexById = sentenceIndexByChapter.get(index);
           return (
-            <p
-              key={paragraph.id}
-              className={`reader-block ${
-                paragraph.kind === "list" ? "is-list" : ""
-              }`}
+            <section
+              key={item.id}
+              className="reader-chapter"
+              data-chapter-section={index}
             >
-              {sentenceSpans}
-            </p>
+              <div className="reader-title">
+                <span>
+                  {String(index + 1).padStart(2, "0")} /{" "}
+                  {String(book.chapters.length).padStart(2, "0")}
+                </span>
+                <h1>{item.title}</h1>
+                {index === 0 ? <p>{book.title}</p> : null}
+              </div>
+
+              {item.paragraphs.map((paragraph) => {
+                if (paragraph.kind === "image") {
+                  return (
+                    <ReaderImage
+                      key={paragraph.id}
+                      imageId={paragraph.imageId ?? ""}
+                      alt={paragraph.alt ?? ""}
+                    />
+                  );
+                }
+
+                const sentenceSpans = paragraph.sentences.map((sentence) => (
+                  <span
+                    key={sentence.id}
+                    data-sentence-id={sentence.id}
+                    data-sentence-index={indexById?.get(sentence.id)}
+                    data-chapter-index={index}
+                    className={`${
+                      sentence.id === selectedSentenceId ? "is-selected" : ""
+                    } ${sentence.id === currentSentenceId ? "is-speaking" : ""}`}
+                  >
+                    {renderSentence(
+                      sentence.text,
+                      marksBySentence.get(sentence.id) ?? []
+                    )}
+                  </span>
+                ));
+
+                if (paragraph.kind === "heading") {
+                  // 章节名已经占了 h1，章内小标题从 h2 起排。
+                  const Heading =
+                    HEADING_TAGS[(paragraph.level ?? 3) - 1] ?? "h3";
+                  return (
+                    <Heading
+                      key={paragraph.id}
+                      className="reader-block is-heading"
+                    >
+                      {sentenceSpans}
+                    </Heading>
+                  );
+                }
+                if (paragraph.kind === "quote") {
+                  return (
+                    <blockquote
+                      key={paragraph.id}
+                      className="reader-block is-quote"
+                    >
+                      {sentenceSpans}
+                    </blockquote>
+                  );
+                }
+                return (
+                  <p
+                    key={paragraph.id}
+                    className={`reader-block ${
+                      paragraph.kind === "list" ? "is-list" : ""
+                    }`}
+                  >
+                    {sentenceSpans}
+                  </p>
+                );
+              })}
+            </section>
           );
         })}
 
-        {paged ? null : (
-          <div className="reader-chapter-nav">
-            <button
-              type="button"
-              disabled={chapterIndex === 0}
-              onClick={() => changeChapter(chapterIndex - 1)}
-            >
-              <ChevronLeft size={18} />
-              上一章
-            </button>
-            <span>{book.readingPosition?.percent ?? 0}%</span>
-            <button
-              type="button"
-              disabled={chapterIndex >= book.chapters.length - 1}
-              onClick={() => changeChapter(chapterIndex + 1)}
-            >
-              下一章
-              <ChevronRight size={18} />
-            </button>
+        {!paged && range.end >= book.chapters.length - 1 ? (
+          <div className="reader-end">
+            <span>全书完</span>
+            <p>{book.title}</p>
           </div>
+        ) : null}
+
+        {paged ? null : (
+          <div ref={endSentinelRef} className="reader-sentinel" aria-hidden />
         )}
         </article>
       </div>
@@ -1734,20 +1876,20 @@ function ReaderScreen({
         </div>
       ) : null}
 
-      {selected && !popup ? (
+      {popup ? null : (
         <button
           type="button"
           className="reader-listen-pill"
           onClick={() =>
             onStartListening(
-              positionFor(book, chapterIndex, Math.max(selectedIndex, 0))
+              positionFor(book, selectedPos.chapterIndex, selectedPos.sentenceIndex)
             )
           }
         >
           <Headphones size={16} />
           从这一句开始听
         </button>
-      ) : null}
+      )}
 
       {popup ? (
         <ReaderPopover
@@ -1761,13 +1903,16 @@ function ReaderScreen({
             setPopup(null);
           }}
           onListen={() => {
-            const index =
+            const place =
               popup.kind === "selection"
-                ? popup.parts[0].sentenceIndex
-                : (sentenceIndexById.get(popup.note.sentenceId) ?? 0);
+                ? popup.parts[0]
+                : findSentence(book, popup.note.sentenceId);
             window.getSelection()?.removeAllRanges();
             setPopup(null);
-            onStartListening(positionFor(book, chapterIndex, index));
+            if (!place) return;
+            onStartListening(
+              positionFor(book, place.chapterIndex, place.sentenceIndex)
+            );
           }}
           onThought={async () => {
             const note =

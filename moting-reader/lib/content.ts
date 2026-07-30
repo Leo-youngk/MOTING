@@ -377,6 +377,60 @@ export function initialPosition(book: Book): BookPosition {
   return positionFor(book, 0, 0);
 }
 
+/** 连续滚动时同时挂在 DOM 里的那一段章节，闭区间。 */
+export interface ChapterRange {
+  start: number;
+  end: number;
+}
+
+/**
+ * 正文两端的哨兵进入缓冲区后，算出下一次该挂哪几章。
+ *
+ * 摘章有个不显然的前提：被摘掉的那一章必须整个退到缓冲区之外。否则补偿完滚动位置，
+ * 另一头的哨兵会立刻进区，于是接一章、摘一章来回抖。所以这里要拿两端章节的实际
+ * 位置来判断，光看挂了几章是不够的。
+ */
+export function nextChapterRange(
+  current: ChapterRange,
+  input: {
+    lastChapter: number;
+    hitStart: boolean;
+    hitEnd: boolean;
+    /** 窗口首章相对视口的下边缘，取不到时给 null，表示不确定、别摘。 */
+    firstBottom: number | null;
+    /** 窗口末章相对视口的上边缘。 */
+    lastTop: number | null;
+    viewportHeight: number;
+    margin: number;
+    windowSize: number;
+  }
+): ChapterRange {
+  const mounted = current.end - current.start + 1;
+  const full = mounted >= input.windowSize;
+
+  if (input.hitEnd && current.end < input.lastChapter) {
+    const trim =
+      full && input.firstBottom !== null && input.firstBottom < -input.margin;
+    return {
+      start: trim ? current.start + 1 : current.start,
+      end: current.end + 1,
+    };
+  }
+
+  if (input.hitStart && current.start > 0) {
+    const trim =
+      full &&
+      input.lastTop !== null &&
+      input.lastTop > input.viewportHeight + input.margin;
+    return {
+      start: current.start - 1,
+      end: trim ? current.end - 1 : current.end,
+    };
+  }
+
+  return current;
+}
+
 export function movePosition(
   book: Book,
   chapterIndex: number,

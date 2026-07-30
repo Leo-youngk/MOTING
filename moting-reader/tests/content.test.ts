@@ -7,6 +7,7 @@ import {
   createBook,
   createChapter,
   movePosition,
+  nextChapterRange,
   positionFor,
   sliceSpeechBlock,
   splitIntoSentences,
@@ -180,4 +181,88 @@ test("阅读位置能够跨章节移动并计算进度", () => {
   assert.equal(nextChapter.chapterIndex, 1);
   assert.equal(nextChapter.sentenceIndex, 0);
   assert.equal(end.percent, 100);
+});
+
+const scrollWindow = (over: Partial<Parameters<typeof nextChapterRange>[1]> = {}) => ({
+  lastChapter: 11,
+  hitStart: false,
+  hitEnd: false,
+  firstBottom: null,
+  lastTop: null,
+  viewportHeight: 800,
+  margin: 1200,
+  windowSize: 5,
+  ...over,
+});
+
+test("连续滚动：底部哨兵进区就接上下一章", () => {
+  assert.deepEqual(
+    nextChapterRange({ start: 5, end: 5 }, scrollWindow({ hitEnd: true })),
+    { start: 5, end: 6 }
+  );
+});
+
+test("连续滚动：顶部哨兵进区就往回接上一章", () => {
+  assert.deepEqual(
+    nextChapterRange({ start: 5, end: 5 }, scrollWindow({ hitStart: true })),
+    { start: 4, end: 5 }
+  );
+});
+
+test("连续滚动：到书的两端就不再往外接", () => {
+  const atEnd = { start: 7, end: 11 };
+  assert.equal(
+    nextChapterRange(atEnd, scrollWindow({ hitEnd: true })),
+    atEnd
+  );
+  const atStart = { start: 0, end: 4 };
+  assert.equal(
+    nextChapterRange(atStart, scrollWindow({ hitStart: true })),
+    atStart
+  );
+});
+
+test("连续滚动：挂满一窗后接一章就摘掉另一头", () => {
+  assert.deepEqual(
+    nextChapterRange(
+      { start: 2, end: 6 },
+      scrollWindow({ hitEnd: true, firstBottom: -4000 })
+    ),
+    { start: 3, end: 7 }
+  );
+  assert.deepEqual(
+    nextChapterRange(
+      { start: 2, end: 6 },
+      scrollWindow({ hitStart: true, lastTop: 6000 })
+    ),
+    { start: 1, end: 5 }
+  );
+});
+
+test("连续滚动：要摘的那一章还没退出缓冲区就先留着，免得来回抖", () => {
+  // 首章下边缘只在视口上方 300px，小于 1200px 的缓冲，摘掉它顶部哨兵会立刻再进区。
+  assert.deepEqual(
+    nextChapterRange(
+      { start: 2, end: 6 },
+      scrollWindow({ hitEnd: true, firstBottom: -300 })
+    ),
+    { start: 2, end: 7 }
+  );
+  assert.deepEqual(
+    nextChapterRange(
+      { start: 2, end: 6 },
+      scrollWindow({ hitStart: true, lastTop: 1500 })
+    ),
+    { start: 1, end: 6 }
+  );
+});
+
+test("连续滚动：两端同时进区时先往下接，读者是朝前走的", () => {
+  assert.deepEqual(
+    nextChapterRange(
+      { start: 5, end: 5 },
+      scrollWindow({ hitStart: true, hitEnd: true })
+    ),
+    { start: 5, end: 6 }
+  );
 });
