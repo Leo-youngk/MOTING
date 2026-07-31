@@ -45,9 +45,10 @@
     "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   /* 拉丁字体排在前面：它没有汉字，中文会自动落到后面的宋体上，
      这样中英混排时两种字形各自用对的那一套。
-     汉字统一走自带的 Noto Serif SC，避免 Windows 退化成 SimSun。 */
+     汉字优先用 iOS 自带的宋体：它是苹果为屏幕调过的字形，笔锋和字重跟「图书」一致，
+     Noto Serif SC 排在它后面只作 Windows/Android 的兜底，免得退化成 SimSun。 */
   --font-serif:
-    Georgia, "Noto Serif SC", "Songti SC", "STSong", "Noto Serif CJK SC",
+    Georgia, "Songti SC", "STSong", "Noto Serif SC", "Noto Serif CJK SC",
     "Source Han Serif SC", SimSun, serif;
   /* 楷体、圆体优先落 iOS 自带的 Kaiti SC / Yuanti SC；Windows 上楷体退到 KaiTi，
      圆体没有对应系统字，退到雅黑。真正的目标设备是 iPhone，四款各自成形。 */
@@ -117,8 +118,40 @@ html {
   overscroll-behavior-y: none;
 }
 
+/* 阅读配色挂在 <html> 上而不是 .reader-shell 上：PWA 全屏时 iOS 拿根元素的底色
+   填刘海和 Home 条那两条安全区，挂在内层元素上够不着那里，就会露出外壳的灰。 */
+html[data-reader-theme="paper"] {
+  --reader-background: #f6f1e7;
+  --reader-surface: #fbf8f2;
+  --reader-ink: #302d29;
+  --reader-muted: #7b756b;
+  --reader-line: #ddd5c7;
+}
+
+html[data-reader-theme="white"] {
+  --reader-background: #ffffff;
+  --reader-surface: #ffffff;
+  --reader-ink: #202020;
+  --reader-muted: #77736e;
+  --reader-line: #e7e4df;
+}
+
 html[data-reader-theme="night"] {
+  --reader-background: #1e2021;
+  --reader-surface: #282a2b;
+  --reader-ink: #e6e0d6;
+  --reader-muted: #aaa49b;
+  --reader-line: #393b3c;
   color-scheme: dark;
+}
+
+/* 翻开书时整个根元素换成书页底色，正文才能一直铺到刘海底下。 */
+html[data-in-reader] {
+  background: var(--reader-background);
+}
+
+html[data-in-reader] body {
+  background: var(--reader-background);
 }
 
 body {
@@ -135,7 +168,8 @@ body {
     var(--paper);
   color: var(--ink);
   font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
+  /* 不写 -webkit-font-smoothing: antialiased：它会把笔画削细一档，
+     系统 App 都用默认值，加了反而不像原生。 */
   text-rendering: optimizeLegibility;
   overscroll-behavior-y: none;
 }
@@ -207,8 +241,9 @@ button:disabled {
   padding: calc(14px + env(safe-area-inset-top)) 0 0;
 }
 
-/* 横向留白统一交给这个变量，横滑书架要能出血到屏幕边缘。 */
-.screen > *:not(.shelf) {
+/* 横向留白统一交给这个变量，横滑书架要能出血到屏幕边缘，
+   所以 .shelf / .home-row 这类自带内层留白的横滑区要排除在外。 */
+.screen > *:not(.shelf):not(.home-row) {
   margin-inline: 20px;
 }
 
@@ -475,7 +510,7 @@ button:disabled {
   height: 4px;
   overflow: hidden;
   border-radius: 99px;
-  background: #dedbd5;
+  background: color-mix(in srgb, var(--ink) 14%, transparent);
 }
 
 .progress-track span {
@@ -597,7 +632,7 @@ button:disabled {
   justify-content: center;
   padding-left: 2px;
   border-radius: 50%;
-  background: rgb(255 255 255 / 88%);
+  background: color-mix(in srgb, var(--surface-strong) 88%, transparent);
   color: var(--accent);
   box-shadow: 0 3px 10px rgb(0 0 0 / 22%);
   backdrop-filter: blur(10px);
@@ -674,11 +709,11 @@ button:disabled {
 }
 
 .ios-row + .ios-row {
-  box-shadow: inset 0 0.5px 0 rgb(0 0 0 / 12%);
+  box-shadow: inset 0 0.5px 0 color-mix(in srgb, var(--ink) 12%, transparent);
 }
 
 .ios-row:active {
-  background: rgb(0 0 0 / 5%);
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
 }
 
 .ios-row--media {
@@ -1244,7 +1279,7 @@ button:disabled {
   justify-content: center;
   border: 1px solid var(--line);
   border-radius: 50%;
-  background: rgb(255 255 255 / 45%);
+  background: color-mix(in srgb, var(--surface-strong) 45%, transparent);
   color: var(--accent);
 }
 
@@ -1411,6 +1446,187 @@ button:disabled {
 
 .note-card__actions button:last-child {
   color: var(--danger);
+}
+
+/* 笔记 tab：不用卡片，靠留白和一条墨线分段。摘录用宋体，
+   划线本身按原色压在字脚下当一道底纹——看着就是书页上留下的那一笔。 */
+.ink-summary {
+  margin: 2px 0 14px;
+  color: var(--muted);
+  font-family: var(--font-serif);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+
+.ink-feed {
+  display: grid;
+  gap: 34px;
+  margin-top: 20px;
+}
+
+.ink-group__head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  padding: 0 0 13px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 13%, transparent);
+  background: none;
+  text-align: left;
+}
+
+.ink-group__head > span {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+
+.ink-group__head strong {
+  overflow: hidden;
+  font-family: var(--font-serif);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ink-group__head small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ink-group__head em {
+  flex-shrink: 0;
+  color: var(--subtle);
+  font-family: var(--font-serif);
+  font-size: 12px;
+  font-style: normal;
+  letter-spacing: 0.06em;
+}
+
+.ink-note {
+  position: relative;
+  padding: 18px 0 14px 16px;
+}
+
+.ink-note + .ink-note {
+  border-top: 1px solid color-mix(in srgb, var(--ink) 7%, transparent);
+}
+
+/* 起头一竖，代替卡片边框：分段交给留白，线只负责起笔。 */
+.ink-note::before {
+  content: "";
+  position: absolute;
+  top: 23px;
+  bottom: 22px;
+  left: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--ink) 17%, transparent);
+}
+
+.ink-note__body {
+  display: grid;
+  width: 100%;
+  gap: 9px;
+  padding: 0;
+  background: none;
+  text-align: left;
+}
+
+.ink-note__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ink-note__chapter {
+  overflow: hidden;
+  max-width: 60%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ink-note__meta em {
+  margin-left: auto;
+  color: var(--subtle);
+  font-style: normal;
+}
+
+.ink-note__text {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 15px;
+  letter-spacing: 0.01em;
+  line-height: 1.95;
+}
+
+/* 和正文里那一笔用同一种画法（内阴影铺到字脚），摘录看着才是从书里揭下来的。
+   换行时每个行片段各自成形，所以要 clone。 */
+.ink-note__mark {
+  box-shadow: inset 0 -0.42em 0 var(--ink-mark, var(--mark-yellow));
+  box-decoration-break: clone;
+}
+
+.ink-note__mark--yellow {
+  --ink-mark: color-mix(in srgb, var(--mark-yellow) 62%, transparent);
+}
+
+.ink-note__mark--green {
+  --ink-mark: color-mix(in srgb, var(--mark-green) 58%, transparent);
+}
+
+.ink-note__mark--blue {
+  --ink-mark: color-mix(in srgb, var(--mark-blue) 58%, transparent);
+}
+
+.ink-note__mark--pink {
+  --ink-mark: color-mix(in srgb, var(--mark-pink) 58%, transparent);
+}
+
+.ink-note__mark--plain {
+  box-shadow: none;
+}
+
+/* 墨夜书架上正文是浅色，色带压到 55% 才不会把字盖掉。 */
+html[data-shell="black"] .ink-note__mark:not(.ink-note__mark--plain) {
+  box-shadow: inset 0 -0.42em 0 color-mix(in srgb, var(--ink-mark) 55%, transparent);
+}
+
+.ink-note__thought {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  color: var(--muted);
+  font-family: var(--font-serif);
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.ink-note__actions {
+  display: flex;
+  gap: 18px;
+  margin-top: 11px;
+}
+
+.ink-note__actions button {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ink-note__actions button:last-child {
+  color: color-mix(in srgb, var(--danger) 78%, var(--muted));
 }
 
 .thought-editor {
@@ -1644,13 +1860,13 @@ input[type="range"] {
 
 .bottom-nav button {
   display: flex;
-  min-width: 64px;
+  min-width: 58px;
   min-height: 44px;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 2px;
-  padding: 4px 12px;
+  padding: 4px 10px;
   border-radius: 24px;
   background: transparent;
   color: var(--muted);
@@ -1779,39 +1995,23 @@ input[type="range"] {
   /* 书里的浮层玻璃跟着阅读主题走，不跟书架走：夜间读时浮条必须是暗玻璃。 */
   --glass-fill: color-mix(in srgb, var(--reader-background) 70%, transparent);
   --glass-edge: color-mix(in srgb, var(--reader-ink) 13%, transparent);
-  transition:
-    background 180ms ease,
-    color 180ms ease;
+  /* 这里不能加 transition：调色板现在挂在 <html> 上，Chromium 对「只由祖先自定义属性
+     变化触发的过渡」会一直卡在旧值上，换主题后底色就再也不刷新了。换色直接切。 */
 }
 
 .reader-theme--paper {
-  --reader-background: #f6f1e7;
-  --reader-surface: #fbf8f2;
-  --reader-ink: #302d29;
-  --reader-muted: #7b756b;
-  --reader-line: #ddd5c7;
   --glass-sheen: rgb(255 253 247 / 78%);
   --glass-shade: rgb(60 46 24 / 7%);
   --glass-shadow: 0 1px 2px rgb(60 46 24 / 8%), 0 12px 30px rgb(60 46 24 / 14%);
 }
 
 .reader-theme--white {
-  --reader-background: #ffffff;
-  --reader-surface: #ffffff;
-  --reader-ink: #202020;
-  --reader-muted: #77736e;
-  --reader-line: #e7e4df;
   --glass-sheen: rgb(255 255 255 / 85%);
   --glass-shade: rgb(0 0 0 / 6%);
   --glass-shadow: 0 1px 2px rgb(0 0 0 / 7%), 0 12px 30px rgb(0 0 0 / 13%);
 }
 
 .reader-theme--night {
-  --reader-background: #1e2021;
-  --reader-surface: #282a2b;
-  --reader-ink: #e6e0d6;
-  --reader-muted: #aaa49b;
-  --reader-line: #393b3c;
   --glass-sheen: rgb(255 255 255 / 15%);
   --glass-shade: rgb(0 0 0 / 36%);
   --glass-shadow: 0 1px 2px rgb(0 0 0 / 45%), 0 14px 36px rgb(0 0 0 / 52%);
@@ -1826,12 +2026,8 @@ input[type="range"] {
   grid-template-columns: 48px 1fr 48px;
   align-items: end;
   padding: env(safe-area-inset-top) 10px 6px;
-  border-bottom: 1px solid var(--reader-line, var(--line-soft));
-  background: color-mix(
-    in srgb,
-    var(--reader-background, var(--paper)) 92%,
-    transparent
-  );
+  border-bottom: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
   backdrop-filter: blur(16px);
 }
 
@@ -1959,6 +2155,8 @@ input[type="range"] {
   width: min(calc(100% - 42px), var(--reader-width));
   margin: 0 auto;
   padding: calc(env(safe-area-inset-top) + 60px) 0 140px;
+  /* iOS 长按正文会先弹一层系统 callout，跟我们自己的划线浮条打架。 */
+  -webkit-touch-callout: none;
 }
 
 /* 左右翻页：正文用多栏排出来，一栏正好一页，横向平移切页。
@@ -2116,8 +2314,9 @@ input[type="range"] {
 
 /* 用 box-shadow 而不是 padding 撑开朗读高亮，避免逐句推进时正文抖动。 */
 .reader-article .reader-block > span.is-speaking {
-  background: rgb(113 128 145 / 17%);
-  box-shadow: 0 0 0 3px rgb(113 128 145 / 17%);
+  /* 跟读高亮要跟着阅读主题走：夜间纸上是提亮，白纸上是压暗。 */
+  background: color-mix(in srgb, var(--reader-ink) 13%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--reader-ink) 13%, transparent);
 }
 
 /* 接章用的哨兵。零高度的元素在部分浏览器里不会触发 observer，所以留 1px。 */
@@ -2291,12 +2490,6 @@ input[type="range"] {
   background: var(--paper);
 }
 
-.player-header {
-  --reader-background: var(--paper);
-  --reader-line: var(--line-soft);
-  align-items: end;
-}
-
 .player-header > span {
   display: flex;
   min-height: 44px;
@@ -2364,7 +2557,7 @@ input[type="range"] {
 .current-sentence > span {
   display: -webkit-box;
   overflow: hidden;
-  color: #4d4a45;
+  color: color-mix(in srgb, var(--ink) 80%, var(--paper));
   font-family: var(--font-serif);
   font-size: 14px;
   line-height: 1.65;
@@ -2728,7 +2921,12 @@ input[type="range"] {
   --line: color-mix(in srgb, var(--reader-ink) 16%, transparent);
   --line-soft: color-mix(in srgb, var(--reader-ink) 9%, transparent);
   --surface: var(--reader-surface);
+  --surface-strong: var(--reader-surface);
   --paper: var(--reader-background);
+  --paper-deep: var(--reader-background);
+  --subtle: color-mix(in srgb, var(--reader-ink) 45%, transparent);
+  /* 选中态的深橙在夜间纸上发闷，按主题往亮里调一档。 */
+  --accent-deep: color-mix(in srgb, var(--accent) 82%, var(--reader-ink));
 }
 
 .modal-sheet--reader .modal-grabber {
@@ -3006,7 +3204,7 @@ input[type="range"] {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgb(247 244 238 / 92%);
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
   backdrop-filter: blur(18px);
 }
 
@@ -3178,15 +3376,17 @@ input[type="range"] {
 }
 
 @media (min-width: 720px) {
-  .screen > *:not(.shelf) {
+  .screen > *:not(.shelf):not(.home-row) {
     margin-inline: 36px;
   }
 
-  .shelf__title {
+  .shelf__title,
+  .home-row__title {
     margin-inline: 36px;
   }
 
-  .shelf__track {
+  .shelf__track,
+  .home-row__track {
     padding-inline: 36px;
     scroll-padding-inline: 36px;
   }
@@ -3202,7 +3402,7 @@ input[type="range"] {
   }
 
   .modal-sheet {
-    border-bottom: 1px solid rgb(204 198 188 / 80%);
+    border-bottom: 1px solid var(--glass-edge);
     border-radius: 20px;
   }
 
@@ -3253,19 +3453,38 @@ input[type="range"] {
     font-size: 9px;
   }
 
-  .bottom-nav {
+  /* 宽屏把底部胶囊拉直成左侧栏。定位必须写在 .bottom-bar 上：
+     .bottom-nav 是它的 static 子元素，top/left 写在那里是空转的。 */
+  .bottom-bar {
     top: 112px;
     right: auto;
     bottom: 0;
     width: 230px;
-    grid-template-columns: 1fr;
-    grid-auto-rows: 52px;
-    align-content: start;
-    gap: 5px;
-    padding: 20px 16px;
-    border-top: 0;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
     border-right: 1px solid var(--line-soft);
     background: color-mix(in srgb, var(--paper) 90%, transparent);
+    backdrop-filter: var(--glass-blur);
+  }
+
+  .bottom-nav {
+    flex-direction: column;
+    gap: 5px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    backdrop-filter: none;
+    box-shadow: none;
+  }
+
+  .search-fab {
+    width: 100%;
+    height: 48px;
+    border-radius: 10px;
   }
 
   .bottom-nav button {

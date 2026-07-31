@@ -140,6 +140,7 @@ const NAV_ITEMS: Array<{
 }> = [
   { id: "home", label: "主页", icon: Home },
   { id: "library", label: "书库", icon: Library },
+  { id: "notes", label: "笔记", icon: Highlighter },
 ];
 
 const HIGHLIGHT_COLORS: Array<{ id: HighlightColor; label: string }> = [
@@ -162,6 +163,17 @@ function formatDate(timestamp: number): string {
     month: "short",
     day: "numeric",
   });
+}
+
+/** 旧数据没有 groupId，退回自己的 id 当单元素组。 */
+function groupKey(note: BookNote): string {
+  return note.groupId ?? note.id;
+}
+
+/** 把一次划线拆出的多条记录合回一条：正文按阅读顺序拼，其余字段取第一条。 */
+function mergeNoteGroup(items: BookNote[]): BookNote {
+  const ordered = [...items].sort((a, b) => a.createdAt - b.createdAt);
+  return { ...ordered[0], excerpt: ordered.map((n) => n.excerpt).join("") };
 }
 
 function formatStorageSize(characters: number): string {
@@ -590,32 +602,29 @@ function HomeScreen({
   onGoalChange: (minutes: number) => void;
   onOpenSettings: () => void;
 }) {
-  const reading = books
-    .filter(
-      (book) =>
-        book.readingPosition && (book.readingPosition.percent ?? 0) < 99
-    )
-    .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
-  const listening = books
-    .filter((book) => book.listeningPosition)
-    .sort(
-      (a, b) =>
-        (b.listeningPosition?.updatedAt ?? 0) -
-        (a.listeningPosition?.updatedAt ?? 0)
-    );
-  const readingIds = new Set(reading.map((book) => book.id));
-  const previous = books
-    .filter((book) => !readingIds.has(book.id) && book.readingPosition)
-    .sort(
-      (a, b) =>
-        (b.readingPosition?.updatedAt ?? 0) -
-        (a.readingPosition?.updatedAt ?? 0)
-    );
-  const untouched =
-    !reading.length && !listening.length && !previous.length ? books : [];
+  // 一本书一张卡：以前「继续阅读」和「继续收听」各排一行，
+  // 同一本书既读过又听过就会上下重复出现，主页因此显得又长又乱。
+  const resuming = books
+    .filter((book) => book.readingPosition || book.listeningPosition)
+    .map((book) => {
+      const readAt = book.readingPosition?.updatedAt ?? 0;
+      const listenAt = book.listeningPosition?.updatedAt ?? 0;
+      return { book, listenLed: listenAt > readAt, touchedAt: Math.max(readAt, listenAt) };
+    })
+    .sort((a, b) => b.touchedAt - a.touchedAt);
+  const untouched = resuming.length ? [] : books;
 
-  const readMeta = (book: Book) =>
-    `图书 · ${Math.round(book.readingPosition?.percent ?? 0)}%`;
+  // 主行显示最近动过的那一侧，另一侧接在后面，两个位置差很远时也一眼看得到。
+  const resumeMeta = ({ book, listenLed }: (typeof resuming)[number]) => {
+    const read = book.readingPosition
+      ? `读到 ${Math.round(book.readingPosition.percent ?? 0)}%`
+      : "";
+    const listen = book.listeningPosition
+      ? formatRemaining(book, book.listeningPosition)
+      : "";
+    const ordered = listenLed ? [listen, read] : [read, listen];
+    return ordered.filter(Boolean).join(" · ");
+  };
 
   return (
     <div className="screen">
@@ -647,49 +656,17 @@ function HomeScreen({
         />
       ) : (
         <>
-          {reading.length ? (
+          {resuming.length ? (
             <section className="home-row">
-              <h2 className="home-row__title">继续阅读</h2>
+              <h2 className="home-row__title">继续</h2>
               <div className="home-row__track">
-                {reading.map((book) => (
+                {resuming.map((entry) => (
                   <HomeCard
-                    key={book.id}
-                    book={book}
-                    meta={readMeta(book)}
-                    onOpen={onOpenReader}
-                  />
-                ))}
-              </div>
-            </section>
-          ) : null}
-
-          {listening.length ? (
-            <section className="home-row">
-              <h2 className="home-row__title">继续收听</h2>
-              <div className="home-row__track">
-                {listening.map((book) => (
-                  <HomeCard
-                    key={book.id}
-                    book={book}
-                    meta={formatRemaining(book, book.listeningPosition)}
-                    onOpen={onOpenPlayer}
-                    onPlay={onPlay}
-                  />
-                ))}
-              </div>
-            </section>
-          ) : null}
-
-          {previous.length ? (
-            <section className="home-row">
-              <h2 className="home-row__title">之前读过</h2>
-              <div className="home-row__track">
-                {previous.map((book) => (
-                  <HomeCard
-                    key={book.id}
-                    book={book}
-                    meta={readMeta(book)}
-                    onOpen={onOpenReader}
+                    key={entry.book.id}
+                    book={entry.book}
+                    meta={resumeMeta(entry)}
+                    onOpen={entry.listenLed ? onOpenPlayer : onOpenReader}
+                    onPlay={entry.book.listeningPosition ? onPlay : undefined}
                   />
                 ))}
               </div>
@@ -995,62 +972,167 @@ function NotesScreen({
   notes,
   books,
   onOpenBook,
+  onOpenNote,
+  onEditThought,
+  onDelete,
 }: {
   notes: BookNote[];
   books: Book[];
   onOpenBook: (book: Book) => void;
+  onOpenNote: (note: BookNote) => void;
+  onEditThought: (note: BookNote) => void;
+  onDelete: (note: BookNote) => void;
 }) {
-  const grouped = books
-    .map((book) => ({
-      book,
-      items: notes.filter((note) => note.bookId === book.id),
-    }))
-    .filter((entry) => entry.items.length)
-    .sort(
-      (a, b) =>
-        Math.max(...b.items.map((note) => note.createdAt)) -
-        Math.max(...a.items.map((note) => note.createdAt))
-    );
+  const [filter, setFilter] = useState<"all" | "highlight" | "thought">("all");
 
-  return (
-    <div className="screen">
-      <LargeHeader title="笔记" />
+  // 一次跨句划线在库里是多条记录，这里先合回一条，列表上才是用户划的那一整段。
+  const merged = useMemo(() => {
+    const buckets = new Map<string, BookNote[]>();
+    notes.forEach((note) => {
+      const key = groupKey(note);
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(note);
+      else buckets.set(key, [note]);
+    });
+    return Array.from(buckets.values()).map(mergeNoteGroup);
+  }, [notes]);
 
-      {!grouped.length ? (
+  const groups = useMemo(() => {
+    const visible = merged.filter((note) => {
+      if (filter === "highlight") return note.kind === "highlight";
+      if (filter === "thought") return Boolean(note.thought);
+      return true;
+    });
+    return books
+      .map((book) => ({
+        book,
+        items: visible
+          .filter((note) => note.bookId === book.id)
+          .sort((a, b) => b.createdAt - a.createdAt),
+      }))
+      .filter((entry) => entry.items.length)
+      .sort((a, b) => b.items[0].createdAt - a.items[0].createdAt);
+  }, [books, filter, merged]);
+
+  const highlights = merged.filter((note) => note.kind === "highlight").length;
+  const thoughts = merged.filter((note) => note.thought).length;
+
+  if (!notes.length) {
+    return (
+      <div className="screen">
+        <LargeHeader title="笔记" />
         <EmptyState
           icon={<Highlighter size={27} />}
           title="还没有划线"
           description="阅读时选中一段文字，就能划线、写想法；听书时也可以随手标记。"
         />
+      </div>
+    );
+  }
+
+  return (
+    <div className="screen">
+      <LargeHeader title="笔记" />
+
+      <p className="ink-summary">
+        {highlights} 条划线
+        {thoughts ? ` · ${thoughts} 条想法` : ""}
+      </p>
+
+      <div className="ios-segmented">
+        {(
+          [
+            ["all", "全部"],
+            ["highlight", "划线"],
+            ["thought", "想法"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            type="button"
+            key={id}
+            className={filter === id ? "is-active" : ""}
+            onClick={() => setFilter(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {!groups.length ? (
+        <EmptyState
+          icon={<Highlighter size={26} />}
+          title="这里还是空的"
+          description="换个筛选看看，或者回到正文里划一段。"
+        />
       ) : (
-        <div className="ios-inset-list ios-inset-list--top">
-          {grouped.map(({ book, items }) => {
-            const thoughts = items.filter((note) => note.thought).length;
-            const highlights = items.filter(
-              (note) => note.kind === "highlight"
-            ).length;
-            return (
+        <div className="ink-feed">
+          {groups.map(({ book, items }) => (
+            <section className="ink-group" key={book.id}>
               <button
                 type="button"
-                className="ios-row ios-row--media"
-                key={book.id}
+                className="ink-group__head"
                 onClick={() => onOpenBook(book)}
               >
-                <span className="ios-row__main">
-                  <BookCover book={book} size="small" />
-                  <span>
-                    <strong>{book.title}</strong>
-                    <small>{book.author}</small>
-                    <em>
-                      {highlights} 条划线
-                      {thoughts ? ` · ${thoughts} 条想法` : ""}
-                    </em>
-                  </span>
+                <BookCover book={book} size="small" />
+                <span>
+                  <strong>{book.title}</strong>
+                  <small>{book.author}</small>
                 </span>
-                <ChevronRight size={16} className="ios-row__chevron" />
+                <em>{items.length}</em>
+                <ChevronRight size={15} className="ios-row__chevron" />
               </button>
-            );
-          })}
+
+              {items.map((note) => {
+                const chapter = book.chapters.find(
+                  (item) => item.id === note.chapterId
+                );
+                const listening = note.kind === "listening-mark";
+                return (
+                  <article className="ink-note" key={note.id}>
+                    <button
+                      type="button"
+                      className="ink-note__body"
+                      onClick={() => onOpenNote(note)}
+                    >
+                      <span className="ink-note__meta">
+                        {listening ? <Headphones size={11} /> : null}
+                        <span className="ink-note__chapter">
+                          {chapter?.title ?? "正文"}
+                        </span>
+                        <em>{formatDate(note.createdAt)}</em>
+                      </span>
+                      <p className="ink-note__text">
+                        <span
+                          className={
+                            listening
+                              ? "ink-note__mark ink-note__mark--plain"
+                              : `ink-note__mark ink-note__mark--${note.color ?? "yellow"}`
+                          }
+                        >
+                          {note.excerpt}
+                        </span>
+                      </p>
+                      {note.thought ? (
+                        <span className="ink-note__thought">
+                          {note.thought}
+                        </span>
+                      ) : null}
+                    </button>
+                    <div className="ink-note__actions">
+                      <button type="button" onClick={() => onEditThought(note)}>
+                        <PencilLine size={13} />
+                        {note.thought ? "改想法" : "写想法"}
+                      </button>
+                      <button type="button" onClick={() => onDelete(note)}>
+                        <Trash2 size={13} />
+                        删除
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </section>
+          ))}
         </div>
       )}
     </div>
@@ -1848,6 +1930,11 @@ function ReaderScreen({
     setPopup({ kind: "mark", anchor: element.getBoundingClientRect(), note });
   };
 
+  /** 同一次划线拆成的几条记录，拼回用户当时选中的那整段文字。 */
+  const groupText = (note: BookNote) =>
+    mergeNoteGroup(notes.filter((item) => groupKey(item) === groupKey(note)))
+      .excerpt;
+
   const applyHighlight = async (color: HighlightColor) => {
     if (popup?.kind === "mark") {
       onUpdateNote({ ...popup.note, color });
@@ -1958,6 +2045,23 @@ function ReaderScreen({
   useEffect(() => {
     setPopup(null);
   }, [pageIndex]);
+
+  // 浮条是 fixed 定位、锚点是划线那一刻的视口坐标，一滚就会飘到别的句子上面去。
+  useEffect(() => {
+    if (!popup) return;
+    const onScroll = (event: Event) => {
+      if ((event.target as HTMLElement | null)?.closest?.(".reader-popover")) {
+        return;
+      }
+      setPopup(null);
+    };
+    document.addEventListener("scroll", onScroll, {
+      capture: true,
+      passive: true,
+    });
+    return () =>
+      document.removeEventListener("scroll", onScroll, { capture: true });
+  }, [popup]);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     swipeRef.current = { x: event.clientX, y: event.clientY };
@@ -2165,7 +2269,7 @@ function ReaderScreen({
           onHighlight={applyHighlight}
           onCopy={() => {
             const text =
-              popup.kind === "selection" ? popup.text : popup.note.excerpt;
+              popup.kind === "selection" ? popup.text : groupText(popup.note);
             navigator.clipboard?.writeText(text).catch(() => undefined);
             window.getSelection()?.removeAllRanges();
             setPopup(null);
@@ -2199,9 +2303,13 @@ function ReaderScreen({
       ) : null}
 
       {thoughtDraft ? (
-        <Modal title="写想法" onClose={() => setThoughtDraft(null)}>
+        <Modal
+          title="写想法"
+          onClose={() => setThoughtDraft(null)}
+          className="modal-sheet--reader"
+        >
           <div className="thought-editor">
-            <blockquote>{thoughtDraft.note.excerpt}</blockquote>
+            <blockquote>{groupText(thoughtDraft.note)}</blockquote>
             <textarea
               autoFocus
               rows={5}
@@ -2885,31 +2993,74 @@ export default function MotingApp() {
     saveBook(updated).catch(() => undefined);
   }, []);
 
+  // 听书每读一句就回调一次。以前这里直接把整本书 put 回 IndexedDB 并重排书库，
+  // 长篇小说等于每几秒克隆上万个句子对象再重渲染整个列表，手机上是肉眼可见的卡顿。
+  // 现在内存里立刻更新（高亮要跟上），落盘攒到 20 秒一次，停止/切后台时补写。
+  const pendingBookRef = useRef<Book | null>(null);
+  const flushTimerRef = useRef<number | null>(null);
+  const booksRef = useRef(books);
+  useEffect(() => {
+    booksRef.current = books;
+  }, [books]);
+
+  const flushListeningProgress = useCallback(() => {
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    const pending = pendingBookRef.current;
+    pendingBookRef.current = null;
+    if (pending) saveBook(pending).catch(() => undefined);
+  }, []);
+
   const updateListeningProgress = useCallback(
     (bookId: string, position: BookPosition) => {
-      setBooks((current) => {
-        const next = current.map((book) => {
-          if (book.id !== bookId) return book;
-          const updated: Book = {
-            ...book,
-            listeningPosition: position,
-            lastOpenedAt: Date.now(),
-            updatedAt: Date.now(),
-          };
-          saveBook(updated).catch(() => undefined);
-          return updated;
-        });
-        return next.sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
-      });
+      const target = booksRef.current.find((book) => book.id === bookId);
+      if (!target) return;
+      const updated: Book = {
+        ...target,
+        listeningPosition: position,
+        updatedAt: Date.now(),
+      };
+      pendingBookRef.current = updated;
+      setBooks((current) =>
+        current.map((book) => (book.id === bookId ? updated : book))
+      );
+      if (flushTimerRef.current === null) {
+        flushTimerRef.current = window.setTimeout(() => {
+          flushTimerRef.current = null;
+          const pending = pendingBookRef.current;
+          pendingBookRef.current = null;
+          if (pending) saveBook(pending).catch(() => undefined);
+        }, 20000);
+      }
     },
     []
   );
+
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flushListeningProgress();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flushListeningProgress);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", flushListeningProgress);
+      flushListeningProgress();
+    };
+  }, [flushListeningProgress]);
 
   const player = useSpeechPlayer({
     books,
     settings,
     onProgress: updateListeningProgress,
   });
+
+  // 一停下来就把攒着的听书进度补写掉，别等那 20 秒。
+  useEffect(() => {
+    if (!player.isPlaying) flushListeningProgress();
+  }, [player.isPlaying, flushListeningProgress]);
 
   const activeBook = player.location
     ? books.find((book) => book.id === player.location?.bookId)
@@ -2981,6 +3132,27 @@ export default function MotingApp() {
       if (document.visibilityState === "visible") record(take());
     };
   }, [isReading, updateStats]);
+
+  // PWA 全屏时 iOS 用 theme-color 给状态栏那条填色。写死一个值的话，
+  // 换书架或翻开书后状态栏和页面就裂成两块颜色，看着像没做全屏。
+  useEffect(() => {
+    const root = document.documentElement;
+    if (isReading) root.dataset.inReader = "";
+    else delete root.dataset.inReader;
+    const meta = document.querySelector<HTMLMetaElement>(
+      'meta[name="theme-color"]'
+    );
+    if (meta) {
+      const style = getComputedStyle(root);
+      const color = style
+        .getPropertyValue(isReading ? "--reader-background" : "--paper")
+        .trim();
+      if (color) meta.content = color;
+    }
+    return () => {
+      delete root.dataset.inReader;
+    };
+  }, [isReading, settings.theme, settings.shellTheme]);
 
   const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -3077,13 +3249,15 @@ export default function MotingApp() {
     showToast("已标记当前听书位置");
   };
 
-  /** 跨句选中会拆成每句一条划线，返回第一条给弹层继续操作。 */
+  /** 跨句选中会拆成每句一条划线，返回第一条给弹层继续操作（同组的其余条随它一起改）。 */
   const createHighlights = async (
     book: Book,
     parts: HighlightPart[],
     color: HighlightColor
   ): Promise<BookNote | null> => {
-    const created = parts.map((part) => {
+    const groupId = makeId("mark");
+    const base = Date.now();
+    const created = parts.map((part, index) => {
       const position = positionFor(
         book,
         findSentence(book, part.sentenceId)?.chapterIndex ?? 0,
@@ -3096,10 +3270,12 @@ export default function MotingApp() {
         sentenceId: part.sentenceId,
         kind: "highlight" as const,
         excerpt: part.text,
-        createdAt: Date.now(),
+        // 同组按 index 递增，之后靠它还原成阅读顺序（Date.now() 在一次循环里是同一个值）。
+        createdAt: base + index,
         start: part.start,
         end: part.end,
         color,
+        groupId,
       } satisfies BookNote;
     });
     if (!created.length) return null;
@@ -3108,11 +3284,20 @@ export default function MotingApp() {
     return created[0];
   };
 
+  /** 改色、写想法都要落到整组上，否则跨句划线会变成半蓝半黄。 */
   const updateNote = (note: BookNote) => {
+    const group = groupKey(note);
+    const patch = (item: BookNote): BookNote => ({
+      ...item,
+      color: note.color,
+      thought: note.thought,
+    });
+    notes
+      .filter((item) => groupKey(item) === group)
+      .forEach((item) => void saveNote(patch(item)).catch(() => undefined));
     setNotes((current) =>
-      current.map((item) => (item.id === note.id ? note : item))
+      current.map((item) => (groupKey(item) === group ? patch(item) : item))
     );
-    saveNote(note).catch(() => undefined);
   };
 
   const handleReadProgress = (book: Book, position: BookPosition) => {
@@ -3139,8 +3324,14 @@ export default function MotingApp() {
   };
 
   const deleteBookNote = async (note: BookNote) => {
-    await removeNote(note.id).catch(() => undefined);
-    setNotes((current) => current.filter((item) => item.id !== note.id));
+    const group = groupKey(note);
+    const doomed = notes.filter((item) => groupKey(item) === group);
+    await Promise.all(
+      doomed.map((item) => removeNote(item.id).catch(() => undefined))
+    );
+    setNotes((current) =>
+      current.filter((item) => groupKey(item) !== group)
+    );
   };
 
   const openNote = (note: BookNote) => {
@@ -3278,7 +3469,7 @@ export default function MotingApp() {
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
                 onOpen={(book) => openReader(book)}
-                onPlay={(book) => openPlayer(book, false)}
+                onPlay={(book) => openPlayer(book, true)}
                 onOpenNotes={(book) =>
                   setView({ name: "book-notes", bookId: book.id })
                 }
@@ -3309,6 +3500,12 @@ export default function MotingApp() {
                 onOpenBook={(book) =>
                   setView({ name: "book-notes", bookId: book.id })
                 }
+                onOpenNote={openNote}
+                onDelete={deleteBookNote}
+                onEditThought={(note) => {
+                  setThoughtTarget(note);
+                  setThoughtDraft(note.thought ?? "");
+                }}
               />
             )}
           </section>

@@ -9,7 +9,11 @@ import {
   sliceSpeechBlock,
 } from "../lib/content";
 import { EDGE_VOICES, edgeVoiceName, isEdgeVoiceURI } from "../lib/edge-voices";
-import { fetchSpeechClip, type SpeechClip } from "../lib/speech-audio";
+import {
+  fetchSpeechClip,
+  SpeechClipError,
+  type SpeechClip,
+} from "../lib/speech-audio";
 import { charIndexAt, spanAt } from "../lib/speech-timeline";
 import type {
   Book,
@@ -226,9 +230,21 @@ export function useSpeechPlayer({
     abortRef.current = null;
     silenceAudio();
     releaseClip();
+    prefetchRef.current = null;
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
+    // 定时关闭是「这一次收听」的设置，停了就该归零，不然换本书还会在原来的时间点断掉。
+    if (sleepTimerRef.current) {
+      clearTimeout(sleepTimerRef.current);
+      sleepTimerRef.current = null;
+    }
+    sleepModeRef.current = "off";
+    setSleepModeState("off");
+    // 迷你播放器是由 location 推出来的，不清掉就永远赖在书库上关不掉。
+    locationRef.current = null;
+    setLocation(null);
+    setCurrentSentenceId("");
     setIsPlaying(false);
     setIsPaused(false);
   }, [clearTimers, releaseClip, silenceAudio]);
@@ -315,7 +331,9 @@ export function useSpeechPlayer({
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }
-      setError("");
+      // 已经退回系统朗读时要留着提示，否则读完一段就把「云端不可用」抹掉，
+      // 用户永远不知道音色为什么变了。
+      if (!edgeDownRef.current) setError("");
 
       const applySpan = (span: SpeechSpan) => {
         if (token !== tokenRef.current) return;
@@ -425,6 +443,8 @@ export function useSpeechPlayer({
         // Chrome 播放单条 utterance 约 15 秒后会静默截断，定期 pause/resume 可以让它继续念完整段。
         keepAliveRef.current = setInterval(() => {
           if (token !== tokenRef.current) return;
+          // iOS 上 synth.paused 不可靠，只认我们自己记的状态，否则会把用户的暂停顶回去。
+          if (!playingRef.current) return;
           const synth = window.speechSynthesis;
           if (synth.speaking && !synth.paused) {
             synth.pause();
@@ -440,7 +460,7 @@ export function useSpeechPlayer({
         let elapsed = 0;
         trackRef.current = setInterval(() => {
           if (token !== tokenRef.current || boundarySeen) return;
-          if (window.speechSynthesis.paused) return;
+          if (!playingRef.current || window.speechSynthesis.paused) return;
           elapsed += HIGHLIGHT_INTERVAL_MS;
           applySpan(spanAt(segment.spans, (elapsed / 1000) * charsPerSecond));
         }, HIGHLIGHT_INTERVAL_MS);
@@ -487,11 +507,18 @@ export function useSpeechPlayer({
             const next = blocks[blockIndex + 1];
             if (next?.text.trim()) prefetchClip(next.text, voiceName);
           })
-          .catch(() => {
+          .catch((reason: unknown) => {
             if (token !== tokenRef.current || !playingRef.current) return;
-            // 云端合成挂了就整段退回系统朗读，音质会差一些但至少不会断。
-            edgeDownRef.current = true;
-            setError("云端语音暂不可用，已切换到系统朗读");
+            // 只有服务真的不可用才拉闸退回系统朗读；单段合成失败下一段还要再试云端，
+            // 否则一句超长文本就能让后面整本书都变成机器音。
+            const serviceDown =
+              !(reason instanceof SpeechClipError) || reason.serviceDown;
+            if (serviceDown) {
+              edgeDownRef.current = true;
+              setError("云端语音暂不可用，已切换到系统朗读");
+            } else {
+              setError("这一段云端读不了，先用系统朗读");
+            }
             startSystem();
           });
       };
@@ -528,6 +555,8 @@ export function useSpeechPlayer({
       if (!book) return;
       // 用户主动开播时再给云端一次机会，之前的失败可能只是临时断网。
       edgeDownRef.current = false;
+      // 拉黑的系统音色多半也是那次断网连累的，一起放出来重试。
+      blockedVoicesRef.current.clear();
       const nextPosition =
         position ?? book.listeningPosition ?? initialPosition(book);
       playAt(bookId, nextPosition.chapterIndex, nextPosition.sentenceIndex);
@@ -568,6 +597,9 @@ export function useSpeechPlayer({
         setIsPaused(false);
       } else if (window.speechSynthesis.speaking) {
         window.speechSynthesis.pause();
+        // 这行不能漏：保活定时器和 finishSegment 都拿 playingRef 当闸门，
+        // 留着 true 的话 iOS 上十秒内会自己 resume 回去，或者偷偷跳到下一段。
+        playingRef.current = false;
         setIsPaused(true);
         setIsPlaying(false);
       } else {

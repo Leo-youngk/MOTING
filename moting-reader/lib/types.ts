@@ -97,6 +97,12 @@ export interface BookNote {
   color?: HighlightColor;
   /** 用户为这条划线写的想法。 */
   thought?: string;
+  /**
+   * 一次跨句划线会按句拆成多条记录，同组共用这个 id。
+   * 改色、写想法、删除都按组整体生效，用户看到的才是一整条线。
+   * 旧数据没有这个字段，取不到时退回 id 本身当单元素组。
+   */
+  groupId?: string;
 }
 
 export type ReaderTheme = "paper" | "white" | "night";

@@ -5,6 +5,20 @@ export interface SpeechClip {
   timeline: SpeechBoundary[];
 }
 
+/**
+ * 4xx 说明是这一段文本本身的问题（太长、空白），换一段还能继续走云端；
+ * 网络错误和 5xx 才算服务真的不可用，那时候整场收听退回系统朗读。
+ */
+export class SpeechClipError extends Error {
+  readonly serviceDown: boolean;
+
+  constructor(message: string, serviceDown: boolean) {
+    super(message);
+    this.name = "SpeechClipError";
+    this.serviceDown = serviceDown;
+  }
+}
+
 /** 拆开 Worker 的分帧响应：[4 字节大端元数据长度][元数据 JSON][MP3]。 */
 export async function fetchSpeechClip(
   text: string,
@@ -22,7 +36,10 @@ export async function fetchSpeechClip(
     const detail = (await response.json().catch(() => null)) as {
       error?: string;
     } | null;
-    throw new Error(detail?.error ?? `朗读服务返回 ${response.status}`);
+    throw new SpeechClipError(
+      detail?.error ?? `朗读服务返回 ${response.status}`,
+      response.status >= 500
+    );
   }
 
   const buffer = await response.arrayBuffer();

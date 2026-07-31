@@ -48,6 +48,34 @@ export function toSpeakableText(value: string): string {
   );
 }
 
+/** 单句上限。云端 TTS 一次最多收 400 字，留出余量后按这个数切。 */
+const MAX_SENTENCE_LENGTH = 180;
+
+/**
+ * 逗号句读长的段落（尤其是 PDF/TXT 导入）会出现整段没有句号的情况，
+ * 一句话超过云端 TTS 的字数上限就整段读不出来，这里先按次级标点、再按硬长度切开。
+ */
+function splitLongSentence(sentence: string): string[] {
+  if (sentence.length <= MAX_SENTENCE_LENGTH) return [sentence];
+
+  const pieces: string[] = [];
+  let buffer = "";
+  for (const part of sentence.match(/[^，,、：:]+[，,、：:]*/g) ?? [sentence]) {
+    if (buffer && buffer.length + part.length > MAX_SENTENCE_LENGTH) {
+      pieces.push(buffer);
+      buffer = "";
+    }
+    buffer += part;
+    // 单个逗号短语本身就超长时只能按字数硬切。
+    while (buffer.length > MAX_SENTENCE_LENGTH) {
+      pieces.push(buffer.slice(0, MAX_SENTENCE_LENGTH));
+      buffer = buffer.slice(MAX_SENTENCE_LENGTH);
+    }
+  }
+  if (buffer) pieces.push(buffer);
+  return pieces;
+}
+
 export function splitIntoSentences(value: string): string[] {
   const clean = normalizeWhitespace(value);
   if (!clean) return [];
@@ -67,10 +95,10 @@ export function splitIntoSentences(value: string): string[] {
       }
       continue;
     }
-    sentences.push(sentence);
+    sentences.push(...splitLongSentence(sentence));
   }
 
-  return sentences.length ? sentences : [clean];
+  return sentences.length ? sentences : splitLongSentence(clean);
 }
 
 export function createParagraph(
