@@ -1594,11 +1594,6 @@ button:disabled {
   text-decoration: none;
 }
 
-/* 墨夜书架上正文是浅色，色带压到 55% 才不会把字盖掉。 */
-html[data-shell="black"] .ink-note__mark:not(.ink-note__mark--plain) {
-  box-shadow: inset 0 -0.42em 0 color-mix(in srgb, var(--ink-mark) 55%, transparent);
-}
-
 .ink-note__thought {
   display: block;
   padding: 10px 12px;
