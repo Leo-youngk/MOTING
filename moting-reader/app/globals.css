@@ -2001,26 +2001,6 @@ input[type="range"] {
      变化触发的过渡」会一直卡在旧值上，换主题后底色就再也不刷新了。换色直接切。 */
 }
 
-/* iOS 的 PWA 关不掉系统状态栏，而正文是满幅铺到刘海底下的，
-   一滚起来字就和时间、信号叠在一起，糊成一片。这条纸色遮罩把安全区盖实，
-   下沿再化开一小段，字是淡出去的而不是被硬切一半。 */
-.reader-shell::before {
-  position: fixed;
-  z-index: 20;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: calc(env(safe-area-inset-top) + 20px);
-  background: linear-gradient(
-    to bottom,
-    var(--reader-background) 0,
-    var(--reader-background) env(safe-area-inset-top),
-    transparent 100%
-  );
-  content: "";
-  pointer-events: none;
-}
-
 .reader-theme--paper {
   --glass-sheen: rgb(255 253 247 / 78%);
   --glass-shade: rgb(60 46 24 / 7%);
