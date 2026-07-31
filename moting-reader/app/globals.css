@@ -1565,31 +1565,33 @@ button:disabled {
   line-height: 1.95;
 }
 
-/* 和正文里那一笔用同一种画法（内阴影铺到字脚），摘录看着才是从书里揭下来的。
-   换行时每个行片段各自成形，所以要 clone。 */
+/* 和正文里那一笔用同一种画法（贴字脚的下划线），摘录看着才是从书里揭下来的。 */
 .ink-note__mark {
-  box-shadow: inset 0 -0.42em 0 var(--ink-mark, var(--mark-yellow));
-  box-decoration-break: clone;
+  text-decoration: underline;
+  text-decoration-color: var(--ink-mark, var(--mark-yellow));
+  text-decoration-thickness: 2px;
+  text-decoration-skip-ink: none;
+  text-underline-offset: 0.26em;
 }
 
 .ink-note__mark--yellow {
-  --ink-mark: color-mix(in srgb, var(--mark-yellow) 62%, transparent);
+  --ink-mark: var(--mark-yellow);
 }
 
 .ink-note__mark--green {
-  --ink-mark: color-mix(in srgb, var(--mark-green) 58%, transparent);
+  --ink-mark: var(--mark-green);
 }
 
 .ink-note__mark--blue {
-  --ink-mark: color-mix(in srgb, var(--mark-blue) 58%, transparent);
+  --ink-mark: var(--mark-blue);
 }
 
 .ink-note__mark--pink {
-  --ink-mark: color-mix(in srgb, var(--mark-pink) 58%, transparent);
+  --ink-mark: var(--mark-pink);
 }
 
 .ink-note__mark--plain {
-  box-shadow: none;
+  text-decoration: none;
 }
 
 /* 墨夜书架上正文是浅色，色带压到 55% 才不会把字盖掉。 */
@@ -1999,6 +2001,26 @@ input[type="range"] {
      变化触发的过渡」会一直卡在旧值上，换主题后底色就再也不刷新了。换色直接切。 */
 }
 
+/* iOS 的 PWA 关不掉系统状态栏，而正文是满幅铺到刘海底下的，
+   一滚起来字就和时间、信号叠在一起，糊成一片。这条纸色遮罩把安全区盖实，
+   下沿再化开一小段，字是淡出去的而不是被硬切一半。 */
+.reader-shell::before {
+  position: fixed;
+  z-index: 20;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: calc(env(safe-area-inset-top) + 20px);
+  background: linear-gradient(
+    to bottom,
+    var(--reader-background) 0,
+    var(--reader-background) env(safe-area-inset-top),
+    transparent 100%
+  );
+  content: "";
+  pointer-events: none;
+}
+
 .reader-theme--paper {
   --glass-sheen: rgb(255 253 247 / 78%);
   --glass-shade: rgb(60 46 24 / 7%);
@@ -2351,35 +2373,40 @@ input[type="range"] {
   font-size: 11px;
 }
 
-/* 划线本体：底部一道粗色带，不动行高，也不盖住字。 */
+/* 划线本体：贴着字脚的一道下划线，不是马克笔色块。
+   用 text-decoration 而不是 border-bottom：跨行时每一行都会各自画出来，
+   border 只画首尾两个片段，中间几行会漏。 */
 .reader-mark {
   background: transparent;
   color: inherit;
-  box-shadow: inset 0 -0.42em 0 var(--mark, var(--mark-yellow));
+  text-decoration: underline;
+  text-decoration-color: var(--mark, var(--mark-yellow));
+  text-decoration-thickness: 2px;
+  /* 汉字竖笔画多，skip-ink 会把线咬得七零八落，中文下划线必须画满。 */
+  text-decoration-skip-ink: none;
+  text-underline-offset: 0.26em;
 }
 
 .reader-mark--yellow {
-  --mark: color-mix(in srgb, var(--mark-yellow) 62%, transparent);
+  --mark: var(--mark-yellow);
 }
 
 .reader-mark--green {
-  --mark: color-mix(in srgb, var(--mark-green) 58%, transparent);
+  --mark: var(--mark-green);
 }
 
 .reader-mark--blue {
-  --mark: color-mix(in srgb, var(--mark-blue) 58%, transparent);
+  --mark: var(--mark-blue);
 }
 
 .reader-mark--pink {
-  --mark: color-mix(in srgb, var(--mark-pink) 58%, transparent);
+  --mark: var(--mark-pink);
 }
 
+/* 写过想法的那条再补一道点线，和光划线区分开。跨行要 clone，否则只画首尾。 */
 .reader-mark.has-thought {
   border-bottom: 2px dotted color-mix(in srgb, var(--reader-ink) 45%, transparent);
-}
-
-.reader-theme--night .reader-mark {
-  box-shadow: inset 0 -0.42em 0 color-mix(in srgb, var(--mark) 55%, transparent);
+  box-decoration-break: clone;
 }
 
 /* 微信读书那条浮在选区上方的操作栏。 */
