@@ -1,5 +1,11 @@
-import type { Book, BookImage, BookNote, ReaderSettings } from "./types";
-import { DEFAULT_SETTINGS } from "./types";
+import type {
+  Book,
+  BookImage,
+  BookNote,
+  ReaderSettings,
+  ReadingStats,
+} from "./types";
+import { DEFAULT_SETTINGS, DEFAULT_STATS } from "./types";
 
 const DB_NAME = "moting-reader";
 const DB_VERSION = 2;
@@ -175,6 +181,22 @@ export async function saveSettings(
   const db = await openDatabase();
   const transaction = db.transaction(SETTINGS_STORE, "readwrite");
   transaction.objectStore(SETTINGS_STORE).put(settings, "reader");
+  await transactionDone(transaction);
+}
+
+export async function getStats(): Promise<ReadingStats> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readonly");
+  const stats = await requestToPromise(
+    transaction.objectStore(SETTINGS_STORE).get("stats")
+  );
+  return { ...DEFAULT_STATS, ...(stats ?? {}) };
+}
+
+export async function saveStats(stats: ReadingStats): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readwrite");
+  transaction.objectStore(SETTINGS_STORE).put(stats, "stats");
   await transactionDone(transaction);
 }
 

@@ -171,3 +171,22 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   speechRate: 1,
   voiceURI: "",
 };
+
+/** 每天的阅读秒数，键是本地时区的 YYYY-MM-DD。 */
+export interface ReadingStats {
+  days: Record<string, number>;
+  goalMinutes: number;
+}
+
+export const DEFAULT_STATS: ReadingStats = {
+  days: {},
+  goalMinutes: 20,
+};
+
+/** 统计按本地日期归档，不能用 toISOString（那是 UTC，会把深夜阅读算到前一天）。 */
+export function dayKey(time: number): string {
+  const date = new Date(time);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}

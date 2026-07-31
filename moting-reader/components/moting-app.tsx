@@ -64,15 +64,19 @@ import {
   getAllNotes,
   getBookImage,
   getSettings,
+  getStats,
   removeBook,
   removeNote,
   saveBook,
   saveBookImages,
   saveNote,
   saveSettings,
+  saveStats,
 } from "../lib/storage";
 import {
   DEFAULT_SETTINGS,
+  DEFAULT_STATS,
+  dayKey,
   type AppView,
   type Book,
   type BookNote,
@@ -83,6 +87,7 @@ import {
   type PlayerVoice,
   type ReaderSettings,
   type ReaderTheme,
+  type ReadingStats,
 } from "../lib/types";
 
 type ReaderFont = ReaderSettings["fontFamily"];
@@ -421,19 +426,168 @@ function HomeCard({
   );
 }
 
+const GOAL_CHOICES = [5, 10, 15, 20, 30, 45, 60];
+const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
+
+function formatSpan(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分`;
+  const rest = minutes % 60;
+  return rest ? `${Math.floor(minutes / 60)} 时 ${rest} 分` : `${Math.floor(minutes / 60)} 时`;
+}
+
+/** 连续天数：今天还没读不算断，从昨天往回数。 */
+function readingStreak(days: Record<string, number>, now: number): number {
+  const cursor = new Date(now);
+  if ((days[dayKey(now)] ?? 0) < 60) cursor.setDate(cursor.getDate() - 1);
+  let streak = 0;
+  while ((days[dayKey(cursor.getTime())] ?? 0) >= 60) {
+    streak += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
+/** 主页看板：一笔圆相当今日进度环，缺口留在右上，下面七道墨痕是这一周。 */
+function ReadingBoard({
+  stats,
+  onGoalChange,
+}: {
+  stats: ReadingStats;
+  onGoalChange: (minutes: number) => void;
+}) {
+  // 回到主页会重新挂载，所以每次进来都是当天的日期，不用再自己定时刷新。
+  const [now] = useState(() => Date.now());
+  const todaySeconds = stats.days[dayKey(now)] ?? 0;
+  const goalSeconds = stats.goalMinutes * 60;
+  const ratio = Math.min(1, todaySeconds / goalSeconds);
+  const streak = readingStreak(stats.days, now);
+  const total = Object.values(stats.days).reduce((sum, item) => sum + item, 0);
+
+  const week = Array.from({ length: 7 }, (_, offset) => {
+    const date = new Date(now);
+    date.setDate(date.getDate() - (6 - offset));
+    return {
+      key: dayKey(date.getTime()),
+      label: WEEKDAY_LABELS[date.getDay()],
+      seconds: stats.days[dayKey(date.getTime())] ?? 0,
+      isToday: offset === 6,
+    };
+  });
+  const weekSeconds = week.reduce((sum, item) => sum + item.seconds, 0);
+
+  // 圆相不闭合：环只画满周长的 88%，右上角那道缺口是刻意留白。
+  const circumference = 2 * Math.PI * 46;
+  const arc = circumference * 0.88;
+
+  const caption =
+    todaySeconds < 60
+      ? "今日尚未落墨"
+      : ratio < 1
+        ? "已然入静，再坐片刻"
+        : "今日功课已毕";
+
+  return (
+    <section className="zen-board">
+      <div className="zen-board__ring">
+        <svg viewBox="0 0 116 116" aria-hidden>
+          <g transform="rotate(-23 58 58)">
+            <circle
+              className="zen-ring__track"
+              cx="58"
+              cy="58"
+              r="46"
+              strokeDasharray={`${arc} ${circumference}`}
+            />
+            <circle
+              className="zen-ring__ink"
+              cx="58"
+              cy="58"
+              r="46"
+              strokeDasharray={`${arc * ratio} ${circumference}`}
+            />
+          </g>
+        </svg>
+        <div className="zen-ring__center">
+          <strong>{Math.floor(todaySeconds / 60)}</strong>
+          <small>分钟</small>
+        </div>
+      </div>
+
+      <div className="zen-board__body">
+        <p className="zen-board__caption">{caption}</p>
+        <button
+          type="button"
+          className="zen-board__goal"
+          onClick={() =>
+            onGoalChange(
+              GOAL_CHOICES[
+                (GOAL_CHOICES.indexOf(stats.goalMinutes) + 1) %
+                  GOAL_CHOICES.length
+              ] ?? 20
+            )
+          }
+        >
+          每日 {stats.goalMinutes} 分钟 · 轻点调整
+        </button>
+
+        <div className="zen-week">
+          {week.map((day) => (
+            <div
+              key={day.key}
+              className={`zen-week__day ${day.isToday ? "is-today" : ""}`}
+            >
+              <span className="zen-week__stroke">
+                <i
+                  style={{
+                    height: `${Math.max(
+                      day.seconds ? 8 : 0,
+                      Math.min(100, (day.seconds / goalSeconds) * 100)
+                    )}%`,
+                  }}
+                />
+              </span>
+              <small>{day.label}</small>
+            </div>
+          ))}
+        </div>
+
+        <dl className="zen-board__stats">
+          <div>
+            <dt>连续</dt>
+            <dd>{streak} 天</dd>
+          </div>
+          <div>
+            <dt>本周</dt>
+            <dd>{formatSpan(weekSeconds)}</dd>
+          </div>
+          <div>
+            <dt>累计</dt>
+            <dd>{formatSpan(total)}</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+  );
+}
+
 function HomeScreen({
   books,
+  stats,
   onOpenReader,
   onPlay,
   onOpenPlayer,
   onImport,
+  onGoalChange,
   onOpenSettings,
 }: {
   books: Book[];
+  stats: ReadingStats;
   onOpenReader: (book: Book) => void;
   onPlay: (book: Book) => void;
   onOpenPlayer: (book: Book) => void;
   onImport: () => void;
+  onGoalChange: (minutes: number) => void;
   onOpenSettings: () => void;
 }) {
   const reading = books
@@ -558,47 +712,11 @@ function HomeScreen({
             </section>
           ) : null}
 
-          <div className="ios-inset-list">
-            <button type="button" className="ios-row" onClick={onImport}>
-              <span className="ios-row__label ios-row__label--tint">
-                <Plus size={17} />
-                导入新书
-              </span>
-            </button>
-          </div>
+          <ReadingBoard stats={stats} onGoalChange={onGoalChange} />
         </>
       )}
     </div>
   );
-}
-
-type Collection = "all" | "reading" | "finished" | "epub" | "pdf" | "text";
-
-const COLLECTIONS: Array<{ id: Collection; label: string }> = [
-  { id: "all", label: "全部图书" },
-  { id: "reading", label: "正在阅读" },
-  { id: "finished", label: "已读完" },
-  { id: "epub", label: "EPUB" },
-  { id: "pdf", label: "PDF" },
-  { id: "text", label: "文本与 Markdown" },
-];
-
-function matchesCollection(book: Book, collection: Collection): boolean {
-  const percent = book.readingPosition?.percent ?? 0;
-  switch (collection) {
-    case "reading":
-      return Boolean(book.readingPosition) && percent < 99;
-    case "finished":
-      return percent >= 99;
-    case "epub":
-      return book.format === "epub";
-    case "pdf":
-      return book.format === "pdf";
-    case "text":
-      return book.format !== "epub" && book.format !== "pdf";
-    default:
-      return true;
-  }
 }
 
 function LibraryScreen({
@@ -617,16 +735,11 @@ function LibraryScreen({
   onDelete: (book: Book) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [collection, setCollection] = useState<Collection>("all");
   const [sheetBook, setSheetBook] = useState<Book | null>(null);
 
-  const filtered = books.filter(
-    (book) =>
-      matchesCollection(book, collection) &&
-      `${book.title} ${book.author}`.toLowerCase().includes(query.toLowerCase())
+  const filtered = books.filter((book) =>
+    `${book.title} ${book.author}`.toLowerCase().includes(query.toLowerCase())
   );
-  const collectionLabel =
-    COLLECTIONS.find((item) => item.id === collection)?.label ?? "全部图书";
 
   return (
     <div className="screen">
@@ -673,7 +786,7 @@ function LibraryScreen({
       ) : (
         <>
           <div className="grid-heading">
-            <h2>{query ? "搜索结果" : collectionLabel}</h2>
+            <h2>{query ? "搜索结果" : "全部图书"}</h2>
             <small>{filtered.length} 本</small>
           </div>
 
@@ -713,32 +826,8 @@ function LibraryScreen({
               })}
             </div>
           ) : (
-            <p className="no-results">这个收藏集里还没有书。</p>
+            <p className="no-results">没有匹配的书。</p>
           )}
-
-          <section className="ios-section">
-            <h2 className="ios-section__title">收藏集</h2>
-            <div className="ios-inset-list">
-              {COLLECTIONS.map((item) => (
-                <button
-                  type="button"
-                  key={item.id}
-                  className="ios-row"
-                  onClick={() => setCollection(item.id)}
-                >
-                  <span className="ios-row__label">{item.label}</span>
-                  <span className="ios-row__value">
-                    {books.filter((book) => matchesCollection(book, item.id)).length}
-                  </span>
-                  {collection === item.id ? (
-                    <Check size={17} className="ios-row__check" />
-                  ) : (
-                    <ChevronRight size={16} className="ios-row__chevron" />
-                  )}
-                </button>
-              ))}
-            </div>
-          </section>
         </>
       )}
 
@@ -1107,9 +1196,9 @@ function SettingsPanel({
         <div className="segmented-control">
           {(
             [
-              ["white", "白色"],
-              ["cream", "米白"],
-              ["black", "纯黑"],
+              ["white", "霜白"],
+              ["cream", "宣纸"],
+              ["black", "墨夜"],
             ] as const
           ).map(([value, label]) => (
             <button
@@ -1443,12 +1532,6 @@ function ReaderScreen({
 }) {
   const initial = book.readingPosition ?? initialPosition(book);
   const [chapterIndex, setChapterIndex] = useState(initial.chapterIndex);
-  const [selectedPos, setSelectedPos] = useState({
-    sentenceId: initial.sentenceId,
-    chapterIndex: initial.chapterIndex,
-    sentenceIndex: initial.sentenceIndex,
-  });
-  const selectedSentenceId = selectedPos.sentenceId;
   const [showChapters, setShowChapters] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   // 沉浸阅读：默认露出浮层控件，点空白处收起，只留正文。
@@ -1725,16 +1808,6 @@ function ReaderScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book.id, paged]);
 
-  const chooseSentence = (
-    sentenceId: string,
-    sentenceIndex: number,
-    chIndex: number
-  ) => {
-    setSelectedPos({ sentenceId, chapterIndex: chIndex, sentenceIndex });
-    savedSentenceRef.current = sentenceId;
-    onProgress(positionFor(book, chIndex, sentenceIndex));
-  };
-
   const captureSelection = () => {
     const article = articleRef.current;
     const selection = window.getSelection();
@@ -1809,31 +1882,15 @@ function ReaderScreen({
         return;
       }
     }
+    // 单击一律只切沉浸模式。想从某处开始听要先划词，再用浮条上的「从这里听」。
     setPopup(null);
-
-    const target = (event.target as HTMLElement).closest<HTMLElement>(
-      "[data-sentence-id]"
-    );
-    const sentenceId = target?.dataset.sentenceId;
-    const sentenceIndex = Number(target?.dataset.sentenceIndex);
-    const chIndex = Number(target?.dataset.chapterIndex);
-    if (!sentenceId || Number.isNaN(sentenceIndex) || Number.isNaN(chIndex)) {
-      // 点在版心留白/段落之间就当成切换沉浸模式，露出或收起浮层控件。
-      setChromeVisible((value) => !value);
-      return;
-    }
-    chooseSentence(sentenceId, sentenceIndex, chIndex);
+    setChromeVisible((value) => !value);
   };
 
   const changeChapter = (nextIndex: number, landing: "first" | "last" = "first") => {
     const safe = Math.max(0, Math.min(book.chapters.length - 1, nextIndex));
     setChapterIndex(safe);
     const position = positionFor(book, safe, 0);
-    setSelectedPos({
-      sentenceId: position.sentenceId,
-      chapterIndex: safe,
-      sentenceIndex: 0,
-    });
     savedSentenceRef.current = position.sentenceId;
     onProgress(position);
     restoreRef.current = landing === "last" ? "last" : null;
@@ -2026,9 +2083,9 @@ function ReaderScreen({
                     data-sentence-id={sentence.id}
                     data-sentence-index={indexById?.get(sentence.id)}
                     data-chapter-index={index}
-                    className={`${
-                      sentence.id === selectedSentenceId ? "is-selected" : ""
-                    } ${sentence.id === currentSentenceId ? "is-speaking" : ""}`}
+                    className={
+                      sentence.id === currentSentenceId ? "is-speaking" : ""
+                    }
                   >
                     {renderSentence(
                       sentence.text,
@@ -2092,24 +2149,6 @@ function ReaderScreen({
         <span className="reader-chrome__pos">
           {paged ? `${pageIndex + 1} / ${pageCount} 页` : `已读 ${readPercent}%`}
         </span>
-        {popup ? null : (
-          <button
-            type="button"
-            className="reader-listen-pill"
-            onClick={() =>
-              onStartListening(
-                positionFor(
-                  book,
-                  selectedPos.chapterIndex,
-                  selectedPos.sentenceIndex
-                )
-              )
-            }
-          >
-            <Headphones size={16} />
-            从这一句开始听
-          </button>
-        )}
         <button
           type="button"
           className="reader-chrome__menu"
@@ -2759,6 +2798,7 @@ export default function MotingApp() {
   const [notes, setNotes] = useState<BookNote[]>([]);
   const [settings, setSettings] =
     useState<ReaderSettings>(DEFAULT_SETTINGS);
+  const [stats, setStats] = useState<ReadingStats>(DEFAULT_STATS);
   const [view, setView] = useState<AppView>({ name: "home" });
   const [showSettings, setShowSettings] = useState(false);
   const [ready, setReady] = useState(false);
@@ -2780,8 +2820,8 @@ export default function MotingApp() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getAllBooks(), getAllNotes(), getSettings()])
-      .then(async ([storedBooks, storedNotes, storedSettings]) => {
+    Promise.all([getAllBooks(), getAllNotes(), getSettings(), getStats()])
+      .then(async ([storedBooks, storedNotes, storedSettings, storedStats]) => {
         if (cancelled) return;
         if (!storedBooks.length) {
           const demo = createDemoBook();
@@ -2791,6 +2831,7 @@ export default function MotingApp() {
         setBooks(storedBooks);
         setNotes(storedNotes);
         setSettings(storedSettings);
+        setStats(storedStats);
       })
       .catch(() => {
         const demo = createDemoBook();
@@ -2891,6 +2932,55 @@ export default function MotingApp() {
     setSettings(next);
     saveSettings(next).catch(() => undefined);
   };
+
+  const updateStats = useCallback(
+    (change: (current: ReadingStats) => ReadingStats) => {
+      setStats((current) => {
+        const next = change(current);
+        saveStats(next).catch(() => undefined);
+        return next;
+      });
+    },
+    []
+  );
+
+  // 打开阅读器就开始记时，页面切到后台的那段不算。跨天时按落账时刻归档。
+  const isReading = view.name === "reader";
+  useEffect(() => {
+    if (!isReading) return;
+    let since = Date.now();
+    const take = () => {
+      const now = Date.now();
+      const elapsed = Math.round((now - since) / 1000);
+      since = now;
+      // 后台标签页的定时器会被压到几分钟一次，超过一轮的量当作没在读。
+      return elapsed > 0 && elapsed <= 90 ? elapsed : 0;
+    };
+    const record = (seconds: number) => {
+      if (!seconds) return;
+      updateStats((current) => {
+        const key = dayKey(Date.now());
+        return {
+          ...current,
+          days: { ...current.days, [key]: (current.days[key] ?? 0) + seconds },
+        };
+      });
+    };
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") record(take());
+      else since = Date.now();
+    }, 30000);
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") record(take());
+      else since = Date.now();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (document.visibilityState === "visible") record(take());
+    };
+  }, [isReading, updateStats]);
 
   const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -3076,6 +3166,7 @@ export default function MotingApp() {
     setBooks([demo]);
     setNotes([]);
     setSettings(DEFAULT_SETTINGS);
+    setStats(DEFAULT_STATS);
     setConfirmClear(false);
     setShowSettings(false);
     setView({ name: "home" });
@@ -3172,10 +3263,14 @@ export default function MotingApp() {
             {view.name === "home" ? (
               <HomeScreen
                 books={books}
+                stats={stats}
                 onOpenReader={(book) => openReader(book)}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}
                 onImport={() => fileInputRef.current?.click()}
+                onGoalChange={(goalMinutes) =>
+                  updateStats((current) => ({ ...current, goalMinutes }))
+                }
                 onOpenSettings={() => setShowSettings(true)}
               />
             ) : view.name === "library" ? (
