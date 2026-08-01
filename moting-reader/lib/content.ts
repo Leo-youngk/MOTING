@@ -17,6 +17,23 @@ export interface BlockInput {
   level?: number;
   imageId?: string;
   alt?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+}
+
+/** 读出图片的原始宽高，解不出来（比如 SVG）就当没有，渲染时退回自适应。 */
+export async function imageSize(
+  blob: Blob
+): Promise<{ width: number; height: number } | null> {
+  if (typeof createImageBitmap !== "function") return null;
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const size = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return size.width > 0 && size.height > 0 ? size : null;
+  } catch {
+    return null;
+  }
 }
 
 const ACCENTS = ["#718091", "#85766b", "#788271", "#8b6e64", "#6f7d87"];
@@ -107,7 +124,7 @@ export function createParagraph(
 ): Paragraph | null {
   if (block.kind === "image") {
     if (!block.imageId) return null;
-    return {
+    const paragraph: Paragraph = {
       id: makeId("paragraph"),
       order,
       kind: "image",
@@ -115,6 +132,11 @@ export function createParagraph(
       alt: normalizeWhitespace(block.alt ?? ""),
       sentences: [],
     };
+    if (block.imageWidth && block.imageHeight) {
+      paragraph.imageWidth = block.imageWidth;
+      paragraph.imageHeight = block.imageHeight;
+    }
+    return paragraph;
   }
 
   const sentenceTexts = splitIntoSentences(block.text);
@@ -162,6 +184,33 @@ export function createChapter(
       (sum, sentence) => sum + sentence.text.length,
       0
     ),
+  };
+}
+
+/** 早期导入的书没记插图尺寸，量出来之后补回正文里，只重建受影响的章节。 */
+export function withImageSizes(
+  book: Book,
+  sizes: Map<string, { width: number; height: number }>
+): Book {
+  const sizeOf = (paragraph: Paragraph) =>
+    paragraph.kind === "image" && !paragraph.imageHeight && paragraph.imageId
+      ? sizes.get(paragraph.imageId)
+      : undefined;
+
+  return {
+    ...book,
+    chapters: book.chapters.map((chapter) => {
+      if (!chapter.paragraphs.some(sizeOf)) return chapter;
+      return {
+        ...chapter,
+        paragraphs: chapter.paragraphs.map((paragraph) => {
+          const size = sizeOf(paragraph);
+          return size
+            ? { ...paragraph, imageWidth: size.width, imageHeight: size.height }
+            : paragraph;
+        }),
+      };
+    }),
   };
 }
 

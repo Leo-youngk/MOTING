@@ -7,6 +7,7 @@ import {
   chaptersFromPlainText,
   createBook,
   createChapter,
+  imageSize,
   makeId,
   normalizeWhitespace,
 } from "./content";
@@ -322,7 +323,10 @@ async function parseEpub(
     ])
   );
   const images: BookImage[] = [];
-  const assetIds = new Map<string, string>();
+  const assetIds = new Map<
+    string,
+    { id: string; width?: number; height?: number }
+  >();
   let imageBytes = 0;
 
   /** 把块里的原始 src 换成图片库 id；取不到的块留空 id，后面会被丢弃。 */
@@ -334,25 +338,28 @@ async function parseEpub(
         continue;
       }
       const path = resolveZipPath(basePath, block.imageId);
-      const known = assetIds.get(path);
-      if (known) {
-        block.imageId = known;
-        continue;
+      let asset = assetIds.get(path);
+      if (!asset) {
+        const entry = imageBytes < MAX_IMAGE_BYTES ? zip.file(path) : null;
+        if (!entry) {
+          block.imageId = undefined;
+          continue;
+        }
+        const raw = await entry.async("blob");
+        const blob = new Blob([raw], {
+          type: mediaTypes.get(path) || raw.type || "image/jpeg",
+        });
+        imageBytes += blob.size;
+        // 尺寸随正文一起存进书里：开书时书是同步读出来的，图片是异步取的，
+        // 只有尺寸提前在手，插图的位置才能在第一帧就占住。
+        const size = await imageSize(blob);
+        asset = { id: makeId("image"), ...(size ?? {}) };
+        assetIds.set(path, asset);
+        images.push({ id: asset.id, bookId: "", blob });
       }
-      const entry = imageBytes < MAX_IMAGE_BYTES ? zip.file(path) : null;
-      if (!entry) {
-        block.imageId = undefined;
-        continue;
-      }
-      const raw = await entry.async("blob");
-      const blob = new Blob([raw], {
-        type: mediaTypes.get(path) || raw.type || "image/jpeg",
-      });
-      imageBytes += blob.size;
-      const assetId = makeId("image");
-      assetIds.set(path, assetId);
-      images.push({ id: assetId, bookId: "", blob });
-      block.imageId = assetId;
+      block.imageId = asset.id;
+      block.imageWidth = asset.width;
+      block.imageHeight = asset.height;
     }
   }
 

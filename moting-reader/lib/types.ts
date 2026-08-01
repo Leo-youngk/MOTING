@@ -30,6 +30,13 @@ export interface Paragraph {
   imageId?: string;
   /** 仅 image 使用，替代文本，不进朗读。 */
   alt?: string;
+  /**
+   * 仅 image 使用，图片的原始像素宽高。
+   * 图片是异步从图片库取的，有了它才能在拿到图之前就把版面占住，
+   * 否则图片一到就把下方正文整体推走，正在读的位置也跟着窜。
+   */
+  imageWidth?: number;
+  imageHeight?: number;
   sentences: Sentence[];
 }
 

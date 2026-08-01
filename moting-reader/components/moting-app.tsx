@@ -51,10 +51,12 @@ import {
   flattenChapter,
   formatReadingTime,
   formatRemaining,
+  imageSize,
   initialPosition,
   makeId,
   nextChapterRange,
   positionFor,
+  withImageSizes,
 } from "../lib/content";
 import { createDemoBook } from "../lib/demo";
 import { parseBookFile } from "../lib/parsers";
@@ -255,6 +257,24 @@ function BottomNavigation({
       })}
     </nav>
   );
+}
+
+/**
+ * 目录一打开就落到当前这一章：读到第 80 章还要从头翻一遍实在难用。
+ * 只滚列表自己，把当前章放在靠上三分之一处，前后都还能看到几章。
+ */
+function useRevealActiveChapter(open: boolean) {
+  const listRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    const active = list?.querySelector(".is-active");
+    if (!list || !active) return;
+    list.scrollTop +=
+      active.getBoundingClientRect().top -
+      list.getBoundingClientRect().top -
+      list.clientHeight / 3;
+  }, [open]);
+  return listRef;
 }
 
 function Modal({
@@ -1476,7 +1496,17 @@ function renderSentence(text: string, marks: BookNote[]): ReactNode {
   return parts;
 }
 
-function ReaderImage({ imageId, alt }: { imageId: string; alt: string }) {
+function ReaderImage({
+  imageId,
+  alt,
+  width,
+  height,
+}: {
+  imageId: string;
+  alt: string;
+  width?: number;
+  height?: number;
+}) {
   const [url, setUrl] = useState("");
 
   useEffect(() => {
@@ -1493,22 +1523,18 @@ function ReaderImage({ imageId, alt }: { imageId: string; alt: string }) {
     };
   }, [imageId]);
 
-  // figure 一直挂着，图片没取回来之前也先占住自己的上下间距。
+  // 图片是异步从本地库里取的。宽高提前写在 img 上，浏览器就按这个比例先把版面占住，
+  // 图到了只是填进已经量好的位置，下方正文一个像素都不动。
+  // alt 要等图片到位再给，否则空 img 会把 alt 文案当占位内容画出来。
   return (
     <figure className="reader-block is-image">
-      {url ? (
-        <img
-          src={url}
-          alt={alt}
-          loading="lazy"
-          // 图片是异步从本地库里取出来的，撑开的那一刻它下面的正文整体下移。
-          // 撑开点在视口上方时把滚动条同步推下去，手底下的字才不会往下窜。
-          onLoad={(event) => {
-            const rect = event.currentTarget.getBoundingClientRect();
-            if (rect.top < 0) window.scrollBy(0, rect.height);
-          }}
-        />
-      ) : null}
+      <img
+        src={url || undefined}
+        alt={url ? alt : ""}
+        width={width}
+        height={height}
+        loading="lazy"
+      />
     </figure>
   );
 }
@@ -1629,6 +1655,7 @@ function ReaderScreen({
   const initial = book.readingPosition ?? initialPosition(book);
   const [chapterIndex, setChapterIndex] = useState(initial.chapterIndex);
   const [showChapters, setShowChapters] = useState(false);
+  const tocListRef = useRevealActiveChapter(showChapters);
   const [showSettings, setShowSettings] = useState(false);
   // 沉浸阅读：默认露出浮层控件，点空白处收起，只留正文。
   const [chromeVisible, setChromeVisible] = useState(true);
@@ -2288,6 +2315,8 @@ function ReaderScreen({
                       key={paragraph.id}
                       imageId={paragraph.imageId ?? ""}
                       alt={paragraph.alt ?? ""}
+                      width={paragraph.imageWidth}
+                      height={paragraph.imageHeight}
                     />
                   );
                 }
@@ -2478,7 +2507,7 @@ function ReaderScreen({
                 <small>{`共 ${book.chapters.length} 章`}</small>
               </div>
             </div>
-            <div className="toc__list">
+            <div className="toc__list" ref={tocListRef}>
               {book.chapters.map((item, index) => {
                 const startPercent =
                   book.characterCount > 0
@@ -2656,6 +2685,7 @@ function PlayerScreen({
   onSettingsChange: (settings: ReaderSettings) => void;
 }) {
   const [showChapters, setShowChapters] = useState(false);
+  const chapterListRef = useRevealActiveChapter(showChapters);
   const [showSleep, setShowSleep] = useState(false);
   const [showVoice, setShowVoice] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
@@ -2857,7 +2887,7 @@ function PlayerScreen({
 
       {showChapters ? (
         <Modal title="章节列表" onClose={() => setShowChapters(false)}>
-          <div className="chapter-list">
+          <div className="chapter-list" ref={chapterListRef}>
             {book.chapters.map((item, index) => (
               <button
                 type="button"
@@ -3124,6 +3154,46 @@ export default function MotingApp() {
   useEffect(() => {
     booksRef.current = books;
   }, [books]);
+
+  // 这次改动之前导入的书没记插图尺寸，正文里就没法预留位置，图片一加载就把下文推走。
+  // 开机后在后台按本补量一次，量到就写回书里，之后再打开这本书版面就是稳的。
+  // 补量只在没开着书的时候做：正读着的书突然多出一批插图占位，同样会把正文推走。
+  const sizedBooksRef = useRef(new Set<string>());
+  const sizingRef = useRef(false);
+  const readingBookId =
+    view.name === "reader" || view.name === "player" ? view.bookId : "";
+  useEffect(() => {
+    if (readingBookId || sizingRef.current) return;
+    let cancelled = false;
+    sizingRef.current = true;
+    (async () => {
+      for (const book of booksRef.current) {
+        if (sizedBooksRef.current.has(book.id)) continue;
+        const sizes = new Map<string, { width: number; height: number }>();
+        for (const chapter of book.chapters) {
+          for (const paragraph of chapter.paragraphs) {
+            const id = paragraph.imageId;
+            if (paragraph.kind !== "image" || !id) continue;
+            if (paragraph.imageHeight || sizes.has(id)) continue;
+            const image = await getBookImage(id).catch(() => undefined);
+            const size = image ? await imageSize(image.blob) : null;
+            if (cancelled) return;
+            if (size) sizes.set(id, size);
+          }
+        }
+        sizedBooksRef.current.add(book.id);
+        if (!sizes.size) continue;
+        // 量图期间阅读进度可能已经写过一轮，要拿最新的那份来补，别把进度盖回去。
+        const latest = booksRef.current.find((item) => item.id === book.id);
+        if (latest) updateBook(withImageSizes(latest, sizes));
+      }
+      sizingRef.current = false;
+    })();
+    return () => {
+      cancelled = true;
+      sizingRef.current = false;
+    };
+  }, [books.length, readingBookId, updateBook]);
 
   const flushListeningProgress = useCallback(() => {
     if (flushTimerRef.current !== null) {

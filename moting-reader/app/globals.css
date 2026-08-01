@@ -2316,7 +2316,15 @@ input[type="range"] {
 .reader-article .reader-block.is-image img {
   max-width: 100%;
   height: auto;
+  /* img 被 Tailwind 置成了块级，比正文窄的小图得靠外边距才能居中。 */
+  margin-inline: auto;
   border-radius: 6px;
+}
+
+/* 图还没从本地图片库取回来时，版面已经按原始宽高留好了，
+   但浏览器会给这种没有 src 的 img 画一个「破图」框，藏掉它只留空白。 */
+.reader-article .reader-block.is-image img:not([src]) {
+  visibility: hidden;
 }
 
 .reader-article .reader-block.is-list {
@@ -2806,6 +2814,9 @@ input[type="range"] {
 }
 
 .chapter-list {
+  max-height: 58dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px 0;
 }
 
@@ -2884,7 +2895,12 @@ input[type="range"] {
   font-size: 11px;
 }
 
+/* 目录自己滚，不带着整张 sheet 一起滚：打开时会直接落到当前章，
+   标题和关闭按钮得留在原处。 */
 .toc__list {
+  max-height: 52dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px 0;
 }
 

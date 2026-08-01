@@ -12,6 +12,7 @@ import {
   sliceSpeechBlock,
   splitIntoSentences,
   toSpeakableText,
+  withImageSizes,
 } from "../lib/content.ts";
 
 test("按中文标点切分朗读句子", () => {
@@ -99,6 +100,37 @@ test("插图成块但不进句子流，缺图源的插图直接丢掉", () => {
   assert.equal(chapter.paragraphs[1].sentences.length, 0);
   assert.equal(chapter.sentenceCount, 2);
   assert.equal(buildSpeechBlocks(chapter).length, 2);
+});
+
+test("插图尺寸随正文一起存下来，老书补量时只改缺尺寸的那几段", () => {
+  const chapter = createChapter(
+    "第一章",
+    [
+      { text: "正文一句。" },
+      { kind: "image", text: "", imageId: "image-1", imageWidth: 800, imageHeight: 600 },
+      { kind: "image", text: "", imageId: "image-2" },
+    ],
+    0
+  );
+  assert.ok(chapter);
+  assert.equal(chapter.paragraphs[1].imageWidth, 800);
+  assert.equal(chapter.paragraphs[1].imageHeight, 600);
+  assert.equal(chapter.paragraphs[2].imageHeight, undefined);
+
+  const book = createBook({ title: "带插图的书", author: "", format: "epub", chapters: [chapter] });
+  const filled = withImageSizes(
+    book,
+    new Map([
+      ["image-1", { width: 10, height: 10 }],
+      ["image-2", { width: 400, height: 300 }],
+    ])
+  );
+  const paragraphs = filled.chapters[0].paragraphs;
+  // 已经有尺寸的不动，免得把导入时量准的值覆盖掉。
+  assert.equal(paragraphs[1].imageWidth, 800);
+  assert.equal(paragraphs[2].imageWidth, 400);
+  assert.equal(paragraphs[2].imageHeight, 300);
+  assert.notEqual(filled.chapters[0], book.chapters[0]);
 });
 
 test("只有插图没有正文时不算一章", () => {
