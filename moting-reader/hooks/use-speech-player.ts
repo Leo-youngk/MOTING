@@ -22,6 +22,7 @@ import type {
   PlayerVoice,
   ReaderSettings,
   SpeechBlock,
+  SpeechBoundary,
   SpeechLocation,
   SpeechSpan,
 } from "../lib/types";
@@ -29,6 +30,18 @@ import type {
 export type SleepMode = "off" | "15" | "30" | "45" | "chapter";
 
 type Engine = "edge" | "system";
+
+/** 已经落成 blob URL、可以立刻塞给 audio 的一段音频。 */
+interface ReadyClip {
+  url: string;
+  timeline: SpeechBoundary[];
+}
+
+interface PrefetchEntry {
+  key: string;
+  clip: Promise<SpeechClip>;
+  ready: ReadyClip | null;
+}
 
 interface SpeechPlayerOptions {
   books: Book[];
@@ -136,9 +149,7 @@ export function useSpeechPlayer({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const clipUrlRef = useRef("");
   const abortRef = useRef<AbortController | null>(null);
-  const prefetchRef = useRef<{ key: string; clip: Promise<SpeechClip> } | null>(
-    null
-  );
+  const prefetchRef = useRef<PrefetchEntry | null>(null);
   const edgeDownRef = useRef(false);
   const playAtRef = useRef<
     ((bookId: string, chapterIndex: number, sentenceIndex: number) => void) | null
@@ -211,6 +222,21 @@ export function useSpeechPlayer({
     }
   }, []);
 
+  const releasePrefetch = useCallback(() => {
+    const ready = prefetchRef.current?.ready;
+    if (ready) URL.revokeObjectURL(ready.url);
+    prefetchRef.current = null;
+  }, []);
+
+  // 后台播放被系统拦下时不能当成播完：清掉位置的话迷你播放器会消失，
+  // 回到前台连「继续」都没得点。只置成暂停，原地等用户点一下。
+  const holdForResume = useCallback((message: string) => {
+    playingRef.current = false;
+    setIsPlaying(false);
+    setIsPaused(true);
+    setError(message);
+  }, []);
+
   const silenceAudio = useCallback(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -230,7 +256,7 @@ export function useSpeechPlayer({
     abortRef.current = null;
     silenceAudio();
     releaseClip();
-    prefetchRef.current = null;
+    releasePrefetch();
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
@@ -247,7 +273,7 @@ export function useSpeechPlayer({
     setCurrentSentenceId("");
     setIsPlaying(false);
     setIsPaused(false);
-  }, [clearTimers, releaseClip, silenceAudio]);
+  }, [clearTimers, releaseClip, releasePrefetch, silenceAudio]);
 
   const blocksFor = useCallback((chapter: Chapter): SpeechBlock[] => {
     const cached = blocksCacheRef.current.get(chapter.id);
@@ -257,6 +283,14 @@ export function useSpeechPlayer({
     return blocks;
   }, []);
 
+  /** 下一段已经备好了就同步交出来，让块与块之间不留任何 await。 */
+  const takeReadyClip = useCallback((key: string): ReadyClip | null => {
+    const pending = prefetchRef.current;
+    if (pending?.key !== key || !pending.ready) return null;
+    prefetchRef.current = null;
+    return pending.ready;
+  }, []);
+
   const takeClip = useCallback(
     (text: string, voice: string, signal: AbortSignal): Promise<SpeechClip> => {
       const pending = prefetchRef.current;
@@ -264,19 +298,38 @@ export function useSpeechPlayer({
         prefetchRef.current = null;
         return pending.clip;
       }
+      releasePrefetch();
       return fetchSpeechClip(text, voice, signal);
     },
-    []
+    [releasePrefetch]
   );
 
-  const prefetchClip = useCallback((text: string, voice: string) => {
-    const key = `${voice}|${text}`;
-    if (prefetchRef.current?.key === key) return;
-    const clip = fetchSpeechClip(text, voice);
-    // 预取失败不该冒泡成未处理拒绝，真正播到这一段时会重新请求并报错。
-    clip.catch(() => undefined);
-    prefetchRef.current = { key, clip };
-  }, []);
+  const prefetchClip = useCallback(
+    (text: string, voice: string) => {
+      const key = `${voice}|${text}`;
+      if (prefetchRef.current?.key === key) return;
+      releasePrefetch();
+      const entry: PrefetchEntry = {
+        key,
+        clip: fetchSpeechClip(text, voice),
+        ready: null,
+      };
+      prefetchRef.current = entry;
+      entry.clip
+        .then((clip) => {
+          // 预取的结果一拿到就先落成 blob URL。交接那一刻只剩「赋 src + play」两步，
+          // 中间但凡有一次 await，后台的 play() 就会被当成新的自动播放请求拦掉。
+          if (prefetchRef.current !== entry) return;
+          entry.ready = {
+            url: URL.createObjectURL(clip.audio),
+            timeline: clip.timeline,
+          };
+        })
+        // 预取失败不该冒泡成未处理拒绝，真正播到这一段时会重新请求并报错。
+        .catch(() => undefined);
+    },
+    [releasePrefetch]
+  );
 
   const playAt = useCallback(
     (bookId: string, chapterIndex: number, sentenceIndex: number) => {
@@ -326,8 +379,8 @@ export function useSpeechPlayer({
       clearTimers();
       abortRef.current?.abort();
       abortRef.current = null;
-      silenceAudio();
-      releaseClip();
+      // 这里刻意不清空 audio：把 src 摘掉等于告诉系统「这次播放结束了」，
+      // 媒体会话一断，后台就再没资格起播下一段。真要换源时直接覆盖 src 即可。
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }
@@ -386,6 +439,8 @@ export function useSpeechPlayer({
         }
 
         engineRef.current = "system";
+        silenceAudio();
+        releaseClip();
         const utterance = new SpeechSynthesisUtterance(segment.text);
         const usableVoices = systemVoices.filter(
           (voice) => !blockedVoicesRef.current.has(voice.voiceURI)
@@ -469,43 +524,54 @@ export function useSpeechPlayer({
       const startEdge = () => {
         engineRef.current = "edge";
         const voiceName = edgeVoiceName(settingsRef.current.voiceURI);
+
+        const beginClip = (clip: ReadyClip) => {
+          const audio = audioRef.current ?? new Audio();
+          audioRef.current = audio;
+          audio.onended = finishSegment;
+          audio.onerror = () => {
+            if (token !== tokenRef.current) return;
+            holdForResume("这一段没能播出来，点一下继续");
+          };
+          const previous = clipUrlRef.current;
+          clipUrlRef.current = clip.url;
+          audio.src = clip.url;
+          if (previous) URL.revokeObjectURL(previous);
+          audio.playbackRate = settingsRef.current.speechRate;
+          void audio.play().catch(() => {
+            if (token !== tokenRef.current) return;
+            holdForResume("播放被系统打断了，点一下继续");
+          });
+
+          trackRef.current = setInterval(() => {
+            if (token !== tokenRef.current || audio.paused) return;
+            applySpan(
+              spanAt(segment.spans, charIndexAt(clip.timeline, audio.currentTime))
+            );
+          }, HIGHLIGHT_INTERVAL_MS);
+
+          const next = blocks[blockIndex + 1];
+          if (next?.text.trim()) prefetchClip(next.text, voiceName);
+        };
+
+        const ready = takeReadyClip(`${voiceName}|${segment.text}`);
+        if (ready) {
+          beginClip(ready);
+          return;
+        }
+
+        // 要等网络就得先把上一段按停，否则跳句时旧音频会一直响到新的接上。
+        audioRef.current?.pause();
         const controller = new AbortController();
         abortRef.current = controller;
 
         takeClip(segment.text, voiceName, controller.signal)
           .then((clip) => {
             if (token !== tokenRef.current || !playingRef.current) return;
-
-            const audio = audioRef.current ?? new Audio();
-            audioRef.current = audio;
-            releaseClip();
-            clipUrlRef.current = URL.createObjectURL(clip.audio);
-            audio.src = clipUrlRef.current;
-            audio.playbackRate = settingsRef.current.speechRate;
-            audio.onended = finishSegment;
-            audio.onerror = () => {
-              if (token !== tokenRef.current) return;
-              setError("音频播放失败，请重新播放");
-              stop();
-            };
-            void audio.play().catch(() => {
-              if (token !== tokenRef.current) return;
-              setError("浏览器拦截了自动播放，请再点一次播放");
-              stop();
+            beginClip({
+              url: URL.createObjectURL(clip.audio),
+              timeline: clip.timeline,
             });
-
-            trackRef.current = setInterval(() => {
-              if (token !== tokenRef.current || audio.paused) return;
-              applySpan(
-                spanAt(
-                  segment.spans,
-                  charIndexAt(clip.timeline, audio.currentTime)
-                )
-              );
-            }, HIGHLIGHT_INTERVAL_MS);
-
-            const next = blocks[blockIndex + 1];
-            if (next?.text.trim()) prefetchClip(next.text, voiceName);
           })
           .catch((reason: unknown) => {
             if (token !== tokenRef.current || !playingRef.current) return;
@@ -536,12 +602,14 @@ export function useSpeechPlayer({
     [
       blocksFor,
       clearTimers,
+      holdForResume,
       prefetchClip,
       releaseClip,
       silenceAudio,
       stop,
       systemVoices,
       takeClip,
+      takeReadyClip,
     ]
   );
 
@@ -673,12 +741,96 @@ export function useSpeechPlayer({
       abortRef.current?.abort();
       audioRef.current?.pause();
       if (clipUrlRef.current) URL.revokeObjectURL(clipUrlRef.current);
+      const ready = prefetchRef.current?.ready;
+      if (ready) URL.revokeObjectURL(ready.url);
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }
     },
     []
   );
+
+  // 锁屏和控制中心的那套控件。没有它，系统不把这个页面当成正在放音的播放器，
+  // 切后台后一段读完就可能被冻结，再也接不上下一段。
+  const actionsRef = useRef({ toggle, skipSentences, changeChapter, stop });
+  useEffect(() => {
+    actionsRef.current = { toggle, skipSentences, changeChapter, stop };
+  }, [toggle, skipSentences, changeChapter, stop]);
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
+      return;
+    }
+    const session = navigator.mediaSession;
+    const handlers: [MediaSessionAction, MediaSessionActionHandler][] = [
+      ["play", () => {
+        if (!playingRef.current) actionsRef.current.toggle();
+      }],
+      ["pause", () => {
+        if (playingRef.current) actionsRef.current.toggle();
+      }],
+      ["stop", () => actionsRef.current.stop()],
+      ["previoustrack", () => actionsRef.current.changeChapter(-1)],
+      ["nexttrack", () => actionsRef.current.changeChapter(1)],
+      ["seekbackward", () => actionsRef.current.skipSentences(-2)],
+      ["seekforward", () => actionsRef.current.skipSentences(2)],
+    ];
+    for (const [action, handler] of handlers) {
+      // 各家浏览器支持的动作不一样，不认的直接跳过。
+      try {
+        session.setActionHandler(action, handler);
+      } catch {
+        continue;
+      }
+    }
+    return () => {
+      for (const [action] of handlers) {
+        try {
+          session.setActionHandler(action, null);
+        } catch {
+          continue;
+        }
+      }
+      session.metadata = null;
+      session.playbackState = "none";
+    };
+  }, []);
+
+  const sessionBookId = location?.bookId ?? "";
+  const sessionChapterIndex = location?.chapterIndex ?? -1;
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
+      return;
+    }
+    const session = navigator.mediaSession;
+    const book = booksRef.current.find((item) => item.id === sessionBookId);
+    if (!book) {
+      session.metadata = null;
+      return;
+    }
+    session.metadata = new MediaMetadata({
+      title: book.chapters[sessionChapterIndex]?.title ?? book.title,
+      artist: book.author || "墨听",
+      album: book.title,
+      artwork: [
+        {
+          src: book.coverDataUrl || "/icon-512.png",
+          sizes: "512x512",
+        },
+      ],
+    });
+  }, [sessionBookId, sessionChapterIndex]);
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
+      return;
+    }
+    navigator.mediaSession.playbackState = isPlaying
+      ? "playing"
+      : isPaused
+        ? "paused"
+        : "none";
+  }, [isPlaying, isPaused]);
 
   return {
     voices,
