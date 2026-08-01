@@ -2075,6 +2075,40 @@ input[type="range"] {
   pointer-events: none;
 }
 
+/* 正文不跟着朗读走，滑开之后靠这个小圆点回去。刻意压得很淡：它只是个退路，
+   不该在读者没找它的时候抢走注意力。 */
+.reader-recall {
+  position: fixed;
+  z-index: 29;
+  right: 16px;
+  bottom: calc(env(safe-area-inset-bottom) + 78px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 0.5px solid var(--glass-edge);
+  border-radius: 999px;
+  background: var(--glass-fill);
+  backdrop-filter: var(--glass-blur);
+  color: var(--reader-muted);
+  opacity: 0.5;
+  box-shadow: var(--glass-shadow);
+  animation: recall-in 260ms ease both;
+  transition: opacity 160ms ease;
+}
+
+.reader-recall:active {
+  opacity: 0.9;
+}
+
+@keyframes recall-in {
+  from {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+}
+
 .reader-chrome__chapter,
 .reader-chrome__pos {
   display: inline-flex;
@@ -2320,6 +2354,12 @@ input[type="range"] {
 .reader-sentinel {
   height: 1px;
   pointer-events: none;
+}
+
+/* 跳章时滚到这一节的顶部，留出的这段正好等于正文的上边距，
+   否则章名会顶到屏幕最上沿、被顶栏压住。 */
+.reader-chapter {
+  scroll-margin-top: calc(env(safe-area-inset-top) + 60px);
 }
 
 /* 连续滚动里章与章直接相接，靠章首那块标题分隔，不另加分隔线。 */

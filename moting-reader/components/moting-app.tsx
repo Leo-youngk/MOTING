@@ -1493,10 +1493,22 @@ function ReaderImage({ imageId, alt }: { imageId: string; alt: string }) {
     };
   }, [imageId]);
 
-  if (!url) return null;
+  // figure 一直挂着，图片没取回来之前也先占住自己的上下间距。
   return (
     <figure className="reader-block is-image">
-      <img src={url} alt={alt} loading="lazy" />
+      {url ? (
+        <img
+          src={url}
+          alt={alt}
+          loading="lazy"
+          // 图片是异步从本地库里取出来的，撑开的那一刻它下面的正文整体下移。
+          // 撑开点在视口上方时把滚动条同步推下去，手底下的字才不会往下窜。
+          onLoad={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            if (rect.top < 0) window.scrollBy(0, rect.height);
+          }}
+        />
+      ) : null}
     </figure>
   );
 }
@@ -1589,6 +1601,7 @@ function ReaderScreen({
   notes,
   settings,
   currentSentenceId,
+  speakingChapterIndex,
   onBack,
   onProgress,
   onStartListening,
@@ -1601,6 +1614,7 @@ function ReaderScreen({
   notes: BookNote[];
   settings: ReaderSettings;
   currentSentenceId: string;
+  speakingChapterIndex: number;
   onBack: () => void;
   onProgress: (position: BookPosition) => void;
   onStartListening: (position: BookPosition) => void;
@@ -1625,6 +1639,14 @@ function ReaderScreen({
   } | null>(null);
   const articleRef = useRef<HTMLElement>(null);
   const savedSentenceRef = useRef(initial.sentenceId);
+  // onProgress 每次渲染都是新的箭头函数，book 也随每一次进度回写换引用。把它们直接
+  // 写进观察器的依赖，就等于每渲染一次都把盯着上千个句子元素的观察器拆了重建。
+  const progressRef = useRef(onProgress);
+  const bookRef = useRef(book);
+  useEffect(() => {
+    progressRef.current = onProgress;
+    bookRef.current = book;
+  });
   const paged = settings.readingMode === "page";
   const [pageIndex, setPageIndex] = useState(0);
   const [pageCount, setPageCount] = useState(1);
@@ -1759,10 +1781,10 @@ function ReaderScreen({
       const index = Number(target?.dataset.sentenceIndex);
       if (!id || Number.isNaN(index) || savedSentenceRef.current === id) return;
       savedSentenceRef.current = id;
-      onProgress(positionFor(book, chapterIndex, index));
+      progressRef.current(positionFor(bookRef.current, chapterIndex, index));
     }, 320);
     return () => clearTimeout(timer);
-  }, [paged, pageIndex, pageStep, pageCount, book, chapterIndex, onProgress]);
+  }, [paged, pageIndex, pageStep, pageCount, chapterIndex]);
 
   useEffect(() => {
     if (paged) return;
@@ -1788,7 +1810,7 @@ function ReaderScreen({
         if (pending) clearTimeout(pending);
         pending = setTimeout(() => {
           savedSentenceRef.current = id;
-          onProgress(positionFor(book, chIndex, index));
+          progressRef.current(positionFor(bookRef.current, chIndex, index));
         }, 500);
       },
       { rootMargin: "-90px 0px -58% 0px", threshold: 0.15 }
@@ -1800,7 +1822,8 @@ function ReaderScreen({
       if (pending) clearTimeout(pending);
       observer.disconnect();
     };
-  }, [book, onProgress, paged, range.start, range.end]);
+    // 重挂观察器只该发生在被观察的句子元素本身换了的时候：换书，或者窗口挪了。
+  }, [book.id, paged, range.start, range.end]);
 
   // 接章／摘章都会改变正文上方的高度，不补偿的话页面会当场跳一下。
   // 先记住视口里第一章的位置，重排后按它的位移把滚动条推回去。
@@ -1834,6 +1857,88 @@ function ReaderScreen({
     const delta = section.getBoundingClientRect().top - anchor.top;
     if (delta) window.scrollBy(0, delta);
   }, [range]);
+
+  // 换窗口之后才知道目标元素在哪，所以跳转的滚动必须等这次提交落地再做，而且得是瞬时的。
+  // 在点击事件里同步发平滑滚动，动画是照着旧窗口的文档高度跑的；等它跑到一半，头部哨兵
+  // 已经把上一章补了回来，补偿用的 scrollBy 又会按规范中止这段动画，最后停在半路。
+  const pendingScrollRef = useRef<{
+    selector: string;
+    block: ScrollLogicalPosition;
+  } | null>(null);
+  useLayoutEffect(() => {
+    const pending = pendingScrollRef.current;
+    if (!pending) return;
+    pendingScrollRef.current = null;
+    articleRef.current
+      ?.querySelector<HTMLElement>(pending.selector)
+      ?.scrollIntoView({ block: pending.block });
+  }, [range]);
+
+  // 改排版会让正文整体重排。分页模式在 measure() 里按句子重新对页，连续滚动这边得自己来：
+  // 先记下锚点句在视口里的位置，重排后按位移把滚动条推回去，否则调一次字号就找不到读到哪了。
+  const typographyAnchorRef = useRef<{ id: string; top: number } | null>(null);
+  const applySettings = (next: ReaderSettings) => {
+    const id = savedSentenceRef.current;
+    const element = articleRef.current?.querySelector<HTMLElement>(
+      `[data-sentence-id="${id}"]`
+    );
+    typographyAnchorRef.current =
+      paged || !element
+        ? null
+        : { id, top: element.getBoundingClientRect().top };
+    onSettingsChange(next);
+  };
+
+  useLayoutEffect(() => {
+    const anchor = typographyAnchorRef.current;
+    typographyAnchorRef.current = null;
+    if (paged || !anchor) return;
+    const element = articleRef.current?.querySelector<HTMLElement>(
+      `[data-sentence-id="${anchor.id}"]`
+    );
+    if (!element) return;
+    const delta = element.getBoundingClientRect().top - anchor.top;
+    if (delta) window.scrollBy(0, delta);
+  }, [paged, settings]);
+
+  // 正文不跟着朗读自己滚——读者的手在上面，正文就不该动。只在朗读句被甩出视口时
+  // 露一个很淡的小按钮，想回去点一下即可。初值当成看得见，免得刚进来先闪一下。
+  const speakingMounted =
+    !!currentSentenceId &&
+    speakingChapterIndex >= range.start &&
+    speakingChapterIndex <= range.end;
+  const [speakingVisible, setSpeakingVisible] = useState(true);
+
+  useEffect(() => {
+    if (paged || !speakingMounted) return;
+    const element = articleRef.current?.querySelector<HTMLElement>(
+      `[data-sentence-id="${currentSentenceId}"]`
+    );
+    if (!element) return;
+    const observer = new IntersectionObserver(([entry]) =>
+      setSpeakingVisible(entry.isIntersecting)
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [paged, speakingMounted, currentSentenceId, range.start, range.end]);
+
+  const showRecall =
+    !paged && !!currentSentenceId && !(speakingMounted && speakingVisible);
+
+  const scrollToSpeaking = () => {
+    const selector = `[data-sentence-id="${currentSentenceId}"]`;
+    const element = articleRef.current?.querySelector<HTMLElement>(selector);
+    if (element) {
+      element.scrollIntoView({ block: "center" });
+      return;
+    }
+    // 朗读已经走到窗口之外的章去了，先按那一章重新开窗，落地后再滚过去。
+    anchorRef.current = null;
+    pendingScrollRef.current = { selector, block: "center" };
+    const next = { start: speakingChapterIndex, end: speakingChapterIndex };
+    rangeRef.current = next;
+    setRange(next);
+  };
 
   // 正文两端各放一个哨兵，进到缓冲区就接下一章。用 observer 而不是 scroll 事件，
   // 免得每次滚动都去读 scrollHeight 触发同步布局。
@@ -1987,7 +2092,13 @@ function ReaderScreen({
     anchorRef.current = null;
     rangeRef.current = { start: safe, end: safe };
     setRange({ start: safe, end: safe });
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    // 分页模式靠平移正文切页，不动滚动条。
+    if (!paged) {
+      pendingScrollRef.current = {
+        selector: `[data-chapter-section="${safe}"]`,
+        block: "start",
+      };
+    }
   };
 
   const turnPage = (delta: number) => {
@@ -2263,6 +2374,17 @@ function ReaderScreen({
         </button>
       </div>
 
+      {showRecall ? (
+        <button
+          type="button"
+          className="reader-recall"
+          aria-label="回到朗读处"
+          onClick={scrollToSpeaking}
+        >
+          <Volume2 size={15} />
+        </button>
+      ) : null}
+
       {popup ? (
         <ReaderPopover
           popup={popup}
@@ -2408,7 +2530,7 @@ function ReaderScreen({
                   }`}
                   aria-label={opt.label}
                   onClick={() =>
-                    onSettingsChange({ ...settings, theme: opt.value })
+                    applySettings({ ...settings, theme: opt.value })
                   }
                 >
                   <span className="rset-theme__glyph">文</span>
@@ -2420,7 +2542,7 @@ function ReaderScreen({
             <FontPicker
               value={settings.fontFamily}
               onChange={(fontFamily) =>
-                onSettingsChange({ ...settings, fontFamily })
+                applySettings({ ...settings, fontFamily })
               }
             />
 
@@ -2432,7 +2554,7 @@ function ReaderScreen({
                   aria-label="减小字号"
                   disabled={settings.fontSize <= 15}
                   onClick={() =>
-                    onSettingsChange({
+                    applySettings({
                       ...settings,
                       fontSize: Math.max(15, settings.fontSize - 1),
                     })
@@ -2445,7 +2567,7 @@ function ReaderScreen({
                   aria-label="增大字号"
                   disabled={settings.fontSize >= 28}
                   onClick={() =>
-                    onSettingsChange({
+                    applySettings({
                       ...settings,
                       fontSize: Math.min(28, settings.fontSize + 1),
                     })
@@ -2466,7 +2588,7 @@ function ReaderScreen({
                 step="0.1"
                 value={settings.lineHeight}
                 onChange={(event) =>
-                  onSettingsChange({
+                  applySettings({
                     ...settings,
                     lineHeight: Number(event.target.value),
                   })
@@ -2481,7 +2603,7 @@ function ReaderScreen({
                   key={mode}
                   className={settings.readingMode === mode ? "is-active" : ""}
                   onClick={() =>
-                    onSettingsChange({ ...settings, readingMode: mode })
+                    applySettings({ ...settings, readingMode: mode })
                   }
                 >
                   {mode === "scroll" ? "上下滑动" : "左右翻页"}
@@ -3397,6 +3519,11 @@ export default function MotingApp() {
             player.location?.bookId === selectedBook.id
               ? player.currentSentenceId
               : ""
+          }
+          speakingChapterIndex={
+            player.location?.bookId === selectedBook.id
+              ? player.location.chapterIndex
+              : -1
           }
           onBack={() => setView({ name: "home" })}
           onProgress={(position) => handleReadProgress(selectedBook, position)}
