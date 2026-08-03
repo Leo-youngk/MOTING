@@ -132,6 +132,12 @@ export interface ReaderSettings {
   readingMode: ReadingMode;
   speechRate: number;
   voiceURI: string;
+  /** 用户自带的 OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1。 */
+  aiBaseUrl: string;
+  /** 直接从浏览器发请求，不经过 Worker，密钥不落我们的服务器。 */
+  aiApiKey: string;
+  aiModel: string;
+  aiDeepThinking: boolean;
 }
 
 export interface ImportProgress {
@@ -183,6 +189,10 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   readingMode: "scroll",
   speechRate: 1,
   voiceURI: "",
+  aiBaseUrl: "",
+  aiApiKey: "",
+  aiModel: "",
+  aiDeepThinking: false,
 };
 
 /** 每天的阅读秒数，键是本地时区的 YYYY-MM-DD。 */

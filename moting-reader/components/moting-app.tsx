@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   BookOpen,
   Bookmark,
+  BookmarkCheck,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -12,6 +13,7 @@ import {
   Copy,
   Download,
   FileText,
+  Gauge,
   Headphones,
   Highlighter,
   Home,
@@ -24,6 +26,7 @@ import {
   Plus,
   Search,
   SlidersHorizontal,
+  Sparkles,
   Square,
   Trash2,
   Type,
@@ -46,6 +49,7 @@ import {
   useState,
 } from "react";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
+import { AiRequestError, fetchAiModels, streamAiChat } from "../lib/ai";
 import {
   findSentence,
   flattenChapter,
@@ -56,6 +60,7 @@ import {
   makeId,
   nextChapterRange,
   positionFor,
+  remainingCharacters,
   withImageSizes,
 } from "../lib/content";
 import { createDemoBook } from "../lib/demo";
@@ -290,6 +295,15 @@ function Modal({
   wide?: boolean;
   className?: string;
 }) {
+  // 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
+  // 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -988,6 +1002,93 @@ function ListenScreen({
   );
 }
 
+/** 月历式跳转条：有笔记的日子底下一个墨点，点一下按那天筛出来，回顾不用再往下翻。 */
+function NotesCalendar({
+  countsByDay,
+  selected,
+  onSelect,
+}: {
+  countsByDay: Map<string, number>;
+  selected: string | null;
+  onSelect: (day: string | null) => void;
+}) {
+  const [cursor, setCursor] = useState(() => {
+    const latest = Array.from(countsByDay.keys()).sort().pop();
+    const base = latest ? new Date(`${latest}T00:00:00`) : new Date();
+    return new Date(base.getFullYear(), base.getMonth(), 1);
+  });
+
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  const firstWeekday = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const todayKey = dayKey(Date.now());
+  const monthKey = `${year}-${String(month + 1).padStart(2, "0")}`;
+  const monthHasNotes = Array.from(countsByDay.keys()).some((key) =>
+    key.startsWith(monthKey)
+  );
+
+  const cells: ({ key: string; day: number } | null)[] = [];
+  for (let i = 0; i < firstWeekday; i += 1) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d += 1) {
+    cells.push({
+      key: `${monthKey}-${String(d).padStart(2, "0")}`,
+      day: d,
+    });
+  }
+
+  return (
+    <div className="notes-calendar">
+      <div className="notes-calendar__head">
+        <button
+          type="button"
+          aria-label="上个月"
+          onClick={() => setCursor(new Date(year, month - 1, 1))}
+        >
+          <ChevronLeft size={16} />
+        </button>
+        <strong>
+          {year}年{month + 1}月
+        </strong>
+        <button
+          type="button"
+          aria-label="下个月"
+          onClick={() => setCursor(new Date(year, month + 1, 1))}
+        >
+          <ChevronRight size={16} />
+        </button>
+      </div>
+      <div className="notes-calendar__weekdays">
+        {WEEKDAY_LABELS.map((label) => (
+          <span key={label}>{label}</span>
+        ))}
+      </div>
+      <div className="notes-calendar__grid">
+        {cells.map((cell, index) => {
+          if (!cell) return <span key={`blank-${index}`} />;
+          const count = countsByDay.get(cell.key) ?? 0;
+          return (
+            <button
+              type="button"
+              key={cell.key}
+              className={`notes-calendar__day ${
+                cell.key === todayKey ? "is-today" : ""
+              } ${cell.key === selected ? "is-selected" : ""}`}
+              disabled={!count}
+              aria-label={`${cell.day}日${count ? `，${count} 条笔记` : ""}`}
+              onClick={() => onSelect(selected === cell.key ? null : cell.key)}
+            >
+              {cell.day}
+              {count ? <i /> : null}
+            </button>
+          );
+        })}
+      </div>
+      {!monthHasNotes ? <p className="notes-calendar__empty">这个月还没有笔记</p> : null}
+    </div>
+  );
+}
+
 function NotesScreen({
   notes,
   books,
@@ -1004,6 +1105,7 @@ function NotesScreen({
   onDelete: (note: BookNote) => void;
 }) {
   const [filter, setFilter] = useState<"all" | "highlight" | "thought">("all");
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
 
   // 一次跨句划线在库里是多条记录，这里先合回一条，列表上才是用户划的那一整段。
   const merged = useMemo(() => {
@@ -1017,8 +1119,18 @@ function NotesScreen({
     return Array.from(buckets.values()).map(mergeNoteGroup);
   }, [notes]);
 
+  const countsByDay = useMemo(() => {
+    const counts = new Map<string, number>();
+    merged.forEach((note) => {
+      const key = dayKey(note.createdAt);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+    return counts;
+  }, [merged]);
+
   const groups = useMemo(() => {
     const visible = merged.filter((note) => {
+      if (selectedDay && dayKey(note.createdAt) !== selectedDay) return false;
       if (filter === "highlight") return note.kind === "highlight";
       if (filter === "thought") return Boolean(note.thought);
       return true;
@@ -1032,7 +1144,7 @@ function NotesScreen({
       }))
       .filter((entry) => entry.items.length)
       .sort((a, b) => b.items[0].createdAt - a.items[0].createdAt);
-  }, [books, filter, merged]);
+  }, [books, filter, merged, selectedDay]);
 
   const highlights = merged.filter((note) => note.kind === "highlight").length;
   const thoughts = merged.filter((note) => note.thought).length;
@@ -1078,11 +1190,32 @@ function NotesScreen({
         ))}
       </div>
 
+      <NotesCalendar
+        countsByDay={countsByDay}
+        selected={selectedDay}
+        onSelect={setSelectedDay}
+      />
+
+      {selectedDay ? (
+        <button
+          type="button"
+          className="notes-day-chip"
+          onClick={() => setSelectedDay(null)}
+        >
+          只看 {selectedDay.replace(/-/g, ".")}
+          <X size={13} />
+        </button>
+      ) : null}
+
       {!groups.length ? (
         <EmptyState
           icon={<Highlighter size={26} />}
-          title="这里还是空的"
-          description="换个筛选看看，或者回到正文里划一段。"
+          title={selectedDay ? "这天没有笔记" : "这里还是空的"}
+          description={
+            selectedDay
+              ? "换一天看看，或者清除筛选看全部。"
+              : "换个筛选看看，或者回到正文里划一段。"
+          }
         />
       ) : (
         <div className="ink-feed">
@@ -1177,7 +1310,17 @@ function BookNotesScreen({
   const [filter, setFilter] = useState<"all" | "thought" | "listening-mark">(
     "all"
   );
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const countsByDay = useMemo(() => {
+    const counts = new Map<string, number>();
+    notes.forEach((note) => {
+      const key = dayKey(note.createdAt);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+    return counts;
+  }, [notes]);
   const visible = notes.filter((note) => {
+    if (selectedDay && dayKey(note.createdAt) !== selectedDay) return false;
     if (filter === "thought") return Boolean(note.thought);
     if (filter === "listening-mark") return note.kind === "listening-mark";
     return true;
@@ -1212,11 +1355,32 @@ function BookNotesScreen({
         ))}
       </div>
 
+      <NotesCalendar
+        countsByDay={countsByDay}
+        selected={selectedDay}
+        onSelect={setSelectedDay}
+      />
+
+      {selectedDay ? (
+        <button
+          type="button"
+          className="notes-day-chip"
+          onClick={() => setSelectedDay(null)}
+        >
+          只看 {selectedDay.replace(/-/g, ".")}
+          <X size={13} />
+        </button>
+      ) : null}
+
       {!visible.length ? (
         <EmptyState
           icon={<Highlighter size={26} />}
-          title="这里还是空的"
-          description="换个筛选，或者回到正文里划一段。"
+          title={selectedDay ? "这天没有笔记" : "这里还是空的"}
+          description={
+            selectedDay
+              ? "换一天看看，或者清除筛选看全部。"
+              : "换个筛选，或者回到正文里划一段。"
+          }
         />
       ) : (
         <div className="note-feed">
@@ -1264,6 +1428,110 @@ function BookNotesScreen({
         </div>
       )}
     </div>
+  );
+}
+
+/** base URL 填完（失焦）就自动拉一次模型列表；拉不到就退回手填，不强求。 */
+function AiSettingsGroup({
+  settings,
+  onChange,
+}: {
+  settings: ReaderSettings;
+  onChange: (settings: ReaderSettings) => void;
+}) {
+  const [models, setModels] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadModels = async () => {
+    if (!settings.aiBaseUrl.trim()) return;
+    setLoading(true);
+    setError("");
+    try {
+      const list = await fetchAiModels(settings.aiBaseUrl, settings.aiApiKey);
+      setModels(list);
+      if (!settings.aiModel && list[0]) onChange({ ...settings, aiModel: list[0] });
+    } catch (err) {
+      setError(err instanceof AiRequestError ? err.message : "获取模型列表失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section className="settings-group">
+      <div className="settings-group__title">
+        <Sparkles size={18} />
+        <h2>AI 问答</h2>
+      </div>
+      <p className="settings-hint">
+        自带 OpenAI 兼容接口的地址和密钥，直接从你的设备发出，不经过本项目服务器。
+      </p>
+      <label className="settings-row settings-row--stack">
+        <span>
+          <strong>接口地址</strong>
+          <small>例如 https://api.deepseek.com/v1</small>
+        </span>
+        <input
+          type="text"
+          value={settings.aiBaseUrl}
+          placeholder="https://api.example.com/v1"
+          onChange={(event) => onChange({ ...settings, aiBaseUrl: event.target.value })}
+          onBlur={loadModels}
+        />
+      </label>
+      <label className="settings-row settings-row--stack">
+        <span>
+          <strong>API Key</strong>
+        </span>
+        <input
+          type="password"
+          value={settings.aiApiKey}
+          placeholder="sk-…"
+          onChange={(event) => onChange({ ...settings, aiApiKey: event.target.value })}
+          onBlur={loadModels}
+        />
+      </label>
+      <label className="settings-row settings-row--stack">
+        <span>
+          <strong>模型</strong>
+          <small>{loading ? "正在获取模型列表…" : error || "填好地址会自动拉取"}</small>
+        </span>
+        {models.length ? (
+          <select
+            value={settings.aiModel}
+            onChange={(event) => onChange({ ...settings, aiModel: event.target.value })}
+          >
+            {!models.includes(settings.aiModel) && settings.aiModel ? (
+              <option value={settings.aiModel}>{settings.aiModel}</option>
+            ) : null}
+            {models.map((model) => (
+              <option key={model} value={model}>
+                {model}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type="text"
+            value={settings.aiModel}
+            placeholder="手动填写模型名"
+            onChange={(event) => onChange({ ...settings, aiModel: event.target.value })}
+          />
+        )}
+      </label>
+      <label className="settings-row">
+        <span>
+          <strong>深度思考</strong>
+          <small>模型支持的话，会额外展示思考过程</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={settings.aiDeepThinking}
+          onChange={(event) => onChange({ ...settings, aiDeepThinking: event.target.checked })}
+        />
+      </label>
+    </section>
   );
 }
 
@@ -1388,6 +1656,8 @@ function SettingsPanel({
           />
         </div>
       </section>
+
+      <AiSettingsGroup settings={settings} onChange={onChange} />
 
       <section className="settings-group">
         <div className="settings-group__title">
@@ -1551,6 +1821,7 @@ function ReaderPopover({
   onThought,
   onListen,
   onDelete,
+  onAskAi,
 }: {
   popup: ReaderPopupState;
   onHighlight: (color: HighlightColor) => void;
@@ -1558,6 +1829,7 @@ function ReaderPopover({
   onThought: () => void;
   onListen: () => void;
   onDelete: () => void;
+  onAskAi: () => void;
 }) {
   const below = popup.anchor.top < 132;
   const center = popup.anchor.left + popup.anchor.width / 2;
@@ -1610,6 +1882,10 @@ function ReaderPopover({
               <Headphones size={16} />
               从这里听
             </button>
+            <button type="button" onClick={onAskAi}>
+              <Sparkles size={16} />
+              问 AI
+            </button>
           </>
         ) : (
           <button type="button" onClick={onDelete}>
@@ -1619,6 +1895,131 @@ function ReaderPopover({
         )}
       </div>
     </div>
+  );
+}
+
+/** 划词后「问 AI」，直接从浏览器打用户自己填的接口，面板独立管理自己的问答状态。 */
+function AiAskPanel({
+  text,
+  settings,
+  onClose,
+  onOpenSettings,
+}: {
+  text: string;
+  settings: ReaderSettings;
+  onClose: () => void;
+  onOpenSettings: () => void;
+}) {
+  const configured = Boolean(settings.aiBaseUrl && settings.aiModel);
+  const [question, setQuestion] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [content, setContent] = useState("");
+  const [reasoning, setReasoning] = useState("");
+  const [showReasoning, setShowReasoning] = useState(true);
+  const [error, setError] = useState("");
+  const controllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => controllerRef.current?.abort(), []);
+
+  const ask = async () => {
+    if (!configured || busy) return;
+    setBusy(true);
+    setContent("");
+    setReasoning("");
+    setError("");
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    try {
+      await streamAiChat(
+        {
+          baseUrl: settings.aiBaseUrl,
+          apiKey: settings.aiApiKey,
+          model: settings.aiModel,
+          deepThinking: settings.aiDeepThinking,
+          signal: controller.signal,
+          messages: [
+            {
+              role: "system",
+              content: "你是一个阅读助手，基于用户引用的原文片段简洁作答，除非用户要求，不必逐句复述原文。",
+            },
+            {
+              role: "user",
+              content: question.trim()
+                ? `引用原文：\n${text}\n\n问题：${question.trim()}`
+                : `帮我讲讲这段话：\n${text}`,
+            },
+          ],
+        },
+        (delta) => {
+          if (delta.content) setContent((value) => value + delta.content);
+          if (delta.reasoning) setReasoning((value) => value + delta.reasoning);
+        }
+      );
+    } catch (err) {
+      if (err instanceof AiRequestError) setError(err.message);
+      else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title="问 AI" onClose={onClose} className="modal-sheet--reader" wide>
+      <div className="ai-ask">
+        <blockquote className="ai-ask__quote">{text}</blockquote>
+
+        {!configured ? (
+          <div className="ai-ask__empty">
+            <p>还没配置 AI 接口，去设置里填一下接口地址和模型。</p>
+            <button type="button" className="primary-button" onClick={onOpenSettings}>
+              去设置
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="ai-ask__input">
+              <textarea
+                rows={2}
+                placeholder="想问点什么？留空就是让 AI 讲讲这段话"
+                value={question}
+                onChange={(event) => setQuestion(event.target.value)}
+              />
+              <button type="button" className="primary-button" onClick={ask} disabled={busy}>
+                {busy ? "回答中…" : "发送"}
+              </button>
+            </div>
+
+            {error ? <p className="ai-ask__error">{error}</p> : null}
+
+            {reasoning ? (
+              <div className="ai-ask__reasoning">
+                <button
+                  type="button"
+                  className="ai-ask__reasoning-toggle"
+                  onClick={() => setShowReasoning((value) => !value)}
+                >
+                  <ChevronDown
+                    size={14}
+                    style={{
+                      transform: showReasoning ? "rotate(0deg)" : "rotate(-90deg)",
+                    }}
+                  />
+                  思考过程
+                </button>
+                {showReasoning ? <p className="ai-ask__reasoning-text">{reasoning}</p> : null}
+              </div>
+            ) : null}
+
+            {content || busy ? (
+              <div className="ai-ask__answer">
+                {content}
+                {busy && !content ? "…" : null}
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -1664,6 +2065,7 @@ function ReaderScreen({
     note: BookNote;
     value: string;
   } | null>(null);
+  const [askAiText, setAskAiText] = useState<string | null>(null);
   const articleRef = useRef<HTMLElement>(null);
   const savedSentenceRef = useRef(initial.sentenceId);
   // onProgress 每次渲染都是新的箭头函数，book 也随每一次进度回写换引用。把它们直接
@@ -1901,6 +2303,12 @@ function ReaderScreen({
       ?.scrollIntoView({ block: pending.block });
   }, [range]);
 
+  // 跳章落地时目标章节的开头正好贴着视口顶部，头部哨兵这一下会"碰巧"进缓冲区，
+  // 但这不是用户在往上翻，是刚跳过去的假象。哨兵观察器重新订阅后的第一次回调只是
+  // 报告落地瞬间的状态，不是真的滚动触发，得跳过，否则会把跳转前一章接回来，
+  // 看起来就像跳章跳错到了上一章。
+  const justJumpedRef = useRef(false);
+
   // 改排版会让正文整体重排。分页模式在 measure() 里按句子重新对页，连续滚动这边得自己来：
   // 先记下锚点句在视口里的位置，重排后按位移把滚动条推回去，否则调一次字号就找不到读到哪了。
   const typographyAnchorRef = useRef<{ id: string; top: number } | null>(null);
@@ -1988,6 +2396,10 @@ function ReaderScreen({
 
     const observer = new IntersectionObserver(
       (entries) => {
+        if (justJumpedRef.current) {
+          justJumpedRef.current = false;
+          return;
+        }
         const current = rangeRef.current;
         const hit = (target: Element) =>
           entries.some((entry) => entry.target === target && entry.isIntersecting);
@@ -2019,6 +2431,7 @@ function ReaderScreen({
     const reset = { start: chapterIndex, end: chapterIndex };
     rangeRef.current = reset;
     setRange(reset);
+    justJumpedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book.id, paged]);
 
@@ -2125,6 +2538,7 @@ function ReaderScreen({
         selector: `[data-chapter-section="${safe}"]`,
         block: "start",
       };
+      justJumpedRef.current = true;
     }
   };
 
@@ -2450,6 +2864,25 @@ function ReaderScreen({
             if (popup.kind === "mark") onDeleteNote(popup.note);
             setPopup(null);
           }}
+          onAskAi={() => {
+            const text =
+              popup.kind === "selection" ? popup.text : groupText(popup.note);
+            window.getSelection()?.removeAllRanges();
+            setPopup(null);
+            setAskAiText(text);
+          }}
+        />
+      ) : null}
+
+      {askAiText ? (
+        <AiAskPanel
+          text={askAiText}
+          settings={settings}
+          onClose={() => setAskAiText(null)}
+          onOpenSettings={() => {
+            setAskAiText(null);
+            setShowSettings(true);
+          }}
         />
       ) : null}
 
@@ -2639,6 +3072,8 @@ function ReaderScreen({
                 </button>
               ))}
             </div>
+
+            <AiSettingsGroup settings={settings} onChange={applySettings} />
           </div>
         </Modal>
       ) : null}
@@ -2688,7 +3123,7 @@ function PlayerScreen({
   const chapterListRef = useRevealActiveChapter(showChapters);
   const [showSleep, setShowSleep] = useState(false);
   const [showVoice, setShowVoice] = useState(false);
-  const [showTranscript, setShowTranscript] = useState(false);
+  const [viewMode, setViewMode] = useState<"cover" | "text">("cover");
 
   const activeForBook = player.location?.bookId === book.id;
   const basePosition =
@@ -2703,6 +3138,8 @@ function PlayerScreen({
   const sentences = chapter ? flattenChapter(chapter) : [];
   const sentence = sentences[basePosition.sentenceIndex] ?? sentences[0];
   const playing = activeForBook && player.isPlaying;
+  const remaining = remainingCharacters(book, basePosition);
+  const elapsed = Math.max(0, book.characterCount - remaining);
 
   const toggle = () => {
     if (activeForBook && (player.isPlaying || player.isPaused)) player.toggle();
@@ -2732,41 +3169,89 @@ function PlayerScreen({
       </header>
 
       <main className="player-main">
-        <BookCover book={book} size="large" />
+        <div className="player-mode-pills">
+          <button
+            type="button"
+            className={viewMode === "cover" ? "is-active" : ""}
+            onClick={() => setViewMode("cover")}
+          >
+            封面
+          </button>
+          <button
+            type="button"
+            className={viewMode === "text" ? "is-active" : ""}
+            onClick={() => setViewMode("text")}
+          >
+            文稿
+          </button>
+        </div>
+
+        {viewMode === "cover" ? (
+          <BookCover book={book} size="large" />
+        ) : (
+          <div className="player-transcript-inline">
+            {sentences
+              .slice(
+                Math.max(0, basePosition.sentenceIndex - 1),
+                basePosition.sentenceIndex + 2
+              )
+              .map((item) => (
+                <p
+                  key={item.id}
+                  className={item.id === sentence?.id ? "is-current" : ""}
+                >
+                  {item.text}
+                </p>
+              ))}
+          </div>
+        )}
+
         <div className="player-title">
           <h1>{book.title}</h1>
           <p>{chapter?.title ?? "正文"}</p>
         </div>
 
-        <button
-          type="button"
-          className="current-sentence"
-          onClick={() => setShowTranscript(true)}
-        >
-          <span>{sentence?.text ?? "没有可朗读内容"}</span>
-          <small>第 {basePosition.sentenceIndex + 1} 句</small>
-        </button>
+        <div className="player-icon-row">
+          <button type="button" onClick={() => setShowSleep(true)}>
+            <Clock3 size={20} />
+            <small>
+              {player.sleepMode === "off"
+                ? "定时关闭"
+                : player.sleepMode === "chapter"
+                  ? "本章结束"
+                  : `${player.sleepMode} 分钟`}
+            </small>
+          </button>
+          <button type="button" onClick={() => setShowVoice(true)}>
+            <Volume2 size={20} />
+            <small>音色</small>
+          </button>
+          <button type="button" onClick={() => setShowVoice(true)}>
+            <Gauge size={20} />
+            <small>{settings.speechRate.toFixed(1)}×</small>
+          </button>
+          <div className="player-icon-row__static" aria-label="已加入书架">
+            <BookmarkCheck size={20} />
+            <small>已加入</small>
+          </div>
+        </div>
 
         <div className="player-progress">
           <ProgressBar value={basePosition.percent} />
           <div>
-            <span>{basePosition.percent}%</span>
-            <span>{formatReadingTime(book.characterCount)}</span>
+            <span>{formatReadingTime(elapsed)}</span>
+            <span>剩余{formatReadingTime(remaining)}</span>
           </div>
         </div>
 
         <div className="player-controls">
           <button
             type="button"
-            aria-label="上一章"
-            disabled={basePosition.chapterIndex === 0}
-            onClick={() => {
-              if (!activeForBook) player.start(book.id, basePosition);
-              else player.changeChapter(-1);
-            }}
+            className="player-controls__text"
+            onClick={() => onOpenReader(basePosition)}
           >
-            <ChevronLeft size={24} />
-            <small>章节</small>
+            <BookOpen size={19} />
+            <small>原文</small>
           </button>
           <button
             type="button"
@@ -2806,15 +3291,11 @@ function PlayerScreen({
           </button>
           <button
             type="button"
-            aria-label="下一章"
-            disabled={basePosition.chapterIndex >= book.chapters.length - 1}
-            onClick={() => {
-              if (!activeForBook) player.start(book.id, basePosition);
-              else player.changeChapter(1);
-            }}
+            className="player-controls__text"
+            onClick={() => setShowChapters(true)}
           >
-            <ChevronRight size={24} />
-            <small>章节</small>
+            <List size={19} />
+            <small>{book.chapters.length} 章</small>
           </button>
         </div>
 
@@ -2822,68 +3303,18 @@ function PlayerScreen({
           <p className="player-error">{player.error}</p>
         ) : null}
 
-        <div className="player-options">
-          <button type="button" onClick={() => setShowVoice(true)}>
-            <span>{settings.speechRate.toFixed(1)}×</span>
-            <small>倍速与声音</small>
-          </button>
-          <button type="button" onClick={() => setShowSleep(true)}>
-            <Clock3 size={22} />
-            <small>
-              {player.sleepMode === "off"
-                ? "定时关闭"
-                : player.sleepMode === "chapter"
-                  ? "本章结束"
-                  : `${player.sleepMode} 分钟`}
-            </small>
-          </button>
-          <button type="button" onClick={() => setShowChapters(true)}>
-            <List size={23} />
-            <small>章节列表</small>
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              onAddNote(basePosition, sentence?.text ?? "听书标记")
-            }
-          >
-            <Bookmark size={22} />
-            <small>标记一下</small>
-          </button>
-        </div>
-
         <button
           type="button"
           className="view-current-text"
-          onClick={() => setShowTranscript(true)}
+          onClick={() => onAddNote(basePosition, sentence?.text ?? "听书标记")}
         >
-          查看当前文字
-          <ChevronRight size={17} />
+          <Bookmark size={15} />
+          标记这一句
         </button>
         <p className="sync-status">
           已记录听书位置 · 第 {basePosition.sentenceIndex + 1} 句
         </p>
       </main>
-
-      {showTranscript ? (
-        <Modal
-          title="当前文字"
-          wide
-          onClose={() => setShowTranscript(false)}
-        >
-          <div className="transcript">
-            <p>{sentence?.text}</p>
-            <button
-              type="button"
-              className="primary-button"
-              onClick={() => onOpenReader(basePosition)}
-            >
-              打开完整正文
-              <BookOpen size={17} />
-            </button>
-          </div>
-        </Modal>
-      ) : null}
 
       {showChapters ? (
         <Modal title="章节列表" onClose={() => setShowChapters(false)}>

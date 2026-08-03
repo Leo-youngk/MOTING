@@ -1450,6 +1450,115 @@ button:disabled {
 
 /* 笔记 tab：不用卡片，靠留白和一条墨线分段。摘录用宋体，
    划线本身按原色压在字脚下当一道底纹——看着就是书页上留下的那一笔。 */
+.notes-calendar {
+  margin-bottom: 14px;
+  padding: 14px 12px;
+  border-radius: 14px;
+  background: var(--paper-deep);
+}
+
+.notes-calendar__head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.notes-calendar__head button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.notes-calendar__head strong {
+  min-width: 92px;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 14px;
+  text-align: center;
+}
+
+.notes-calendar__weekdays,
+.notes-calendar__grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+
+.notes-calendar__weekdays span {
+  padding-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.notes-calendar__day {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  margin: 1px 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12.5px;
+}
+
+.notes-calendar__day:disabled {
+  color: var(--muted);
+  opacity: 0.45;
+}
+
+.notes-calendar__day i {
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  transform: translateX(-50%);
+}
+
+.notes-calendar__day.is-today {
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.notes-calendar__day.is-selected {
+  background: var(--accent);
+  color: #fff;
+}
+
+.notes-calendar__day.is-selected i {
+  background: #fff;
+}
+
+.notes-calendar__empty {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.notes-day-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 14px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent-deep);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
 .ink-summary {
   margin: 2px 0 14px;
   color: var(--muted);
@@ -1656,6 +1765,99 @@ button:disabled {
   resize: vertical;
 }
 
+.ai-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ai-ask__quote {
+  margin: 0;
+  padding: 11px 13px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 9px 9px 0;
+  background: var(--paper-deep);
+  font-family: var(--font-serif);
+  font-size: 15px;
+  line-height: 1.7;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.ai-ask__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 4px 0;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.ai-ask__input {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ai-ask__input textarea {
+  padding: 12px 13px;
+  border: 0;
+  border-radius: 11px;
+  outline: 0;
+  background: var(--paper-deep);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.ai-ask__error {
+  margin: 0;
+  color: var(--danger, #c0392b);
+  font-size: 13px;
+}
+
+.ai-ask__reasoning {
+  border-radius: 11px;
+  background: var(--paper-deep);
+  padding: 10px 13px;
+}
+
+.ai-ask__reasoning-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.ai-ask__reasoning-toggle svg {
+  transition: transform 0.15s ease;
+}
+
+.ai-ask__reasoning-text {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.ai-ask__answer {
+  padding: 12px 13px;
+  border-radius: 11px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+
 .settings-panel {
   display: flex;
   flex-direction: column;
@@ -1722,7 +1924,9 @@ button:disabled {
   font-size: 10px;
 }
 
-.settings-row select {
+.settings-row select,
+.settings-row input[type="text"],
+.settings-row input[type="password"] {
   width: 100%;
   min-height: 42px;
   padding: 0 11px;
@@ -1730,7 +1934,15 @@ button:disabled {
   border-radius: 9px;
   outline: 0;
   background: var(--surface);
+  color: var(--ink);
   font-size: 12px;
+}
+
+.settings-row input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
 }
 
 input[type="range"] {
@@ -2591,33 +2803,52 @@ input[type="range"] {
   font-size: 14px;
 }
 
-.current-sentence {
+.player-mode-pills {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 22px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--surface);
+}
+
+.player-mode-pills button {
+  min-width: 64px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  background: transparent;
+}
+
+.player-mode-pills button.is-active {
+  background: var(--surface-strong);
+  color: var(--ink);
+  box-shadow: 0 2px 8px rgb(44 37 28 / 10%);
+}
+
+.player-transcript-inline {
   display: flex;
   width: 100%;
-  min-height: 70px;
+  min-height: 182px;
   flex-direction: column;
-  align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 8px 10px;
-  background: transparent;
+  gap: 14px;
+  padding: 0 6px;
+}
+
+.player-transcript-inline p {
+  margin: 0;
+  color: var(--subtle);
+  font-family: var(--font-serif);
+  font-size: 15px;
+  line-height: 1.75;
   text-align: center;
 }
 
-.current-sentence > span {
-  display: -webkit-box;
-  overflow: hidden;
-  color: color-mix(in srgb, var(--ink) 80%, var(--paper));
-  font-family: var(--font-serif);
-  font-size: 14px;
-  line-height: 1.65;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.current-sentence small {
-  color: var(--subtle);
-  font-size: 9px;
+.player-transcript-inline p.is-current {
+  color: var(--ink);
+  font-size: 17px;
 }
 
 .player-progress {
@@ -2705,36 +2936,40 @@ input[type="range"] {
   text-align: center;
 }
 
-.player-options {
+.player-icon-row {
   display: grid;
   width: 100%;
   grid-template-columns: repeat(4, 1fr);
-  padding: 17px 0;
-  border-block: 1px solid var(--line-soft);
+  margin-bottom: 22px;
 }
 
-.player-options button {
+.player-icon-row button,
+.player-icon-row__static {
   display: flex;
-  min-height: 57px;
+  min-height: 54px;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 6px;
   flex-direction: column;
+  color: var(--ink);
   background: transparent;
 }
 
-.player-options button + button {
-  border-left: 1px solid var(--line-soft);
+.player-icon-row__static {
+  color: var(--accent-deep);
 }
 
-.player-options button > span {
-  font-size: 18px;
-  font-weight: 500;
-}
-
-.player-options small {
+.player-icon-row small {
   color: var(--muted);
   font-size: 9px;
+}
+
+.player-icon-row__static small {
+  color: var(--accent-deep);
+}
+
+.player-controls__text small {
+  font-size: 10px;
 }
 
 .view-current-text {
@@ -3182,21 +3417,6 @@ input[type="range"] {
 .settings-row--stack {
   display: grid;
   gap: 12px;
-}
-
-.transcript {
-  padding: 18px 2px 8px;
-}
-
-.transcript p {
-  margin: 0 0 24px;
-  font-family: var(--font-serif);
-  font-size: 20px;
-  line-height: 1.9;
-}
-
-.transcript .primary-button {
-  width: 100%;
 }
 
 .option-list,
