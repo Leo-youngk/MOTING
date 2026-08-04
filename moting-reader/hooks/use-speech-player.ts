@@ -120,6 +120,42 @@ function locationAfter(
   return { chapterIndex: chapter, sentenceIndex: sentence };
 }
 
+/**
+ * 锁屏后台等网络时不能真的让音频停下来：iOS 一旦静音超过系统给的宽限期就会
+ * 回收 audio session，之后 play() 能 resolve 却发不出声音。用这段静音占位撑住
+ * 会话，取到真正的音频再切换过去。懒创建一次，进程内复用。
+ */
+let silentClipUrlCache = "";
+function silentClipUrl(): string {
+  if (silentClipUrlCache) return silentClipUrlCache;
+  const sampleRate = 8000;
+  const samples = sampleRate; // 1 秒静音，够循环撑住一次网络等待
+  const buffer = new ArrayBuffer(44 + samples * 2);
+  const view = new DataView(buffer);
+  const writeString = (offset: number, text: string) => {
+    for (let i = 0; i < text.length; i++) {
+      view.setUint8(offset + i, text.charCodeAt(i));
+    }
+  };
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + samples * 2, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, "data");
+  view.setUint32(40, samples * 2, true);
+  silentClipUrlCache = URL.createObjectURL(
+    new Blob([buffer], { type: "audio/wav" })
+  );
+  return silentClipUrlCache;
+}
+
 export function useSpeechPlayer({
   books,
   settings,
@@ -525,9 +561,23 @@ export function useSpeechPlayer({
         engineRef.current = "edge";
         const voiceName = edgeVoiceName(settingsRef.current.voiceURI);
 
+        const prefetchNext = () => {
+          const next = blocks[blockIndex + 1];
+          if (next?.text.trim()) {
+            prefetchClip(next.text, voiceName);
+            return;
+          }
+          // 本章最后一块没有下一块可预取，但章节交界处同样不能冷场，
+          // 提前把下一章开头备好，换章那一刻也走「无缝切换」。
+          const nextChapter = book.chapters[chapterIndex + 1];
+          const firstOfNext = nextChapter ? blocksFor(nextChapter)[0] : undefined;
+          if (firstOfNext?.text.trim()) prefetchClip(firstOfNext.text, voiceName);
+        };
+
         const beginClip = (clip: ReadyClip) => {
           const audio = audioRef.current ?? new Audio();
           audioRef.current = audio;
+          audio.loop = false;
           audio.onended = finishSegment;
           audio.onerror = () => {
             if (token !== tokenRef.current) return;
@@ -550,8 +600,7 @@ export function useSpeechPlayer({
             );
           }, HIGHLIGHT_INTERVAL_MS);
 
-          const next = blocks[blockIndex + 1];
-          if (next?.text.trim()) prefetchClip(next.text, voiceName);
+          prefetchNext();
         };
 
         const ready = takeReadyClip(`${voiceName}|${segment.text}`);
@@ -560,8 +609,16 @@ export function useSpeechPlayer({
           return;
         }
 
-        // 要等网络就得先把上一段按停，否则跳句时旧音频会一直响到新的接上。
-        audioRef.current?.pause();
+        // 锁屏后台等网络时绝不能真的停音频，否则 audio session 会被系统回收，
+        // 之后 play() 能成功但发不出声音。改放静音占位撑住会话，取到音频再切换。
+        const waitingAudio = audioRef.current ?? new Audio();
+        audioRef.current = waitingAudio;
+        waitingAudio.onended = null;
+        waitingAudio.onerror = null;
+        waitingAudio.loop = true;
+        waitingAudio.src = silentClipUrl();
+        void waitingAudio.play().catch(() => undefined);
+
         const controller = new AbortController();
         abortRef.current = controller;
 
@@ -749,6 +806,16 @@ export function useSpeechPlayer({
     },
     []
   );
+
+  // 告诉系统这是个播放器会话，不是偶尔响一下的提示音；部分 Safari 版本
+  // 会拿它来决定后台播放的优先级，属于零成本的顺手加固。
+  useEffect(() => {
+    if (typeof navigator === "undefined") return;
+    const audioSession = (
+      navigator as Navigator & { audioSession?: { type: string } }
+    ).audioSession;
+    if (audioSession) audioSession.type = "playback";
+  }, []);
 
   // 锁屏和控制中心的那套控件。没有它，系统不把这个页面当成正在放音的播放器，
   // 切后台后一段读完就可能被冻结，再也接不上下一段。
