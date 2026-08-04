@@ -48,6 +48,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
 import { AiRequestError, fetchAiModels, streamAiChat } from "../lib/ai";
 import {
@@ -68,6 +69,7 @@ import { parseBookFile } from "../lib/parsers";
 import {
   clearLibrary,
   getAllBooks,
+  getAllChats,
   getAllNotes,
   getBookImage,
   getSettings,
@@ -76,6 +78,7 @@ import {
   removeNote,
   saveBook,
   saveBookImages,
+  saveChat,
   saveNote,
   saveSettings,
   saveStats,
@@ -84,8 +87,10 @@ import {
   DEFAULT_SETTINGS,
   DEFAULT_STATS,
   dayKey,
+  type AiChatTurn,
   type AppView,
   type Book,
+  type BookAiChat,
   type BookNote,
   type BookPosition,
   type Chapter,
@@ -283,6 +288,10 @@ function useRevealActiveChapter(open: boolean) {
   return listRef;
 }
 
+// 浮层叠着开时，只有最外层那一次负责记录和还原滚动位置。
+let scrollLockCount = 0;
+let lockedScrollY = 0;
+
 function Modal({
   title,
   children,
@@ -298,11 +307,18 @@ function Modal({
 }) {
   // 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
   // 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
+  // iOS standalone 下 overflow: hidden 拦不住 focus 触发的整页上推，只有 position: fixed 拦得住。
   useEffect(() => {
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    if (scrollLockCount++ === 0) {
+      lockedScrollY = window.scrollY;
+      document.body.style.top = `${-lockedScrollY}px`;
+      document.body.classList.add("is-scroll-locked");
+    }
     return () => {
-      document.body.style.overflow = prevOverflow;
+      if (--scrollLockCount > 0) return;
+      document.body.classList.remove("is-scroll-locked");
+      document.body.style.top = "";
+      window.scrollTo(0, lockedScrollY);
     };
   }, []);
   return (
@@ -1093,19 +1109,25 @@ function NotesCalendar({
 function NotesScreen({
   notes,
   books,
+  chats,
   onOpenBook,
   onOpenNote,
   onEditThought,
   onDelete,
+  onOpenChat,
 }: {
   notes: BookNote[];
   books: Book[];
+  chats: BookAiChat[];
   onOpenBook: (book: Book) => void;
   onOpenNote: (note: BookNote) => void;
   onEditThought: (note: BookNote) => void;
   onDelete: (note: BookNote) => void;
+  onOpenChat: (book: Book) => void;
 }) {
-  const [filter, setFilter] = useState<"all" | "highlight" | "thought">("all");
+  const [filter, setFilter] = useState<"all" | "highlight" | "thought" | "chat">(
+    "all"
+  );
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
 
   // 一次跨句划线在库里是多条记录，这里先合回一条，列表上才是用户划的那一整段。
@@ -1150,7 +1172,19 @@ function NotesScreen({
   const highlights = merged.filter((note) => note.kind === "highlight").length;
   const thoughts = merged.filter((note) => note.thought).length;
 
-  if (!notes.length) {
+  const chatGroups = useMemo(
+    () =>
+      chats
+        .filter((chat) => chat.turns.length)
+        .map((chat) => ({ chat, book: books.find((b) => b.id === chat.bookId) }))
+        .filter(
+          (entry): entry is { chat: BookAiChat; book: Book } => Boolean(entry.book)
+        )
+        .sort((a, b) => b.chat.updatedAt - a.chat.updatedAt),
+    [chats, books]
+  );
+
+  if (!notes.length && !chats.length) {
     return (
       <div className="screen">
         <LargeHeader title="笔记" />
@@ -1178,6 +1212,7 @@ function NotesScreen({
             ["all", "全部"],
             ["highlight", "划线"],
             ["thought", "想法"],
+            ["chat", "AI 对话"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -1191,36 +1226,68 @@ function NotesScreen({
         ))}
       </div>
 
-      <NotesCalendar
-        countsByDay={countsByDay}
-        selected={selectedDay}
-        onSelect={setSelectedDay}
-      />
-
-      {selectedDay ? (
-        <button
-          type="button"
-          className="notes-day-chip"
-          onClick={() => setSelectedDay(null)}
-        >
-          只看 {selectedDay.replace(/-/g, ".")}
-          <X size={13} />
-        </button>
-      ) : null}
-
-      {!groups.length ? (
-        <EmptyState
-          icon={<Highlighter size={26} />}
-          title={selectedDay ? "这天没有笔记" : "这里还是空的"}
-          description={
-            selectedDay
-              ? "换一天看看，或者清除筛选看全部。"
-              : "换个筛选看看，或者回到正文里划一段。"
-          }
-        />
+      {filter === "chat" ? (
+        !chatGroups.length ? (
+          <EmptyState
+            icon={<Sparkles size={26} />}
+            title="还没有 AI 对话"
+            description="阅读时选中一段文字问 AI，聊天记录会按书保存在这里。"
+          />
+        ) : (
+          <div className="ink-feed">
+            {chatGroups.map(({ book, chat }) => {
+              const last = chat.turns[chat.turns.length - 1];
+              return (
+                <button
+                  type="button"
+                  className="ink-group__head"
+                  key={book.id}
+                  onClick={() => onOpenChat(book)}
+                >
+                  <BookCover book={book} size="small" />
+                  <span>
+                    <strong>{book.title}</strong>
+                    <small>{last?.content.slice(0, 30) || book.author}</small>
+                  </span>
+                  <em>{chat.turns.filter((t) => t.role === "user").length}</em>
+                  <ChevronRight size={15} className="ios-row__chevron" />
+                </button>
+              );
+            })}
+          </div>
+        )
       ) : (
-        <div className="ink-feed">
-          {groups.map(({ book, items }) => (
+        <>
+          <NotesCalendar
+            countsByDay={countsByDay}
+            selected={selectedDay}
+            onSelect={setSelectedDay}
+          />
+
+          {selectedDay ? (
+            <button
+              type="button"
+              className="notes-day-chip"
+              onClick={() => setSelectedDay(null)}
+            >
+              只看 {selectedDay.replace(/-/g, ".")}
+              <X size={13} />
+            </button>
+          ) : null}
+
+          {!groups.length ? (
+            <EmptyState
+              icon={<Highlighter size={26} />}
+              title={selectedDay ? "这天没有笔记" : "这里还是空的"}
+              description={
+                selectedDay
+                  ? "换一天看看，或者清除筛选看全部。"
+                  : "换个筛选看看，或者回到正文里划一段。"
+              }
+            />
+          ) : (
+            <div className="ink-feed">
+              {groups.map(({ book, items }) => (
             <section className="ink-group" key={book.id}>
               <button
                 type="button"
@@ -1287,7 +1354,9 @@ function NotesScreen({
               })}
             </section>
           ))}
-        </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -1893,18 +1962,14 @@ function ReaderPopover({
   );
 }
 
-interface AiChatTurn {
-  role: "user" | "assistant";
-  content: string;
-  reasoning?: string;
-}
-
 /** 章节全文太长会把请求撑爆、也烧钱，只带前面这么多字，够回答「这章讲了什么」就行。 */
 const AI_CHAPTER_TEXT_LIMIT = 6000;
 
 /** 划词后「问 AI」，多轮聊天面板，模型选择内嵌成一个可展开/收起的卡片，风格照抄 DeepSeek/Claude 官方聊天界面。 */
 function AiAskPanel({
   text,
+  initialTurns,
+  onTurnsChange,
   book,
   chapter,
   settings,
@@ -1912,6 +1977,8 @@ function AiAskPanel({
   onClose,
 }: {
   text: string;
+  initialTurns: AiChatTurn[];
+  onTurnsChange: (turns: AiChatTurn[]) => void;
   book: Book;
   chapter: Chapter | undefined;
   settings: ReaderSettings;
@@ -1920,7 +1987,7 @@ function AiAskPanel({
 }) {
   const configured = Boolean(settings.aiBaseUrl && settings.aiModel);
   const [showPicker, setShowPicker] = useState(!configured);
-  const [turns, setTurns] = useState<AiChatTurn[]>([]);
+  const [turns, setTurns] = useState<AiChatTurn[]>(initialTurns);
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1930,15 +1997,26 @@ function AiAskPanel({
 
   useEffect(() => () => controllerRef.current?.abort(), []);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
+    // 只滚浮层自己。scrollIntoView 会把所有可滚祖先一起滚，连带把整页拖走。
+    const sheet = bottomRef.current?.closest(".modal-sheet");
+    if (sheet) sheet.scrollTop = sheet.scrollHeight;
   }, [turns]);
 
-  const canSend = configured && !busy && (question.trim().length > 0 || turns.length === 0);
+  // 找最近一次「带了新片段」的用户提问，用来判断眼下这段是不是已经问过。
+  // text === "" 是从历史入口直接打开、没有选中文字的情况，不算新片段。
+  const lastQuote = [...turns].reverse().find((t) => t.role === "user" && t.quote)?.quote;
+  const isFreshQuote = text !== "" && lastQuote !== text;
+  const canSend = configured && !busy && (question.trim().length > 0 || isFreshQuote);
 
   const ask = async () => {
     if (!canSend) return;
     const userText = question.trim() || "帮我讲讲这段话";
-    const history: AiChatTurn[] = [...turns, { role: "user", content: userText }];
+    const userTurn: AiChatTurn = {
+      role: "user",
+      content: userText,
+      ...(isFreshQuote ? { quote: text } : {}),
+    };
+    const history: AiChatTurn[] = [...turns, userTurn];
     setTurns([...history, { role: "assistant", content: "", reasoning: "" }]);
     setQuestion("");
     setBusy(true);
@@ -1955,6 +2033,9 @@ function AiAskPanel({
           .join("")
           .slice(0, AI_CHAPTER_TEXT_LIMIT)
       : "";
+    const chapterContext = chapter
+      ? `\n\n当前章节《${chapterTitle}》正文${chapterText.length >= AI_CHAPTER_TEXT_LIMIT ? "（篇幅较长，只截取了前面一部分）" : ""}：\n${chapterText}`
+      : "";
     try {
       await streamAiChat(
         {
@@ -1966,9 +2047,12 @@ function AiAskPanel({
           messages: [
             {
               role: "system",
-              content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}\n\n当前章节《${chapterTitle}》正文${chapterText.length >= AI_CHAPTER_TEXT_LIMIT ? "（篇幅较长，只截取了前面一部分）" : ""}：\n${chapterText}\n\n用户划出的原文片段：\n${text}\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。`,
+              content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。`,
             },
-            ...history.map(({ role, content: turnContent }) => ({ role, content: turnContent })),
+            ...history.map((turn) => ({
+              role: turn.role,
+              content: turn.quote ? `引用原文：\n${turn.quote}\n\n${turn.content}` : turn.content,
+            })),
           ],
         },
         (delta) => {
@@ -1986,6 +2070,7 @@ function AiAskPanel({
       else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
     } finally {
       setBusy(false);
+      onTurnsChange([...history, { role: "assistant", content, reasoning }]);
     }
   };
 
@@ -2009,7 +2094,7 @@ function AiAskPanel({
 
         {showPicker ? <AiModelPicker settings={settings} onChange={onSettingsChange} /> : null}
 
-        <blockquote className="ai-ask__quote">{text}</blockquote>
+        {isFreshQuote ? <blockquote className="ai-ask__quote">{text}</blockquote> : null}
 
         {!configured ? (
           <p className="ai-ask__empty">先在上面选一个模型才能开始问。</p>
@@ -2058,7 +2143,7 @@ function AiAskPanel({
             <div className="ai-ask__input">
               <textarea
                 rows={2}
-                placeholder={turns.length === 0 ? "想问点什么？留空就是让 AI 讲讲这段话" : "接着问点什么"}
+                placeholder={isFreshQuote ? "想问点什么？留空就是让 AI 讲讲这段话" : "接着问点什么"}
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
               />
@@ -2079,6 +2164,8 @@ function ReaderScreen({
   settings,
   currentSentenceId,
   speakingChapterIndex,
+  chatTurns,
+  onChatChange,
   onBack,
   onProgress,
   onStartListening,
@@ -2092,6 +2179,8 @@ function ReaderScreen({
   settings: ReaderSettings;
   currentSentenceId: string;
   speakingChapterIndex: number;
+  chatTurns: AiChatTurn[];
+  onChatChange: (turns: AiChatTurn[]) => void;
   onBack: () => void;
   onProgress: (position: BookPosition) => void;
   onStartListening: (position: BookPosition) => void;
@@ -2927,6 +3016,8 @@ function ReaderScreen({
       {askAiText ? (
         <AiAskPanel
           text={askAiText}
+          initialTurns={chatTurns}
+          onTurnsChange={onChatChange}
           book={book}
           chapter={chapter}
           settings={settings}
@@ -3532,8 +3623,12 @@ function MiniPlayer({
 }
 
 export default function MotingApp() {
+  useKeyboardInset();
   const [books, setBooks] = useState<Book[]>([]);
   const [notes, setNotes] = useState<BookNote[]>([]);
+  const [chats, setChats] = useState<BookAiChat[]>([]);
+  // 从「笔记」Tab 的历史入口点开的书，跟 view 无关，纯弹层状态。
+  const [chatBook, setChatBook] = useState<Book | null>(null);
   const [settings, setSettings] =
     useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [stats, setStats] = useState<ReadingStats>(DEFAULT_STATS);
@@ -3558,8 +3653,8 @@ export default function MotingApp() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getAllBooks(), getAllNotes(), getSettings(), getStats()])
-      .then(async ([storedBooks, storedNotes, storedSettings, storedStats]) => {
+    Promise.all([getAllBooks(), getAllNotes(), getAllChats(), getSettings(), getStats()])
+      .then(async ([storedBooks, storedNotes, storedChats, storedSettings, storedStats]) => {
         if (cancelled) return;
         if (!storedBooks.length) {
           const demo = createDemoBook();
@@ -3568,6 +3663,7 @@ export default function MotingApp() {
         }
         setBooks(storedBooks);
         setNotes(storedNotes);
+        setChats(storedChats);
         setSettings(storedSettings);
         setStats(storedStats);
       })
@@ -3748,6 +3844,22 @@ export default function MotingApp() {
         : [],
     [notes, selectedBook]
   );
+  const selectedBookChat = useMemo(
+    () => (selectedBook ? chats.find((c) => c.bookId === selectedBook.id) : undefined),
+    [chats, selectedBook]
+  );
+
+  const updateChat = useCallback((bookId: string, turns: AiChatTurn[]) => {
+    const chat: BookAiChat = { bookId, turns, updatedAt: Date.now() };
+    setChats((current) => {
+      const idx = current.findIndex((c) => c.bookId === bookId);
+      if (idx === -1) return [...current, chat];
+      const next = [...current];
+      next[idx] = chat;
+      return next;
+    });
+    saveChat(chat).catch(() => undefined);
+  }, []);
 
   const changeSettings = (next: ReaderSettings) => {
     setSettings(next);
@@ -3989,6 +4101,9 @@ export default function MotingApp() {
     setNotes((current) =>
       current.filter((note) => note.bookId !== deleteTarget.id)
     );
+    setChats((current) =>
+      current.filter((chat) => chat.bookId !== deleteTarget.id)
+    );
     setDeleteTarget(null);
     showToast("书籍及相关标记已删除");
   };
@@ -4073,6 +4188,8 @@ export default function MotingApp() {
               ? player.location.chapterIndex
               : -1
           }
+          chatTurns={selectedBookChat?.turns ?? []}
+          onChatChange={(turns) => updateChat(selectedBook.id, turns)}
           onBack={() => setView({ name: "home" })}
           onProgress={(position) => handleReadProgress(selectedBook, position)}
           onStartListening={(position) => {
@@ -4172,6 +4289,7 @@ export default function MotingApp() {
               <NotesScreen
                 notes={notes}
                 books={books}
+                chats={chats}
                 onOpenBook={(book) =>
                   setView({ name: "book-notes", bookId: book.id })
                 }
@@ -4181,6 +4299,7 @@ export default function MotingApp() {
                   setThoughtTarget(note);
                   setThoughtDraft(note.thought ?? "");
                 }}
+                onOpenChat={setChatBook}
               />
             )}
           </section>
@@ -4269,6 +4388,19 @@ export default function MotingApp() {
             </div>
           </div>
         </Modal>
+      ) : null}
+
+      {chatBook ? (
+        <AiAskPanel
+          text=""
+          initialTurns={chats.find((c) => c.bookId === chatBook.id)?.turns ?? []}
+          onTurnsChange={(turns) => updateChat(chatBook.id, turns)}
+          book={chatBook}
+          chapter={undefined}
+          settings={settings}
+          onSettingsChange={changeSettings}
+          onClose={() => setChatBook(null)}
+        />
       ) : null}
 
       {confirmClear ? (

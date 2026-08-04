@@ -5,6 +5,8 @@
    底色不用纯白：页面留一层极淡的冷灰，白卡片才浮得起来，否则整屏白压白很扁。
    阅读器内部另有一套 --reader-* 暖色变量，不受这里影响。 */
 :root {
+  /* 软键盘挡住的高度，由 useKeyboardInset 量出来写进来。 */
+  --keyboard-inset: 0px;
   --paper: #f3f4f7;
   --paper-deep: #e7e8ef;
   --surface: #ffffff;
@@ -172,6 +174,14 @@ body {
      系统 App 都用默认值，加了反而不像原生。 */
   text-rendering: optimizeLegibility;
   overscroll-behavior-y: none;
+}
+
+/* 浮层开着时把正文钉死。top 由脚本按当前滚动位置写进来，关掉再滚回去。 */
+body.is-scroll-locked {
+  position: fixed;
+  right: 0;
+  left: 0;
+  width: 100%;
 }
 
 button,
@@ -1808,7 +1818,7 @@ button:disabled {
   background: var(--paper-deep);
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.6;
   resize: vertical;
 }
@@ -2002,7 +2012,7 @@ button:disabled {
   outline: 0;
   background: var(--surface);
   color: var(--ink);
-  font-size: 12px;
+  font-size: 16px;
 }
 
 .settings-row input[type="checkbox"] {
@@ -2118,6 +2128,11 @@ input[type="range"] {
 
 .bottom-bar > * {
   pointer-events: auto;
+}
+
+/* 键盘顶上来时这条要么被埋、要么浮在键盘上，原生 App 都是直接收起。 */
+html[data-keyboard-open] .bottom-bar {
+  display: none;
 }
 
 .bottom-nav {
@@ -3066,7 +3081,12 @@ input[type="range"] {
 .modal-backdrop {
   position: fixed;
   z-index: 100;
-  inset: 0;
+  top: 0;
+  right: 0;
+  left: 0;
+  /* 底边要停在键盘上沿。这里不能写 inset: 0 或 dvh：iOS 弹键盘不缩布局视口，
+     那两个值都不会变，贴底的输入框就埋在键盘底下了。 */
+  bottom: var(--keyboard-inset);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -3091,6 +3111,13 @@ input[type="range"] {
     inset 0 0.5px 0 var(--glass-sheen),
     0 -18px 50px rgb(29 25 20 / 18%);
   animation: slide-up 220ms cubic-bezier(0.22, 0.85, 0.35, 1) both;
+}
+
+/* 40px 是 backdrop 的 padding-top。键盘弹起时 safe-area-inset-bottom 在 standalone
+   下不保证归零，底部留白干脆写死。 */
+html[data-keyboard-open] .modal-sheet {
+  max-height: min(calc(100dvh - var(--keyboard-inset) - 40px), 760px);
+  padding-bottom: 22px;
 }
 
 .modal-sheet--wide {

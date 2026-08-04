@@ -140,6 +140,21 @@ export interface ReaderSettings {
   aiDeepThinking: boolean;
 }
 
+export interface AiChatTurn {
+  role: "user" | "assistant";
+  content: string;
+  reasoning?: string;
+  /** 触发这轮提问时选中的原文片段，只在换了新片段的那一轮才有值。 */
+  quote?: string;
+}
+
+/** 一本书一条常驻对话，不按划线片段拆分，随书本身持久化。 */
+export interface BookAiChat {
+  bookId: string;
+  turns: AiChatTurn[];
+  updatedAt: number;
+}
+
 export interface ImportProgress {
   stage: "reading" | "metadata" | "content" | "saving";
   label: string;

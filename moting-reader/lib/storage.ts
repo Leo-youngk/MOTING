@@ -1,5 +1,6 @@
 import type {
   Book,
+  BookAiChat,
   BookImage,
   BookNote,
   ReaderSettings,
@@ -8,11 +9,12 @@ import type {
 import { DEFAULT_SETTINGS, DEFAULT_STATS } from "./types";
 
 const DB_NAME = "moting-reader";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const BOOK_STORE = "books";
 const NOTE_STORE = "notes";
 const SETTINGS_STORE = "settings";
 const IMAGE_STORE = "images";
+const CHAT_STORE = "chats";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -57,6 +59,10 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(IMAGE_STORE)) {
         const images = db.createObjectStore(IMAGE_STORE, { keyPath: "id" });
         images.createIndex("bookId", "bookId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(CHAT_STORE)) {
+        // 一本书一条常驻对话，bookId 本身就是主键，不用像 notes 那样另建索引。
+        db.createObjectStore(CHAT_STORE, { keyPath: "bookId" });
       }
     };
     request.onsuccess = () => {
@@ -106,12 +112,13 @@ function deleteByBookId(store: IDBObjectStore, bookId: string): void {
 export async function removeBook(bookId: string): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(
-    [BOOK_STORE, NOTE_STORE, IMAGE_STORE],
+    [BOOK_STORE, NOTE_STORE, IMAGE_STORE, CHAT_STORE],
     "readwrite"
   );
   transaction.objectStore(BOOK_STORE).delete(bookId);
   deleteByBookId(transaction.objectStore(NOTE_STORE), bookId);
   deleteByBookId(transaction.objectStore(IMAGE_STORE), bookId);
+  transaction.objectStore(CHAT_STORE).delete(bookId);
   await transactionDone(transaction);
 }
 
@@ -166,6 +173,21 @@ export async function removeNote(noteId: string): Promise<void> {
   await transactionDone(transaction);
 }
 
+export async function getAllChats(): Promise<BookAiChat[]> {
+  const db = await openDatabase();
+  const transaction = db.transaction(CHAT_STORE, "readonly");
+  return requestToPromise(
+    transaction.objectStore(CHAT_STORE).getAll() as IDBRequest<BookAiChat[]>
+  );
+}
+
+export async function saveChat(chat: BookAiChat): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(CHAT_STORE, "readwrite");
+  transaction.objectStore(CHAT_STORE).put(chat);
+  await transactionDone(transaction);
+}
+
 export async function getSettings(): Promise<ReaderSettings> {
   const db = await openDatabase();
   const transaction = db.transaction(SETTINGS_STORE, "readonly");
@@ -203,12 +225,13 @@ export async function saveStats(stats: ReadingStats): Promise<void> {
 export async function clearLibrary(): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(
-    [BOOK_STORE, NOTE_STORE, SETTINGS_STORE, IMAGE_STORE],
+    [BOOK_STORE, NOTE_STORE, SETTINGS_STORE, IMAGE_STORE, CHAT_STORE],
     "readwrite"
   );
   transaction.objectStore(BOOK_STORE).clear();
   transaction.objectStore(NOTE_STORE).clear();
   transaction.objectStore(SETTINGS_STORE).clear();
   transaction.objectStore(IMAGE_STORE).clear();
+  transaction.objectStore(CHAT_STORE).clear();
   await transactionDone(transaction);
 }
