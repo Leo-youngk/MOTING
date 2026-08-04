@@ -1858,6 +1858,73 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.ai-ask__toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ai-ask__model-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 980px;
+  background: var(--paper-deep);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.ai-ask__model-pill svg:first-child {
+  color: var(--accent);
+}
+
+.ai-ask__model-pill svg:last-child {
+  transition: transform 0.15s ease;
+}
+
+.ai-model-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 14px 6px;
+  border-radius: 12px;
+  background: var(--paper-deep);
+}
+
+.ai-model-picker__hint {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ai-ask__turns {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ai-ask__question {
+  align-self: flex-end;
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 14px 14px 3px 14px;
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.6;
+  max-width: 85%;
+  white-space: pre-wrap;
+}
+
+.ai-ask__turn-assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .settings-panel {
   display: flex;
   flex-direction: column;
@@ -2330,16 +2397,11 @@ input[type="range"] {
   min-height: 36px;
   padding: 0 14px;
   border-radius: 980px;
-  border: 0.5px solid var(--glass-edge);
-  background: var(--glass-fill);
   color: var(--reader-ink);
-  backdrop-filter: var(--glass-blur);
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade),
-    var(--glass-shadow);
 }
 
+/* 顶部胶囊不带玻璃底：它悬在正文标题正上方，半透明+模糊会把滚过来的文字
+   叠成一团糊字，看着像被挡住了。去掉背景，纯文字浮在正文之上就够。 */
 .reader-chrome__chapter {
   font-family: var(--font-serif);
   font-size: 13px;
@@ -2352,9 +2414,16 @@ input[type="range"] {
 }
 
 .reader-chrome__pos {
+  border: 0.5px solid var(--glass-edge);
+  background: var(--glass-fill);
   color: var(--reader-muted);
   font-family: var(--font-sans);
   font-size: 12px;
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    inset 0 0.5px 0 var(--glass-sheen),
+    inset 0 -0.5px 0 var(--glass-shade),
+    var(--glass-shadow);
 }
 
 .reader-chrome__remain {
@@ -2378,15 +2447,18 @@ input[type="range"] {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
+  color: var(--reader-ink);
+  transition: transform 150ms ease;
+}
+
+.reader-chrome__menu {
   border: 0.5px solid var(--glass-edge);
   background: var(--glass-fill);
-  color: var(--reader-ink);
   backdrop-filter: var(--glass-blur);
   box-shadow:
     inset 0 0.5px 0 var(--glass-sheen),
     inset 0 -0.5px 0 var(--glass-shade),
     var(--glass-shadow);
-  transition: transform 150ms ease;
 }
 
 .reader-chrome__close:active,

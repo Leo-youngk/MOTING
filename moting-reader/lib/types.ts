@@ -134,7 +134,7 @@ export interface ReaderSettings {
   voiceURI: string;
   /** 用户自带的 OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1。 */
   aiBaseUrl: string;
-  /** 直接从浏览器发请求，不经过 Worker，密钥不落我们的服务器。 */
+  /** 请求经我们的 Worker 转发（绕开跨域限制），密钥随请求过一次服务器，不落盘。 */
   aiApiKey: string;
   aiModel: string;
   aiDeepThinking: boolean;

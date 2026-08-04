@@ -24,6 +24,8 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
   viewportFit: "cover",
   // 初始值对应默认书架「霜白」。iOS 用它给状态栏那条填色，
   // 换书架或翻开书后由客户端改写，状态栏才不会跟页面裂成两块。

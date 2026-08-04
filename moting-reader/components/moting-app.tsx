@@ -1431,8 +1431,8 @@ function BookNotesScreen({
   );
 }
 
-/** base URL 填完（失焦）就自动拉一次模型列表；拉不到就退回手填，不强求。 */
-function AiSettingsGroup({
+/** base URL 填完（失焦）就自动拉一次模型列表；拉不到就退回手填，不强求。内嵌在聊天面板里，不再是独立设置页。 */
+function AiModelPicker({
   settings,
   onChange,
 }: {
@@ -1459,13 +1459,9 @@ function AiSettingsGroup({
   };
 
   return (
-    <section className="settings-group">
-      <div className="settings-group__title">
-        <Sparkles size={18} />
-        <h2>AI 问答</h2>
-      </div>
-      <p className="settings-hint">
-        自带 OpenAI 兼容接口的地址和密钥，直接从你的设备发出，不经过本项目服务器。
+    <div className="ai-model-picker">
+      <p className="ai-model-picker__hint">
+        自带 OpenAI 兼容接口的地址和密钥，请求经我们的服务器转发一次（避开跨域限制），不落盘保存。
       </p>
       <label className="settings-row settings-row--stack">
         <span>
@@ -1531,7 +1527,7 @@ function AiSettingsGroup({
           onChange={(event) => onChange({ ...settings, aiDeepThinking: event.target.checked })}
         />
       </label>
-    </section>
+    </div>
   );
 }
 
@@ -1656,8 +1652,6 @@ function SettingsPanel({
           />
         </div>
       </section>
-
-      <AiSettingsGroup settings={settings} onChange={onChange} />
 
       <section className="settings-group">
         <div className="settings-group__title">
@@ -1898,37 +1892,57 @@ function ReaderPopover({
   );
 }
 
-/** 划词后「问 AI」，直接从浏览器打用户自己填的接口，面板独立管理自己的问答状态。 */
+interface AiChatTurn {
+  role: "user" | "assistant";
+  content: string;
+  reasoning?: string;
+}
+
+/** 划词后「问 AI」，多轮聊天面板，模型选择内嵌成一个可展开/收起的卡片，风格照抄 DeepSeek/Claude 官方聊天界面。 */
 function AiAskPanel({
   text,
+  book,
+  chapterTitle,
   settings,
+  onSettingsChange,
   onClose,
-  onOpenSettings,
 }: {
   text: string;
+  book: Book;
+  chapterTitle: string;
   settings: ReaderSettings;
+  onSettingsChange: (settings: ReaderSettings) => void;
   onClose: () => void;
-  onOpenSettings: () => void;
 }) {
   const configured = Boolean(settings.aiBaseUrl && settings.aiModel);
+  const [showPicker, setShowPicker] = useState(!configured);
+  const [turns, setTurns] = useState<AiChatTurn[]>([]);
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
-  const [content, setContent] = useState("");
-  const [reasoning, setReasoning] = useState("");
-  const [showReasoning, setShowReasoning] = useState(true);
   const [error, setError] = useState("");
+  const [showReasoning, setShowReasoning] = useState(true);
   const controllerRef = useRef<AbortController | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => () => controllerRef.current?.abort(), []);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: "end" });
+  }, [turns]);
+
+  const canSend = configured && !busy && (question.trim().length > 0 || turns.length === 0);
 
   const ask = async () => {
-    if (!configured || busy) return;
+    if (!canSend) return;
+    const userText = question.trim() || "帮我讲讲这段话";
+    const history: AiChatTurn[] = [...turns, { role: "user", content: userText }];
+    setTurns([...history, { role: "assistant", content: "", reasoning: "" }]);
+    setQuestion("");
     setBusy(true);
-    setContent("");
-    setReasoning("");
     setError("");
     const controller = new AbortController();
     controllerRef.current = controller;
+    let content = "";
+    let reasoning = "";
     try {
       await streamAiChat(
         {
@@ -1940,19 +1954,19 @@ function AiAskPanel({
           messages: [
             {
               role: "system",
-              content: "你是一个阅读助手，基于用户引用的原文片段简洁作答，除非用户要求，不必逐句复述原文。",
+              content: `你是《${book.title}》的阅读助手，当前章节是《${chapterTitle}》。用户划出的原文片段：\n${text}\n请结合这段原文和对话上下文简洁作答，除非用户要求，不必逐句复述原文。`,
             },
-            {
-              role: "user",
-              content: question.trim()
-                ? `引用原文：\n${text}\n\n问题：${question.trim()}`
-                : `帮我讲讲这段话：\n${text}`,
-            },
+            ...history.map(({ role, content: turnContent }) => ({ role, content: turnContent })),
           ],
         },
         (delta) => {
-          if (delta.content) setContent((value) => value + delta.content);
-          if (delta.reasoning) setReasoning((value) => value + delta.reasoning);
+          if (delta.content) content += delta.content;
+          if (delta.reasoning) reasoning += delta.reasoning;
+          setTurns((prev) => {
+            const next = [...prev];
+            next[next.length - 1] = { role: "assistant", content, reasoning };
+            return next;
+          });
         }
       );
     } catch (err) {
@@ -1966,56 +1980,80 @@ function AiAskPanel({
   return (
     <Modal title="问 AI" onClose={onClose} className="modal-sheet--reader" wide>
       <div className="ai-ask">
+        <div className="ai-ask__toolbar">
+          <button
+            type="button"
+            className="ai-ask__model-pill"
+            onClick={() => setShowPicker((value) => !value)}
+          >
+            <Sparkles size={13} />
+            <span>{settings.aiModel || "选择模型"}</span>
+            <ChevronDown
+              size={13}
+              style={{ transform: showPicker ? "rotate(180deg)" : "rotate(0deg)" }}
+            />
+          </button>
+        </div>
+
+        {showPicker ? <AiModelPicker settings={settings} onChange={onSettingsChange} /> : null}
+
         <blockquote className="ai-ask__quote">{text}</blockquote>
 
         {!configured ? (
-          <div className="ai-ask__empty">
-            <p>还没配置 AI 接口，去设置里填一下接口地址和模型。</p>
-            <button type="button" className="primary-button" onClick={onOpenSettings}>
-              去设置
-            </button>
-          </div>
+          <p className="ai-ask__empty">先在上面选一个模型才能开始问。</p>
         ) : (
           <>
-            <div className="ai-ask__input">
-              <textarea
-                rows={2}
-                placeholder="想问点什么？留空就是让 AI 讲讲这段话"
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-              />
-              <button type="button" className="primary-button" onClick={ask} disabled={busy}>
-                {busy ? "回答中…" : "发送"}
-              </button>
+            <div className="ai-ask__turns">
+              {turns.map((turn, index) =>
+                turn.role === "user" ? (
+                  <p className="ai-ask__question" key={index}>
+                    {turn.content}
+                  </p>
+                ) : (
+                  <div className="ai-ask__turn-assistant" key={index}>
+                    {turn.reasoning ? (
+                      <div className="ai-ask__reasoning">
+                        <button
+                          type="button"
+                          className="ai-ask__reasoning-toggle"
+                          onClick={() => setShowReasoning((value) => !value)}
+                        >
+                          <ChevronDown
+                            size={14}
+                            style={{
+                              transform: showReasoning ? "rotate(0deg)" : "rotate(-90deg)",
+                            }}
+                          />
+                          思考过程
+                        </button>
+                        {showReasoning ? <p className="ai-ask__reasoning-text">{turn.reasoning}</p> : null}
+                      </div>
+                    ) : null}
+                    {turn.content || busy ? (
+                      <div className="ai-ask__answer">
+                        {turn.content}
+                        {busy && !turn.content && index === turns.length - 1 ? "…" : null}
+                      </div>
+                    ) : null}
+                  </div>
+                )
+              )}
+              <div ref={bottomRef} />
             </div>
 
             {error ? <p className="ai-ask__error">{error}</p> : null}
 
-            {reasoning ? (
-              <div className="ai-ask__reasoning">
-                <button
-                  type="button"
-                  className="ai-ask__reasoning-toggle"
-                  onClick={() => setShowReasoning((value) => !value)}
-                >
-                  <ChevronDown
-                    size={14}
-                    style={{
-                      transform: showReasoning ? "rotate(0deg)" : "rotate(-90deg)",
-                    }}
-                  />
-                  思考过程
-                </button>
-                {showReasoning ? <p className="ai-ask__reasoning-text">{reasoning}</p> : null}
-              </div>
-            ) : null}
-
-            {content || busy ? (
-              <div className="ai-ask__answer">
-                {content}
-                {busy && !content ? "…" : null}
-              </div>
-            ) : null}
+            <div className="ai-ask__input">
+              <textarea
+                rows={2}
+                placeholder={turns.length === 0 ? "想问点什么？留空就是让 AI 讲讲这段话" : "接着问点什么"}
+                value={question}
+                onChange={(event) => setQuestion(event.target.value)}
+              />
+              <button type="button" className="primary-button" onClick={ask} disabled={!canSend}>
+                {busy ? "回答中…" : "发送"}
+              </button>
+            </div>
           </>
         )}
       </div>
@@ -2877,12 +2915,11 @@ function ReaderScreen({
       {askAiText ? (
         <AiAskPanel
           text={askAiText}
+          book={book}
+          chapterTitle={chapter?.title ?? "正文"}
           settings={settings}
+          onSettingsChange={applySettings}
           onClose={() => setAskAiText(null)}
-          onOpenSettings={() => {
-            setAskAiText(null);
-            setShowSettings(true);
-          }}
         />
       ) : null}
 
@@ -3072,8 +3109,6 @@ function ReaderScreen({
                 </button>
               ))}
             </div>
-
-            <AiSettingsGroup settings={settings} onChange={applySettings} />
           </div>
         </Modal>
       ) : null}

@@ -1,7 +1,8 @@
 /**
- * 直接从浏览器打到用户自己填的 OpenAI 兼容接口，不经过我们的 Worker——
- * 密钥只留在用户设备上。代价是遇到不支持 CORS 的服务商会连不上，
- * 这是接受的取舍，不在这里加代理兜底。
+ * 请求经我们自己的 Worker 转发到用户填的 OpenAI 兼容接口——很多服务商的接口
+ * 不带 CORS 响应头，浏览器直连会被拦，所以借道 Worker 做一次服务器到服务器的
+ * 转发。Worker 只是原样转发、不持久化，但密钥会经过我们的服务器，这跟纯前端
+ * 直连比是个取舍，用户已确认接受。
  */
 export class AiRequestError extends Error {
   constructor(message: string) {
@@ -10,22 +11,20 @@ export class AiRequestError extends Error {
   }
 }
 
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.trim().replace(/\/+$/, "");
-}
-
 export async function fetchAiModels(baseUrl: string, apiKey: string): Promise<string[]> {
-  const url = `${normalizeBaseUrl(baseUrl)}/models`;
   let response: Response;
   try {
-    response = await fetch(url, {
-      headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
+    response = await fetch("/api/ai/models", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseUrl, apiKey }),
     });
   } catch {
-    throw new AiRequestError("连不上这个接口地址，检查地址或跨域设置");
+    throw new AiRequestError("连不上服务器，稍后再试");
   }
   if (!response.ok) {
-    throw new AiRequestError(`获取模型列表失败（${response.status}）`);
+    const detail = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new AiRequestError(detail?.error?.message ?? `获取模型列表失败（${response.status}）`);
   }
   const body = (await response.json().catch(() => null)) as { data?: { id?: string }[] } | null;
   const ids = (body?.data ?? [])
@@ -59,26 +58,18 @@ export interface AiChatOptions {
 /** 逐块把增量内容喂给 onDelta，content 和 reasoning_content（深度思考）分开传。 */
 export async function streamAiChat(options: AiChatOptions, onDelta: (delta: AiStreamDelta) => void): Promise<void> {
   const { baseUrl, apiKey, model, messages, deepThinking, signal } = options;
-  const url = `${normalizeBaseUrl(baseUrl)}/chat/completions`;
 
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetch("/api/ai/chat", {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: true,
-        ...(deepThinking ? { enable_thinking: true } : {}),
-      }),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseUrl, apiKey, model, messages, deepThinking }),
       signal,
     });
-  } catch {
-    throw new AiRequestError("连不上这个接口地址，检查地址或跨域设置");
+  } catch (err) {
+    if ((err as Error)?.name === "AbortError") throw err;
+    throw new AiRequestError("连不上服务器，稍后再试");
   }
 
   if (!response.ok || !response.body) {
