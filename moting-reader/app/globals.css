@@ -1775,10 +1775,182 @@ button:disabled {
   resize: vertical;
 }
 
-.ai-ask {
+/* 问 AI：满屏对话，排版对标 Claude／DeepSeek 官方 App——顶栏左上角配置模型、
+   中间消息流、底部输入框上方挂当前模型胶囊。 */
+.ai-chat {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  /* 底边停在键盘上沿，输入框才不会被键盘埋掉。dvh／inset:0 在 iOS 弹键盘时不缩，用它兜不住。 */
+  bottom: var(--keyboard-inset);
   display: flex;
   flex-direction: column;
+  background: var(--surface);
+  animation: fade-in 160ms ease both;
+}
+
+.ai-chat__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: calc(env(safe-area-inset-top) + 8px) 8px 8px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--surface);
+}
+
+.ai-chat__bar-btn {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.ai-chat__bar-btn:active {
+  background: var(--paper-deep);
+}
+
+.ai-chat__title {
+  overflow: hidden;
+  flex: 1;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 16px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-chat__picker {
+  padding: 12px 16px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--paper);
+}
+
+.ai-chat__scroll {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ai-chat__thread {
+  display: flex;
+  width: min(100%, 760px);
+  flex-direction: column;
+  gap: 16px;
+  margin: 0 auto;
+  padding: 18px 18px 24px;
+}
+
+.ai-chat__intro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   gap: 14px;
+  padding: 22dvh 24px 0;
+  color: var(--muted);
+  text-align: center;
+}
+
+.ai-chat__intro svg {
+  color: var(--accent);
+}
+
+.ai-chat__intro p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.ai-chat__error {
+  margin: 0;
+  padding: 0 18px 6px;
+  color: var(--danger, #c0392b);
+  font-size: 13px;
+  text-align: center;
+}
+
+.ai-chat__composer {
+  display: flex;
+  width: min(100%, 760px);
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 auto;
+  padding: 8px 14px calc(env(safe-area-inset-bottom) + 10px);
+  border-top: 1px solid var(--line-soft);
+  background: var(--surface);
+}
+
+/* 键盘弹起时安全区在 standalone 下不保证归零，底部留白写死。 */
+html[data-keyboard-open] .ai-chat__composer {
+  padding-bottom: 10px;
+}
+
+.ai-chat__model-pill {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 980px;
+  background: var(--paper-deep);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.ai-chat__model-pill svg:first-child {
+  color: var(--accent);
+}
+
+.ai-chat__model-pill svg:last-child {
+  transition: transform 0.15s ease;
+}
+
+.ai-chat__input {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 6px 6px 14px;
+  border-radius: 22px;
+  background: var(--paper-deep);
+}
+
+.ai-chat__input textarea {
+  flex: 1;
+  max-height: 40dvh;
+  padding: 6px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  resize: none;
+}
+
+.ai-chat__send {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.ai-chat__send:disabled {
+  background: var(--line);
+  opacity: 1;
 }
 
 .ai-ask__quote {
@@ -1792,41 +1964,6 @@ button:disabled {
   line-height: 1.7;
   max-height: 140px;
   overflow-y: auto;
-}
-
-.ai-ask__empty {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 4px 0;
-  color: var(--muted);
-  font-size: 13.5px;
-}
-
-.ai-ask__input {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.ai-ask__input textarea {
-  padding: 12px 13px;
-  border: 0;
-  border-radius: 11px;
-  outline: 0;
-  background: var(--paper-deep);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: 16px;
-  line-height: 1.6;
-  resize: vertical;
-}
-
-.ai-ask__error {
-  margin: 0;
-  color: var(--danger, #c0392b);
-  font-size: 13px;
 }
 
 .ai-ask__reasoning {
@@ -1868,31 +2005,6 @@ button:disabled {
   white-space: pre-wrap;
 }
 
-.ai-ask__toolbar {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.ai-ask__model-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: 980px;
-  background: var(--paper-deep);
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.ai-ask__model-pill svg:first-child {
-  color: var(--accent);
-}
-
-.ai-ask__model-pill svg:last-child {
-  transition: transform 0.15s ease;
-}
-
 .ai-model-picker {
   display: flex;
   flex-direction: column;
@@ -1907,12 +2019,6 @@ button:disabled {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
-}
-
-.ai-ask__turns {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
 }
 
 .ai-ask__question {

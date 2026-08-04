@@ -2,6 +2,7 @@
 
 import {
   ArrowLeft,
+  ArrowUp,
   BookOpen,
   Bookmark,
   BookmarkCheck,
@@ -292,22 +293,10 @@ function useRevealActiveChapter(open: boolean) {
 let scrollLockCount = 0;
 let lockedScrollY = 0;
 
-function Modal({
-  title,
-  children,
-  onClose,
-  wide = false,
-  className = "",
-}: {
-  title: string;
-  children: ReactNode;
-  onClose: () => void;
-  wide?: boolean;
-  className?: string;
-}) {
-  // 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
-  // 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
-  // iOS standalone 下 overflow: hidden 拦不住 focus 触发的整页上推，只有 position: fixed 拦得住。
+// 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
+// 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
+// iOS standalone 下 overflow: hidden 拦不住 focus 触发的整页上推，只有 position: fixed 拦得住。
+function useScrollLock() {
   useEffect(() => {
     if (scrollLockCount++ === 0) {
       lockedScrollY = window.scrollY;
@@ -321,6 +310,22 @@ function Modal({
       window.scrollTo(0, lockedScrollY);
     };
   }, []);
+}
+
+function Modal({
+  title,
+  children,
+  onClose,
+  wide = false,
+  className = "",
+}: {
+  title: string;
+  children: ReactNode;
+  onClose: () => void;
+  wide?: boolean;
+  className?: string;
+}) {
+  useScrollLock();
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -1993,13 +1998,14 @@ function AiAskPanel({
   const [error, setError] = useState("");
   const [showReasoning, setShowReasoning] = useState(true);
   const controllerRef = useRef<AbortController | null>(null);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
+  useScrollLock();
   useEffect(() => () => controllerRef.current?.abort(), []);
   useEffect(() => {
-    // 只滚浮层自己。scrollIntoView 会把所有可滚祖先一起滚，连带把整页拖走。
-    const sheet = bottomRef.current?.closest(".modal-sheet");
-    if (sheet) sheet.scrollTop = sheet.scrollHeight;
+    // 只滚消息区自己。scrollIntoView 会把所有可滚祖先一起滚，连带把整页拖走。
+    const scroller = scrollRef.current;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }, [turns]);
 
   // 找最近一次「带了新片段」的用户提问，用来判断眼下这段是不是已经问过。
@@ -2075,86 +2081,116 @@ function AiAskPanel({
   };
 
   return (
-    <Modal title="问 AI" onClose={onClose} className="modal-sheet--reader" wide>
-      <div className="ai-ask">
-        <div className="ai-ask__toolbar">
+    <div className="ai-chat" role="dialog" aria-modal="true" aria-label="问 AI">
+      <header className="ai-chat__bar">
+        <button
+          type="button"
+          className="ai-chat__bar-btn"
+          aria-label="配置模型"
+          aria-expanded={showPicker}
+          onClick={() => setShowPicker((value) => !value)}
+        >
+          <SlidersHorizontal size={20} />
+        </button>
+        <span className="ai-chat__title">{book.title}</span>
+        <button
+          type="button"
+          className="ai-chat__bar-btn"
+          aria-label="关闭"
+          onClick={onClose}
+        >
+          <X size={22} />
+        </button>
+      </header>
+
+      {showPicker ? (
+        <div className="ai-chat__picker">
+          <AiModelPicker settings={settings} onChange={onSettingsChange} />
+        </div>
+      ) : null}
+
+      <div className="ai-chat__scroll" ref={scrollRef}>
+        <div className="ai-chat__thread">
+          {isFreshQuote ? <blockquote className="ai-ask__quote">{text}</blockquote> : null}
+
+          {!turns.length && !isFreshQuote ? (
+            <div className="ai-chat__intro">
+              <Sparkles size={30} />
+              <p>{configured ? "关于这本书，想聊点什么？" : "先点左上角配置一个模型，就能开始问了。"}</p>
+            </div>
+          ) : null}
+
+          {turns.map((turn, index) =>
+            turn.role === "user" ? (
+              <p className="ai-ask__question" key={index}>
+                {turn.content}
+              </p>
+            ) : (
+              <div className="ai-ask__turn-assistant" key={index}>
+                {turn.reasoning ? (
+                  <div className="ai-ask__reasoning">
+                    <button
+                      type="button"
+                      className="ai-ask__reasoning-toggle"
+                      onClick={() => setShowReasoning((value) => !value)}
+                    >
+                      <ChevronDown
+                        size={14}
+                        style={{
+                          transform: showReasoning ? "rotate(0deg)" : "rotate(-90deg)",
+                        }}
+                      />
+                      思考过程
+                    </button>
+                    {showReasoning ? <p className="ai-ask__reasoning-text">{turn.reasoning}</p> : null}
+                  </div>
+                ) : null}
+                {turn.content || busy ? (
+                  <div className="ai-ask__answer">
+                    {turn.content}
+                    {busy && !turn.content && index === turns.length - 1 ? "…" : null}
+                  </div>
+                ) : null}
+              </div>
+            )
+          )}
+        </div>
+      </div>
+
+      {error ? <p className="ai-chat__error">{error}</p> : null}
+
+      <div className="ai-chat__composer">
+        <button
+          type="button"
+          className="ai-chat__model-pill"
+          onClick={() => setShowPicker((value) => !value)}
+        >
+          <Sparkles size={13} />
+          <span>{settings.aiModel || "选择模型"}</span>
+          <ChevronDown
+            size={13}
+            style={{ transform: showPicker ? "rotate(180deg)" : "rotate(0deg)" }}
+          />
+        </button>
+        <div className="ai-chat__input">
+          <textarea
+            rows={1}
+            placeholder={isFreshQuote ? "留空就是让 AI 讲讲这段话" : "问点什么"}
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+          />
           <button
             type="button"
-            className="ai-ask__model-pill"
-            onClick={() => setShowPicker((value) => !value)}
+            className="ai-chat__send"
+            onClick={ask}
+            disabled={!canSend}
+            aria-label="发送"
           >
-            <Sparkles size={13} />
-            <span>{settings.aiModel || "选择模型"}</span>
-            <ChevronDown
-              size={13}
-              style={{ transform: showPicker ? "rotate(180deg)" : "rotate(0deg)" }}
-            />
+            <ArrowUp size={20} />
           </button>
         </div>
-
-        {showPicker ? <AiModelPicker settings={settings} onChange={onSettingsChange} /> : null}
-
-        {isFreshQuote ? <blockquote className="ai-ask__quote">{text}</blockquote> : null}
-
-        {!configured ? (
-          <p className="ai-ask__empty">先在上面选一个模型才能开始问。</p>
-        ) : (
-          <>
-            <div className="ai-ask__turns">
-              {turns.map((turn, index) =>
-                turn.role === "user" ? (
-                  <p className="ai-ask__question" key={index}>
-                    {turn.content}
-                  </p>
-                ) : (
-                  <div className="ai-ask__turn-assistant" key={index}>
-                    {turn.reasoning ? (
-                      <div className="ai-ask__reasoning">
-                        <button
-                          type="button"
-                          className="ai-ask__reasoning-toggle"
-                          onClick={() => setShowReasoning((value) => !value)}
-                        >
-                          <ChevronDown
-                            size={14}
-                            style={{
-                              transform: showReasoning ? "rotate(0deg)" : "rotate(-90deg)",
-                            }}
-                          />
-                          思考过程
-                        </button>
-                        {showReasoning ? <p className="ai-ask__reasoning-text">{turn.reasoning}</p> : null}
-                      </div>
-                    ) : null}
-                    {turn.content || busy ? (
-                      <div className="ai-ask__answer">
-                        {turn.content}
-                        {busy && !turn.content && index === turns.length - 1 ? "…" : null}
-                      </div>
-                    ) : null}
-                  </div>
-                )
-              )}
-              <div ref={bottomRef} />
-            </div>
-
-            {error ? <p className="ai-ask__error">{error}</p> : null}
-
-            <div className="ai-ask__input">
-              <textarea
-                rows={2}
-                placeholder={isFreshQuote ? "想问点什么？留空就是让 AI 讲讲这段话" : "接着问点什么"}
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-              />
-              <button type="button" className="primary-button" onClick={ask} disabled={!canSend}>
-                {busy ? "回答中…" : "发送"}
-              </button>
-            </div>
-          </>
-        )}
       </div>
-    </Modal>
+    </div>
   );
 }
 
@@ -3924,15 +3960,31 @@ export default function MotingApp() {
     const meta = document.querySelector<HTMLMetaElement>(
       'meta[name="theme-color"]'
     );
-    if (meta) {
-      const style = getComputedStyle(root);
-      const color = style
+    const apply = () => {
+      if (!meta) return;
+      const color = getComputedStyle(root)
         .getPropertyValue(isReading ? "--reader-background" : "--paper")
         .trim();
-      if (color) meta.content = color;
-    }
+      if (!color) return;
+      // iOS 从后台切回来会把状态栏刷回 HTML 里那条写死的浅色，露出「白色挡块」。
+      // 而 meta.content 还留着上次写进去的正确值，直接再赋一遍同样的字符串 iOS 不认、
+      // 不重绘。先塞个不同的值逼它认一次改动，再写回真正的底色，才会重新填色。
+      if (meta.content === color) meta.content = "";
+      meta.content = color;
+    };
+    apply();
+    // 只在页面重新可见时补一次；隐藏时不用管，切回来那一下才是状态栏被刷掉的时机。
+    const onVisible = () => {
+      if (document.visibilityState === "visible") apply();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pageshow", apply);
+    window.addEventListener("focus", apply);
     return () => {
       delete root.dataset.inReader;
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pageshow", apply);
+      window.removeEventListener("focus", apply);
     };
   }, [isReading, settings.theme, settings.shellTheme]);
 
