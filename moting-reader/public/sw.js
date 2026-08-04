@@ -1,10 +1,9 @@
 // SHELL 里的文件名不带内容哈希，缓存又是 cache-first，
 // 改了 manifest 或图标就必须顺手把版本号加一，否则已装的 PWA 永远拿旧的。
-const CACHE_NAME = "moting-shell-v5";
+const CACHE_NAME = "moting-shell-v6";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
-  "/icon.svg",
   "/icon-192.png",
   "/icon-512.png",
   "/icon-maskable-512.png",
