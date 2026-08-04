@@ -88,6 +88,7 @@ import {
   type Book,
   type BookNote,
   type BookPosition,
+  type Chapter,
   type HighlightColor,
   type ImportProgress,
   type MainView,
@@ -1898,18 +1899,21 @@ interface AiChatTurn {
   reasoning?: string;
 }
 
+/** 章节全文太长会把请求撑爆、也烧钱，只带前面这么多字，够回答「这章讲了什么」就行。 */
+const AI_CHAPTER_TEXT_LIMIT = 6000;
+
 /** 划词后「问 AI」，多轮聊天面板，模型选择内嵌成一个可展开/收起的卡片，风格照抄 DeepSeek/Claude 官方聊天界面。 */
 function AiAskPanel({
   text,
   book,
-  chapterTitle,
+  chapter,
   settings,
   onSettingsChange,
   onClose,
 }: {
   text: string;
   book: Book;
-  chapterTitle: string;
+  chapter: Chapter | undefined;
   settings: ReaderSettings;
   onSettingsChange: (settings: ReaderSettings) => void;
   onClose: () => void;
@@ -1943,6 +1947,14 @@ function AiAskPanel({
     controllerRef.current = controller;
     let content = "";
     let reasoning = "";
+    const toc = book.chapters.map((c, i) => `${i + 1}. ${c.title}`).join("\n");
+    const chapterTitle = chapter?.title ?? "正文";
+    const chapterText = chapter
+      ? flattenChapter(chapter)
+          .map((sentence) => sentence.text)
+          .join("")
+          .slice(0, AI_CHAPTER_TEXT_LIMIT)
+      : "";
     try {
       await streamAiChat(
         {
@@ -1954,7 +1966,7 @@ function AiAskPanel({
           messages: [
             {
               role: "system",
-              content: `你是《${book.title}》的阅读助手，当前章节是《${chapterTitle}》。用户划出的原文片段：\n${text}\n请结合这段原文和对话上下文简洁作答，除非用户要求，不必逐句复述原文。`,
+              content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}\n\n当前章节《${chapterTitle}》正文${chapterText.length >= AI_CHAPTER_TEXT_LIMIT ? "（篇幅较长，只截取了前面一部分）" : ""}：\n${chapterText}\n\n用户划出的原文片段：\n${text}\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。`,
             },
             ...history.map(({ role, content: turnContent }) => ({ role, content: turnContent })),
           ],
@@ -2916,7 +2928,7 @@ function ReaderScreen({
         <AiAskPanel
           text={askAiText}
           book={book}
-          chapterTitle={chapter?.title ?? "正文"}
+          chapter={chapter}
           settings={settings}
           onSettingsChange={applySettings}
           onClose={() => setAskAiText(null)}
