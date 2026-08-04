@@ -1533,75 +1533,84 @@ function AiModelPicker({
     }
   };
 
+  // 面板一打开、地址之前就填过的话，不该等用户点进输入框再点出来才去拉列表。
+  useEffect(() => {
+    loadModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="ai-model-picker">
       <p className="ai-model-picker__hint">
         自带 OpenAI 兼容接口的地址和密钥，请求经我们的服务器转发一次（避开跨域限制），不落盘保存。
       </p>
-      <label className="settings-row settings-row--stack">
-        <span>
-          <strong>接口地址</strong>
-          <small>例如 https://api.deepseek.com/v1</small>
-        </span>
-        <input
-          type="text"
-          value={settings.aiBaseUrl}
-          placeholder="https://api.example.com/v1"
-          onChange={(event) => onChange({ ...settings, aiBaseUrl: event.target.value })}
-          onBlur={loadModels}
-        />
-      </label>
-      <label className="settings-row settings-row--stack">
-        <span>
-          <strong>API Key</strong>
-        </span>
-        <input
-          type="password"
-          value={settings.aiApiKey}
-          placeholder="sk-…"
-          onChange={(event) => onChange({ ...settings, aiApiKey: event.target.value })}
-          onBlur={loadModels}
-        />
-      </label>
-      <label className="settings-row settings-row--stack">
-        <span>
-          <strong>模型</strong>
-          <small>{loading ? "正在获取模型列表…" : error || "填好地址会自动拉取"}</small>
-        </span>
-        {models.length ? (
-          <select
-            value={settings.aiModel}
-            onChange={(event) => onChange({ ...settings, aiModel: event.target.value })}
-          >
-            {!models.includes(settings.aiModel) && settings.aiModel ? (
-              <option value={settings.aiModel}>{settings.aiModel}</option>
-            ) : null}
-            {models.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </select>
-        ) : (
+      <div className="ai-model-picker__card">
+        <label className="ai-model-picker__row">
+          <span>接口地址</span>
           <input
             type="text"
-            value={settings.aiModel}
-            placeholder="手动填写模型名"
-            onChange={(event) => onChange({ ...settings, aiModel: event.target.value })}
+            value={settings.aiBaseUrl}
+            placeholder="https://api.example.com/v1"
+            onChange={(event) => onChange({ ...settings, aiBaseUrl: event.target.value })}
+            onBlur={loadModels}
           />
-        )}
-      </label>
-      <label className="settings-row">
-        <span>
-          <strong>深度思考</strong>
-          <small>模型支持的话，会额外展示思考过程</small>
-        </span>
-        <input
-          type="checkbox"
-          checked={settings.aiDeepThinking}
-          onChange={(event) => onChange({ ...settings, aiDeepThinking: event.target.checked })}
-        />
-      </label>
+        </label>
+        <label className="ai-model-picker__row">
+          <span>API Key</span>
+          <input
+            type="password"
+            value={settings.aiApiKey}
+            placeholder="sk-…"
+            onChange={(event) => onChange({ ...settings, aiApiKey: event.target.value })}
+            onBlur={loadModels}
+          />
+        </label>
+        <div className="ai-model-picker__row">
+          <span>模型</span>
+          {models.length ? (
+            <select
+              value={settings.aiModel}
+              onChange={(event) => onChange({ ...settings, aiModel: event.target.value })}
+            >
+              {!models.includes(settings.aiModel) && settings.aiModel ? (
+                <option value={settings.aiModel}>{settings.aiModel}</option>
+              ) : null}
+              {models.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={settings.aiModel}
+              placeholder={loading ? "获取中…" : "手动填写模型名"}
+              onChange={(event) => onChange({ ...settings, aiModel: event.target.value })}
+            />
+          )}
+        </div>
+        <label className="ai-model-picker__row">
+          <span>深度思考</span>
+          <span className="ai-switch">
+            <input
+              type="checkbox"
+              checked={settings.aiDeepThinking}
+              onChange={(event) => onChange({ ...settings, aiDeepThinking: event.target.checked })}
+            />
+            <span className="ai-switch__track">
+              <span className="ai-switch__thumb" />
+            </span>
+          </span>
+        </label>
+      </div>
+      <p
+        className={
+          error ? "ai-model-picker__footnote ai-model-picker__footnote--error" : "ai-model-picker__footnote"
+        }
+      >
+        {loading ? "正在获取模型列表…" : error || "深度思考需模型支持，开启后会展示思考过程。"}
+      </p>
     </div>
   );
 }
