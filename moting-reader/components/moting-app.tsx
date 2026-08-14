@@ -38,6 +38,7 @@ import {
 } from "lucide-react";
 import {
   type ChangeEvent,
+  type ComponentPropsWithoutRef,
   type CSSProperties,
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -49,6 +50,8 @@ import {
   useRef,
   useState,
 } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
 import { AiRequestError, fetchAiModels, streamAiChat } from "../lib/ai";
@@ -1979,6 +1982,21 @@ function ReaderPopover({
 /** 章节全文太长会把请求撑爆、也烧钱，只带前面这么多字，够回答「这章讲了什么」就行。 */
 const AI_CHAPTER_TEXT_LIMIT = 6000;
 
+const aiMarkdownComponents = {
+  a: (props: ComponentPropsWithoutRef<"a">) => (
+    <a {...props} target="_blank" rel="noreferrer noopener" />
+  ),
+};
+
+/** AI 回答的 markdown 渲染，边流式接收边整段重新解析，不做增量 diff。 */
+function AiMarkdown({ content }: { content: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={aiMarkdownComponents}>
+      {content}
+    </ReactMarkdown>
+  );
+}
+
 /** 划词后「问 AI」，多轮聊天面板，模型选择内嵌成一个可展开/收起的卡片，风格照抄 DeepSeek/Claude 官方聊天界面。 */
 function AiAskPanel({
   text,
@@ -2062,7 +2080,7 @@ function AiAskPanel({
           messages: [
             {
               role: "system",
-              content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。`,
+              content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。\n如有需要可使用 Markdown 格式（标题、加粗、列表、代码块等）让回答更清晰，但不必为简短回答刻意加格式。`,
             },
             ...history.map((turn) => ({
               role: turn.role,
@@ -2156,7 +2174,7 @@ function AiAskPanel({
                 ) : null}
                 {turn.content || busy ? (
                   <div className="ai-ask__answer">
-                    {turn.content}
+                    {turn.content ? <AiMarkdown content={turn.content} /> : null}
                     {busy && !turn.content && index === turns.length - 1 ? "…" : null}
                   </div>
                 ) : null}
