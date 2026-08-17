@@ -50,6 +50,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
@@ -295,6 +296,14 @@ function useRevealActiveChapter(open: boolean) {
 // 浮层叠着开时，只有最外层那一次负责记录和还原滚动位置。
 let scrollLockCount = 0;
 let lockedScrollY = 0;
+// 关闭浮层的同一个事件里如果发生了跳转（比如点目录），跳转后的滚动位置才是
+// 用户想要的，不能被这里的"还原到开浮层前的位置"覆盖掉。跳转代码负责调用
+// suppressScrollRestore() 声明"这次关闭不要还原"。
+let suppressNextScrollRestore = false;
+
+function suppressScrollRestore() {
+  suppressNextScrollRestore = true;
+}
 
 // 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
 // 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
@@ -310,7 +319,11 @@ function useScrollLock() {
       if (--scrollLockCount > 0) return;
       document.body.classList.remove("is-scroll-locked");
       document.body.style.top = "";
-      window.scrollTo(0, lockedScrollY);
+      if (suppressNextScrollRestore) {
+        suppressNextScrollRestore = false;
+      } else {
+        window.scrollTo(0, lockedScrollY);
+      }
     };
   }, []);
 }
@@ -329,7 +342,7 @@ function Modal({
   className?: string;
 }) {
   useScrollLock();
-  return (
+  return createPortal(
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         className={`modal-sheet ${wide ? "modal-sheet--wide" : ""} ${className}`}
@@ -352,7 +365,8 @@ function Modal({
         </header>
         {children}
       </section>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2420,7 +2434,8 @@ function ReaderScreen({
   useEffect(() => {
     if (paged) return;
     if (!articleRef.current || !("IntersectionObserver" in window)) return;
-    let pending: ReturnType<typeof setTimeout> | null = null;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingSave: (() => void) | null = null;
     const observer = new IntersectionObserver(
       (entries) => {
         const candidates = entries
@@ -2438,10 +2453,15 @@ function ReaderScreen({
         if (!id || Number.isNaN(index) || Number.isNaN(chIndex)) return;
         setChapterIndex(chIndex);
         if (savedSentenceRef.current === id) return;
-        if (pending) clearTimeout(pending);
-        pending = setTimeout(() => {
+        if (pendingTimer) clearTimeout(pendingTimer);
+        pendingSave = () => {
           savedSentenceRef.current = id;
           progressRef.current(positionFor(bookRef.current, chIndex, index));
+        };
+        pendingTimer = setTimeout(() => {
+          pendingTimer = null;
+          pendingSave?.();
+          pendingSave = null;
         }, 500);
       },
       { rootMargin: "-90px 0px -58% 0px", threshold: 0.15 }
@@ -2450,7 +2470,12 @@ function ReaderScreen({
       .querySelectorAll("[data-sentence-id]")
       .forEach((element) => observer.observe(element));
     return () => {
-      if (pending) clearTimeout(pending);
+      // 卸载或重挂前如果还有没落盘的最新位置（500ms 防抖还没到），立即存掉，
+      // 不能让 clearTimeout 把用户刚读到的地方悄悄扔了。
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        pendingSave?.();
+      }
       observer.disconnect();
     };
     // 重挂观察器只该发生在被观察的句子元素本身换了的时候：换书，或者窗口挪了。
@@ -2741,6 +2766,9 @@ function ReaderScreen({
         block: "start",
       };
       justJumpedRef.current = true;
+      // 目录之类的浮层通常是"点了就关"，关闭动作会触发 useScrollLock 把滚动位置
+      // 还原到开浮层前——但这里已经跳到新章节了，不能被那次还原覆盖回旧位置。
+      if (scrollLockCount > 0) suppressScrollRestore();
     }
   };
 
