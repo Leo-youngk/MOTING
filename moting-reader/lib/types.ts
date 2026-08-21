@@ -6,6 +6,7 @@ export type MainView = "home" | "library" | "listen" | "notes";
 
 export type AppView =
   | { name: MainView }
+  | { name: "history" }
   | { name: "book-notes"; bookId: string }
   | { name: "reader"; bookId: string }
   | { name: "player"; bookId: string };
@@ -232,12 +233,10 @@ export interface ReadingSession {
 /** days 是早期版本留下的按天总数，只当历史基数用，不再往里写。 */
 export interface ReadingStats {
   days: Record<string, number>;
-  goalMinutes: number;
 }
 
 export const DEFAULT_STATS: ReadingStats = {
   days: {},
-  goalMinutes: 20,
 };
 
 /** 统计按本地日期归档，不能用 toISOString（那是 UTC，会把深夜阅读算到前一天）。 */

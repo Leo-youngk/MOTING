@@ -240,13 +240,6 @@ export async function getStats(): Promise<ReadingStats> {
   return { ...DEFAULT_STATS, ...(stats ?? {}) };
 }
 
-export async function saveStats(stats: ReadingStats): Promise<void> {
-  const db = await openDatabase();
-  const transaction = db.transaction(SETTINGS_STORE, "readwrite");
-  transaction.objectStore(SETTINGS_STORE).put(stats, "stats");
-  await transactionDone(transaction);
-}
-
 export async function clearLibrary(): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(

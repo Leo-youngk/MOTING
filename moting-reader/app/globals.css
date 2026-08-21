@@ -949,7 +949,7 @@ button:disabled {
   transform: scale(0.9);
 }
 
-/* 主页阅读看板：禅意留白 + 一笔圆相（enso）当进度环，只用墨色，不掺主题橙。 */
+/* 主页阅读看板：一只极简时钟，指针按今日读了多少分钟转，只用墨色，不掺主题橙。 */
 .zen-board {
   display: flex;
   align-items: center;
@@ -970,39 +970,58 @@ button:disabled {
     var(--glass-shadow);
 }
 
-.zen-board__ring {
+.zen-board__clock {
   position: relative;
   width: 116px;
   height: 116px;
   flex: 0 0 auto;
 }
 
-.zen-board__ring svg {
+.zen-board__clock svg {
   display: block;
   width: 100%;
   height: 100%;
   overflow: visible;
 }
 
-.zen-ring__track,
-.zen-ring__ink {
+.zen-clock__dial {
   fill: none;
-  stroke-linecap: round;
-}
-
-.zen-ring__track {
   stroke: color-mix(in srgb, var(--ink) 8%, transparent);
-  stroke-width: 7;
+  stroke-width: 1;
 }
 
-/* 起笔重、收笔轻是圆相的样子，这里靠一层描边加轻微透明近似。 */
-.zen-ring__ink {
-  stroke: color-mix(in srgb, var(--ink) 72%, transparent);
-  stroke-width: 8.5;
-  transition: stroke-dasharray 700ms cubic-bezier(0.22, 0.7, 0.24, 1);
+.zen-clock__tick {
+  stroke: color-mix(in srgb, var(--ink) 18%, transparent);
+  stroke-linecap: round;
+  stroke-width: 1.5;
 }
 
-.zen-ring__center {
+/* 走过的那一段留一道淡墨，满一圈正好 60 分钟。 */
+.zen-clock__sweep {
+  fill: none;
+  stroke: color-mix(in srgb, var(--ink) 14%, transparent);
+  stroke-linecap: round;
+  stroke-width: 5;
+  transition: stroke-dasharray 900ms cubic-bezier(0.22, 0.7, 0.24, 1);
+}
+
+.zen-clock__hand {
+  stroke: color-mix(in srgb, var(--ink) 76%, transparent);
+  stroke-linecap: round;
+  stroke-width: 3;
+  transform-box: view-box;
+  transform-origin: 58px 58px;
+  transition: transform 1100ms cubic-bezier(0.22, 0.7, 0.24, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zen-clock__sweep,
+  .zen-clock__hand {
+    transition: none;
+  }
+}
+
+.zen-clock__center {
   position: absolute;
   display: flex;
   flex-direction: column;
@@ -1012,7 +1031,7 @@ button:disabled {
   gap: 1px;
 }
 
-.zen-ring__center strong {
+.zen-clock__center strong {
   font-family: var(--font-serif);
   font-size: 32px;
   font-weight: 500;
@@ -1020,7 +1039,7 @@ button:disabled {
   letter-spacing: -0.02em;
 }
 
-.zen-ring__center small {
+.zen-clock__center small {
   color: var(--muted);
   font-size: 11px;
   letter-spacing: 0.28em;
@@ -1040,59 +1059,6 @@ button:disabled {
   font-family: var(--font-serif);
   font-size: 17px;
   letter-spacing: 0.06em;
-}
-
-.zen-board__goal {
-  align-self: flex-start;
-  padding: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  letter-spacing: 0.04em;
-}
-
-.zen-week {
-  display: flex;
-  gap: 8px;
-  margin-top: 2px;
-}
-
-.zen-week__day {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
-
-/* 每天一道竖着的墨痕，没读的那天只留一条淡淡的槽。 */
-.zen-week__stroke {
-  display: flex;
-  width: 4px;
-  height: 34px;
-  align-items: flex-end;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ink) 7%, transparent);
-}
-
-.zen-week__stroke i {
-  width: 100%;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ink) 34%, transparent);
-  transition: height 500ms ease;
-}
-
-.zen-week__day.is-today .zen-week__stroke i {
-  background: color-mix(in srgb, var(--ink) 72%, transparent);
-}
-
-.zen-week__day small {
-  color: var(--subtle);
-  font-size: 11px;
-}
-
-.zen-week__day.is-today small {
-  color: var(--ink);
 }
 
 .zen-board__stats {
@@ -1126,12 +1092,11 @@ button:disabled {
     gap: 18px;
   }
 
-  .zen-board__ring {
+  .zen-board__clock {
     align-self: center;
   }
 
-  .zen-board__caption,
-  .zen-board__goal {
+  .zen-board__caption {
     align-self: center;
     text-align: center;
   }
@@ -1150,71 +1115,57 @@ button:disabled {
   box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent);
 }
 
+.zen-log__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
 .zen-log__title {
-  margin: 0 0 14px;
+  margin: 0;
   font-family: var(--font-serif);
   font-size: 16px;
   font-weight: 500;
 }
 
-.zen-log__books {
+.zen-log__all {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 18px;
-}
-
-.zen-log__book {
-  display: flex;
-  max-width: 100%;
-  align-items: baseline;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
   font-size: 12px;
 }
 
-.zen-log__book span {
-  overflow: hidden;
-  max-width: 9em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.zen-log__book small {
-  color: var(--muted);
-}
-
-.zen-log__day + .zen-log__day {
-  margin-top: 16px;
-}
-
-.zen-log__day-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding-bottom: 6px;
-  border-bottom: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
-  color: var(--subtle);
-  font-size: 11px;
-  letter-spacing: 0.16em;
+.zen-log__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .zen-log__entry {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  padding: 9px 0;
-  font-size: 12px;
+  gap: 12px;
+  padding: 11px 0;
+  font-size: 13px;
 }
 
-.zen-log__clock {
+.zen-log__entry + .zen-log__entry {
+  border-top: 1px solid color-mix(in srgb, var(--ink) 6%, transparent);
+}
+
+.zen-log__date {
+  flex-shrink: 0;
+  min-width: 4.5em;
   color: var(--muted);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
-/* 书名占住剩下的宽度，长标题截断，后面几项才不会被挤出去。 */
+/* 书名占住剩下的宽度，长标题截断，右边时长才不会被挤出去。 */
 .zen-log__book-name {
   overflow: hidden;
   flex: 1;
@@ -1222,33 +1173,31 @@ button:disabled {
   white-space: nowrap;
 }
 
-.zen-log__kind {
-  flex-shrink: 0;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent-deep);
-  font-size: 11px;
-}
-
 .zen-log__span {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
 }
 
-.zen-log__progress {
-  flex-shrink: 0;
-  color: var(--muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
+.zen-history {
+  margin: 0 20px 26px;
 }
 
-.zen-log__more {
-  width: 100%;
-  margin-top: 16px;
-  padding: 10px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--ink) 4%, transparent);
+.zen-history__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+.zen-history__head h2 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.zen-history__head small {
   color: var(--muted);
   font-size: 12px;
 }
@@ -2757,7 +2706,7 @@ input[type="range"] {
   left: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 14px;
   padding: 0 18px calc(10px + env(safe-area-inset-bottom));
   pointer-events: none;
@@ -2808,29 +2757,6 @@ html[data-keyboard-open] .bottom-bar {
 .bottom-nav button.is-active {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.search-fab {
-  display: inline-flex;
-  width: 60px;
-  height: 60px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border-radius: 50%;
-  border: 0.5px solid var(--glass-edge);
-  background: var(--glass-fill);
-  backdrop-filter: var(--glass-blur);
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade),
-    var(--glass-shadow);
-  color: var(--ink);
-  transition: transform 160ms ease;
-}
-
-.search-fab:active {
-  transform: scale(0.94);
 }
 
 .desktop-brand {
@@ -4511,12 +4437,6 @@ html[data-keyboard-open] .modal-sheet {
     background: transparent;
     backdrop-filter: none;
     box-shadow: none;
-  }
-
-  .search-fab {
-    width: 100%;
-    height: 48px;
-    border-radius: 10px;
   }
 
   .bottom-nav button {

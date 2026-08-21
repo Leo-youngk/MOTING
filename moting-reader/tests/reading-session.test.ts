@@ -9,9 +9,9 @@ import {
   type SessionState,
 } from "../lib/reading-session.ts";
 import {
-  bookTotals,
+  dailyBookEntries,
   dailySeconds,
-  groupSessionsByDay,
+  groupEntriesByMonth,
   readingStreak,
   totalSeconds,
 } from "../lib/reading-stats.ts";
@@ -162,41 +162,43 @@ test("连续天数：今天没读不算断，昨天没读就断", () => {
   assert.equal(readingStreak({ "2026-08-20": 30, "2026-08-19": 120 }, now), 1);
 });
 
-test("按书汇总，最近读的排前面", () => {
-  const totals = bookTotals([
-    session({ id: "a", seconds: 60, endedAt: BASE + 1000 }),
-    session({ id: "b", seconds: 30, endedAt: BASE + 2000 }),
+test("同一天同一本书合成一条，按天倒序、天内按时长倒序", () => {
+  const yesterday = new Date(2026, 7, 19, 9, 0, 0).getTime();
+  const entries = dailyBookEntries([
+    session({ id: "a", startedAt: BASE, seconds: 60 }),
+    session({ id: "b", startedAt: BASE + 3600000, seconds: 20 }),
     session({
       id: "c",
+      startedAt: BASE,
       bookId: "b2",
       bookTitle: "孟子",
-      seconds: 10,
-      endedAt: BASE + 9000,
+      seconds: 300,
     }),
+    session({ id: "d", startedAt: yesterday, seconds: 30 }),
   ]);
   assert.deepEqual(
-    totals.map((item) => [item.bookId, item.seconds]),
+    entries.map((item) => [item.key, item.bookId, item.seconds]),
     [
-      ["b2", 10],
-      ["b1", 90],
+      ["2026-08-20", "b2", 300],
+      ["2026-08-20", "b1", 80],
+      ["2026-08-19", "b1", 30],
     ]
   );
 });
 
-test("时间线按天倒序，天内也倒序", () => {
-  const yesterday = new Date(2026, 7, 19, 9, 0, 0).getTime();
-  const days = groupSessionsByDay([
-    session({ id: "a", startedAt: BASE, seconds: 60 }),
-    session({ id: "b", startedAt: yesterday, seconds: 30 }),
-    session({ id: "c", startedAt: BASE + 3600000, seconds: 20 }),
-  ]);
-  assert.deepEqual(
-    days.map((day) => day.key),
-    ["2026-08-20", "2026-08-19"]
+test("历史页按月倒序分栏并汇总当月时长", () => {
+  const lastMonth = new Date(2026, 6, 30, 9, 0, 0).getTime();
+  const months = groupEntriesByMonth(
+    dailyBookEntries([
+      session({ id: "a", startedAt: BASE, seconds: 60 }),
+      session({ id: "b", startedAt: lastMonth, seconds: 30 }),
+    ])
   );
-  assert.equal(days[0]?.seconds, 80);
   assert.deepEqual(
-    days[0]?.sessions.map((item) => item.id),
-    ["c", "a"]
+    months.map((month) => [month.key, month.seconds]),
+    [
+      ["2026-08", 60],
+      ["2026-07", 30],
+    ]
   );
 });

@@ -92,7 +92,6 @@ import {
   saveChat,
   saveNote,
   saveSettings,
-  saveStats,
 } from "../lib/storage";
 import {
   DEFAULT_SETTINGS,
@@ -115,9 +114,9 @@ import {
   type ReadingStats,
 } from "../lib/types";
 import {
-  bookTotals,
+  dailyBookEntries,
   dailySeconds,
-  groupSessionsByDay,
+  groupEntriesByMonth,
   readingStreak,
   totalSeconds,
 } from "../lib/reading-stats";
@@ -526,7 +525,6 @@ function HomeCard({
   );
 }
 
-const GOAL_CHOICES = [5, 10, 15, 20, 30, 45, 60];
 const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
 
 function formatSpan(seconds: number): string {
@@ -536,15 +534,13 @@ function formatSpan(seconds: number): string {
   return rest ? `${Math.floor(minutes / 60)} 时 ${rest} 分` : `${Math.floor(minutes / 60)} 时`;
 }
 
-/** 主页看板：一笔圆相当今日进度环，缺口留在右上，下面七道墨痕是这一周。 */
+/** 主页看板：一只极简时钟，指针按今日阅读时长转，走满一圈是 60 分钟。 */
 function ReadingBoard({
   stats,
   sessions,
-  onGoalChange,
 }: {
   stats: ReadingStats;
   sessions: ReadingSession[];
-  onGoalChange: (minutes: number) => void;
 }) {
   // 回到主页会重新挂载，所以每次进来都是当天的日期，不用再自己定时刷新。
   const [now] = useState(() => Date.now());
@@ -554,98 +550,73 @@ function ReadingBoard({
     [sessions, stats.days]
   );
   const todaySeconds = days[dayKey(now)] ?? 0;
-  const goalSeconds = stats.goalMinutes * 60;
-  const ratio = Math.min(1, todaySeconds / goalSeconds);
+  const minutes = Math.floor(todaySeconds / 60);
   const streak = readingStreak(days, now);
   const total = totalSeconds(days);
 
-  const week = Array.from({ length: 7 }, (_, offset) => {
+  const weekSeconds = Array.from({ length: 7 }, (_, offset) => {
     const date = new Date(now);
-    date.setDate(date.getDate() - (6 - offset));
-    return {
-      key: dayKey(date.getTime()),
-      label: WEEKDAY_LABELS[date.getDay()],
-      seconds: days[dayKey(date.getTime())] ?? 0,
-      isToday: offset === 6,
-    };
-  });
-  const weekSeconds = week.reduce((sum, item) => sum + item.seconds, 0);
+    date.setDate(date.getDate() - offset);
+    return days[dayKey(date.getTime())] ?? 0;
+  }).reduce((sum, item) => sum + item, 0);
 
-  // 圆相不闭合：环只画满周长的 88%，右上角那道缺口是刻意留白。
+  // 进主页时指针从 12 点扫到今天的位置，超过一小时就多转一圈。
+  // 延一拍再给角度，让首帧停在 12 点，指针才有可扫的距离。
+  const [swept, setSwept] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSwept(true), 60);
+    return () => window.clearTimeout(timer);
+  }, []);
+  const angle = swept ? minutes * 6 : 0;
+
   const circumference = 2 * Math.PI * 46;
-  const arc = circumference * 0.88;
+  const swept60 = Math.min(1, todaySeconds / 3600);
 
   const caption =
-    todaySeconds < 60
-      ? "今日尚未落墨"
-      : ratio < 1
-        ? "已然入静，再坐片刻"
-        : "今日功课已毕";
+    todaySeconds < 60 ? "今日尚未落墨" : "心静下来，页页有声";
 
   return (
     <section className="zen-board">
-      <div className="zen-board__ring">
+      <div className="zen-board__clock">
         <svg viewBox="0 0 116 116" aria-hidden>
-          <g transform="rotate(-23 58 58)">
-            <circle
-              className="zen-ring__track"
-              cx="58"
-              cy="58"
-              r="46"
-              strokeDasharray={`${arc} ${circumference}`}
+          <circle className="zen-clock__dial" cx="58" cy="58" r="46" />
+          {Array.from({ length: 12 }, (_, index) => (
+            <line
+              key={index}
+              className="zen-clock__tick"
+              x1="58"
+              y1="14"
+              x2="58"
+              y2={index % 3 === 0 ? 21 : 17.5}
+              transform={`rotate(${index * 30} 58 58)`}
             />
-            <circle
-              className="zen-ring__ink"
-              cx="58"
-              cy="58"
-              r="46"
-              strokeDasharray={`${arc * ratio} ${circumference}`}
-            />
-          </g>
+          ))}
+          <circle
+            className="zen-clock__sweep"
+            cx="58"
+            cy="58"
+            r="46"
+            transform="rotate(-90 58 58)"
+            strokeDasharray={`${circumference * swept60} ${circumference}`}
+          />
+          {/* 指针只画外圈那一段，中间留给分钟数。 */}
+          <line
+            className="zen-clock__hand"
+            x1="58"
+            y1="24"
+            x2="58"
+            y2="38"
+            style={{ transform: `rotate(${angle}deg)` }}
+          />
         </svg>
-        <div className="zen-ring__center">
-          <strong>{Math.floor(todaySeconds / 60)}</strong>
+        <div className="zen-clock__center">
+          <strong>{minutes}</strong>
           <small>分钟</small>
         </div>
       </div>
 
       <div className="zen-board__body">
         <p className="zen-board__caption">{caption}</p>
-        <button
-          type="button"
-          className="zen-board__goal"
-          onClick={() =>
-            onGoalChange(
-              GOAL_CHOICES[
-                (GOAL_CHOICES.indexOf(stats.goalMinutes) + 1) %
-                  GOAL_CHOICES.length
-              ] ?? 20
-            )
-          }
-        >
-          每日 {stats.goalMinutes} 分钟 · 轻点调整
-        </button>
-
-        <div className="zen-week">
-          {week.map((day) => (
-            <div
-              key={day.key}
-              className={`zen-week__day ${day.isToday ? "is-today" : ""}`}
-            >
-              <span className="zen-week__stroke">
-                <i
-                  style={{
-                    height: `${Math.max(
-                      day.seconds ? 8 : 0,
-                      Math.min(100, (day.seconds / goalSeconds) * 100)
-                    )}%`,
-                  }}
-                />
-              </span>
-              <small>{day.label}</small>
-            </div>
-          ))}
-        </div>
 
         <dl className="zen-board__stats">
           <div>
@@ -675,70 +646,104 @@ function dayLabel(key: string, now: number): string {
   return `${Number(month)} 月 ${Number(day)} 日`;
 }
 
-function clockLabel(time: number): string {
-  const date = new Date(time);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(
-    date.getMinutes()
-  ).padStart(2, "0")}`;
+function monthLabel(key: string): string {
+  const [year, month] = key.split("-");
+  return `${year} 年 ${Number(month)} 月`;
 }
 
-/** 阅读记录：按天倒序摊开每一段读/听，看得见具体读的哪本、从哪读到哪。 */
-function ReadingLog({ sessions }: { sessions: ReadingSession[] }) {
+/** 阅读记录：一天一本一条，只给日期、书名和时长。 */
+function ReadingLog({
+  sessions,
+  onOpenHistory,
+}: {
+  sessions: ReadingSession[];
+  onOpenHistory: () => void;
+}) {
   const [now] = useState(() => Date.now());
-  const [expanded, setExpanded] = useState(false);
-  const days = useMemo(() => groupSessionsByDay(sessions), [sessions]);
-  const totals = useMemo(() => bookTotals(sessions), [sessions]);
-  const shown = expanded ? days : days.slice(0, 3);
+  const entries = useMemo(() => dailyBookEntries(sessions), [sessions]);
 
-  if (!days.length) return null;
+  if (!entries.length) return null;
 
   return (
     <section className="zen-log">
-      <h2 className="zen-log__title">阅读记录</h2>
-
-      {totals.length > 1 ? (
-        <div className="zen-log__books">
-          {totals.slice(0, 4).map((item) => (
-            <div key={item.bookId} className="zen-log__book">
-              <span>{item.bookTitle}</span>
-              <small>{formatSpan(item.seconds)}</small>
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {shown.map((day) => (
-        <div key={day.key} className="zen-log__day">
-          <div className="zen-log__day-head">
-            <span>{dayLabel(day.key, now)}</span>
-            <small>{formatSpan(day.seconds)}</small>
-          </div>
-          {day.sessions.map((session) => (
-            <div key={session.id} className="zen-log__entry">
-              <span className="zen-log__clock">{clockLabel(session.startedAt)}</span>
-              <span className="zen-log__book-name">{session.bookTitle}</span>
-              <span className="zen-log__kind">
-                {session.kind === "listen" ? "听" : "读"}
-              </span>
-              <span className="zen-log__span">{formatSpan(session.seconds)}</span>
-              <span className="zen-log__progress">
-                {Math.round(session.startPercent)}% → {Math.round(session.endPercent)}%
-              </span>
-            </div>
-          ))}
-        </div>
-      ))}
-
-      {days.length > 3 ? (
-        <button
-          type="button"
-          className="zen-log__more"
-          onClick={() => setExpanded((value) => !value)}
-        >
-          {expanded ? "收起" : `展开全部 ${days.length} 天`}
+      <div className="zen-log__head">
+        <h2 className="zen-log__title">阅读记录</h2>
+        <button type="button" className="zen-log__all" onClick={onOpenHistory}>
+          查看全部
+          <ChevronRight size={14} />
         </button>
-      ) : null}
+      </div>
+
+      <ul className="zen-log__list">
+        {entries.slice(0, 5).map((entry) => (
+          <li key={`${entry.key}-${entry.bookId}`} className="zen-log__entry">
+            <span className="zen-log__date">{dayLabel(entry.key, now)}</span>
+            <span className="zen-log__book-name">{entry.bookTitle}</span>
+            <span className="zen-log__span">{formatSpan(entry.seconds)}</span>
+          </li>
+        ))}
+      </ul>
     </section>
+  );
+}
+
+/** 历史页：按月摊开每天读了哪本、读了多久。 */
+function HistoryScreen({
+  sessions,
+  onBack,
+}: {
+  sessions: ReadingSession[];
+  onBack: () => void;
+}) {
+  const [now] = useState(() => Date.now());
+  const months = useMemo(
+    () => groupEntriesByMonth(dailyBookEntries(sessions)),
+    [sessions]
+  );
+
+  return (
+    <div className="screen">
+      <header className="ios-nav-bar">
+        <button type="button" className="ios-back" onClick={onBack}>
+          <ChevronLeft size={22} />
+          主页
+        </button>
+        <span>阅读记录</span>
+      </header>
+
+      {!months.length ? (
+        <EmptyState
+          icon={<BookOpen size={28} />}
+          title="还没有记录"
+          description="读上一会儿或听上一段，这里就会留下痕迹。"
+        />
+      ) : (
+        months.map((month) => (
+          <section key={month.key} className="zen-history">
+            <div className="zen-history__head">
+              <h2>{monthLabel(month.key)}</h2>
+              <small>{formatSpan(month.seconds)}</small>
+            </div>
+            <ul className="zen-log__list">
+              {month.entries.map((entry) => (
+                <li
+                  key={`${entry.key}-${entry.bookId}`}
+                  className="zen-log__entry"
+                >
+                  <span className="zen-log__date">
+                    {dayLabel(entry.key, now)}
+                  </span>
+                  <span className="zen-log__book-name">{entry.bookTitle}</span>
+                  <span className="zen-log__span">
+                    {formatSpan(entry.seconds)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))
+      )}
+    </div>
   );
 }
 
@@ -750,7 +755,7 @@ function HomeScreen({
   onPlay,
   onOpenPlayer,
   onImport,
-  onGoalChange,
+  onOpenHistory,
   onOpenSettings,
 }: {
   books: Book[];
@@ -760,7 +765,7 @@ function HomeScreen({
   onPlay: (book: Book) => void;
   onOpenPlayer: (book: Book) => void;
   onImport: () => void;
-  onGoalChange: (minutes: number) => void;
+  onOpenHistory: () => void;
   onOpenSettings: () => void;
 }) {
   // 一本书一张卡：以前「继续阅读」和「继续收听」各排一行，
@@ -850,12 +855,8 @@ function HomeScreen({
             </section>
           ) : null}
 
-          <ReadingBoard
-            stats={stats}
-            sessions={sessions}
-            onGoalChange={onGoalChange}
-          />
-          <ReadingLog sessions={sessions} />
+          <ReadingBoard stats={stats} sessions={sessions} />
+          <ReadingLog sessions={sessions} onOpenHistory={onOpenHistory} />
         </>
       )}
     </div>
@@ -4218,17 +4219,6 @@ export default function MotingApp() {
     saveSettings(next).catch(() => undefined);
   };
 
-  const updateStats = useCallback(
-    (change: (current: ReadingStats) => ReadingStats) => {
-      setStats((current) => {
-        const next = change(current);
-        saveStats(next).catch(() => undefined);
-        return next;
-      });
-    },
-    []
-  );
-
   const isReading = view.name === "reader";
 
   const persistSession = useCallback((session: ReadingSession) => {
@@ -4519,7 +4509,9 @@ export default function MotingApp() {
         ? "listen"
         : view.name === "book-notes"
           ? "notes"
-          : view.name;
+          : view.name === "history"
+            ? "home"
+            : view.name;
 
   if (!ready) {
     return (
@@ -4595,14 +4587,6 @@ export default function MotingApp() {
               active={activeMainView}
               onChange={(name) => setView({ name })}
             />
-            <button
-              type="button"
-              className="search-fab"
-              aria-label="搜索"
-              onClick={() => setView({ name: "library" })}
-            >
-              <Search size={22} />
-            </button>
           </div>
 
           <section className="app-content">
@@ -4615,10 +4599,13 @@ export default function MotingApp() {
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}
                 onImport={() => fileInputRef.current?.click()}
-                onGoalChange={(goalMinutes) =>
-                  updateStats((current) => ({ ...current, goalMinutes }))
-                }
+                onOpenHistory={() => setView({ name: "history" })}
                 onOpenSettings={() => setShowSettings(true)}
+              />
+            ) : view.name === "history" ? (
+              <HistoryScreen
+                sessions={sessions}
+                onBack={() => setView({ name: "home" })}
               />
             ) : view.name === "library" ? (
               <LibraryScreen
