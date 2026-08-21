@@ -20,6 +20,7 @@ import {
   Home,
   Library,
   List,
+  LoaderCircle,
   MoreHorizontal,
   Pause,
   PencilLine,
@@ -2011,7 +2012,7 @@ function AiMarkdown({ content }: { content: string }) {
   );
 }
 
-/** 划词后「问 AI」，多轮聊天面板，模型选择内嵌成一个可展开/收起的卡片，风格照抄 DeepSeek/Claude 官方聊天界面。 */
+/** 划词后「问 AI」，多轮聊天面板；模型设置默认收起，把注意力留给原文和对话。 */
 function AiAskPanel({
   text,
   initialTurns,
@@ -2032,17 +2033,37 @@ function AiAskPanel({
   onClose: () => void;
 }) {
   const configured = Boolean(settings.aiBaseUrl && settings.aiModel);
-  const [showPicker, setShowPicker] = useState(!configured);
+  const [showPicker, setShowPicker] = useState(false);
   const [turns, setTurns] = useState<AiChatTurn[]>(initialTurns);
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [showReasoning, setShowReasoning] = useState(true);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useScrollLock();
   useEffect(() => () => controllerRef.current?.abort(), []);
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    },
+    []
+  );
+
+  const copyAnswer = async (index: number, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedIndex(index);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopiedIndex(null), 1600);
+    } catch {
+      setError("复制失败，请手动选择文字");
+    }
+  };
   useEffect(() => {
     // 只滚消息区自己。scrollIntoView 会把所有可滚祖先一起滚，连带把整页拖走。
     const scroller = scrollRef.current;
@@ -2066,6 +2087,7 @@ function AiAskPanel({
     const history: AiChatTurn[] = [...turns, userTurn];
     setTurns([...history, { role: "assistant", content: "", reasoning: "" }]);
     setQuestion("");
+    if (inputRef.current) inputRef.current.style.height = "auto";
     setBusy(true);
     setError("");
     const controller = new AbortController();
@@ -2152,20 +2174,37 @@ function AiAskPanel({
 
       <div className="ai-chat__scroll" ref={scrollRef}>
         <div className="ai-chat__thread">
-          {isFreshQuote ? <blockquote className="ai-ask__quote">{text}</blockquote> : null}
+          {isFreshQuote ? (
+            <section className="ai-chat__source">
+              <span>正在讨论</span>
+              <blockquote className="ai-ask__quote">{text}</blockquote>
+            </section>
+          ) : null}
 
           {!turns.length && !isFreshQuote ? (
             <div className="ai-chat__intro">
-              <Sparkles size={30} />
-              <p>{configured ? "关于这本书，想聊点什么？" : "先点左上角配置一个模型，就能开始问了。"}</p>
+              <span className="ai-chat__intro-mark" aria-hidden="true">
+                <Sparkles size={28} />
+              </span>
+              <strong>一起读点什么</strong>
+              <p>
+                {configured
+                  ? `可以讨论《${book.title}》里的观点、人物和细节。`
+                  : "先点左上角配置模型，然后就可以开始聊这本书。"}
+              </p>
             </div>
           ) : null}
 
           {turns.map((turn, index) =>
             turn.role === "user" ? (
-              <p className="ai-ask__question" key={index}>
-                {turn.content}
-              </p>
+              <div className="ai-ask__turn-user" key={index}>
+                {turn.quote ? (
+                  <blockquote className="ai-ask__quote ai-ask__quote--sent">
+                    {turn.quote}
+                  </blockquote>
+                ) : null}
+                <p className="ai-ask__question">{turn.content}</p>
+              </div>
             ) : (
               <div className="ai-ask__turn-assistant" key={index}>
                 {turn.reasoning ? (
@@ -2189,8 +2228,34 @@ function AiAskPanel({
                 {turn.content || busy ? (
                   <div className="ai-ask__answer">
                     {turn.content ? <AiMarkdown content={turn.content} /> : null}
-                    {busy && !turn.content && index === turns.length - 1 ? "…" : null}
+                    {busy && !turn.content && index === turns.length - 1 ? (
+                      <span className="ai-chat__thinking" aria-label="正在思考">
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                    ) : null}
                   </div>
+                ) : null}
+                {turn.content && !(busy && index === turns.length - 1) ? (
+                  <button
+                    type="button"
+                    className="ai-ask__copy"
+                    onClick={() => void copyAnswer(index, turn.content)}
+                    aria-label={copiedIndex === index ? "已复制" : "复制回答"}
+                  >
+                    {copiedIndex === index ? (
+                      <>
+                        <Check size={14} />
+                        已复制
+                      </>
+                    ) : (
+                      <>
+                        <Copy size={14} />
+                        复制
+                      </>
+                    )}
+                  </button>
                 ) : null}
               </div>
             )
@@ -2201,34 +2266,54 @@ function AiAskPanel({
       {error ? <p className="ai-chat__error">{error}</p> : null}
 
       <div className="ai-chat__composer">
-        <button
-          type="button"
-          className="ai-chat__model-pill"
-          onClick={() => setShowPicker((value) => !value)}
-        >
-          <Sparkles size={13} />
-          <span>{settings.aiModel || "选择模型"}</span>
-          <ChevronDown
-            size={13}
-            style={{ transform: showPicker ? "rotate(180deg)" : "rotate(0deg)" }}
-          />
-        </button>
         <div className="ai-chat__input">
           <textarea
+            ref={inputRef}
             rows={1}
             placeholder={isFreshQuote ? "留空就是让 AI 讲讲这段话" : "问点什么"}
             value={question}
-            onChange={(event) => setQuestion(event.target.value)}
+            onChange={(event) => {
+              setQuestion(event.target.value);
+              event.currentTarget.style.height = "auto";
+              event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 180)}px`;
+            }}
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing
+              ) {
+                event.preventDefault();
+                void ask();
+              }
+            }}
           />
-          <button
-            type="button"
-            className="ai-chat__send"
-            onClick={ask}
-            disabled={!canSend}
-            aria-label="发送"
-          >
-            <ArrowUp size={20} />
-          </button>
+          <div className="ai-chat__input-footer">
+            <button
+              type="button"
+              className="ai-chat__model-pill"
+              onClick={() => setShowPicker((value) => !value)}
+            >
+              <Sparkles size={14} />
+              <span>{settings.aiModel || "选择模型"}</span>
+              <ChevronDown
+                size={13}
+                style={{ transform: showPicker ? "rotate(180deg)" : "rotate(0deg)" }}
+              />
+            </button>
+            <button
+              type="button"
+              className="ai-chat__send"
+              onClick={() => {
+                if (busy) controllerRef.current?.abort();
+                else void ask();
+              }}
+              disabled={!busy && !canSend}
+              aria-label={busy ? "停止回答" : "发送"}
+            >
+              {busy ? <Square size={14} fill="currentColor" /> : <ArrowUp size={21} />}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -2270,6 +2355,12 @@ function ReaderScreen({
   onSettingsChange: (settings: ReaderSettings) => void;
 }) {
   const initial = book.readingPosition ?? initialPosition(book);
+  const mountIdRef = useRef(Math.random().toString(36).slice(2, 8));
+  console.log("[DEBUG render]", {
+    mountId: mountIdRef.current,
+    initialSentenceId: initial.sentenceId,
+    initialChapterIndex: initial.chapterIndex,
+  });
   const [chapterIndex, setChapterIndex] = useState(initial.chapterIndex);
   const [showChapters, setShowChapters] = useState(false);
   const tocListRef = useRevealActiveChapter(showChapters);
@@ -2299,6 +2390,7 @@ function ReaderScreen({
   // 连按翻页时 state 还没重渲染，只能靠 ref 记住已经翻到第几页。
   const pageIndexRef = useRef(0);
   const goToPage = (next: number) => {
+    console.log("[DEBUG goToPage]", next, new Error().stack?.split("\n")[2]);
     pageIndexRef.current = next;
     setPageIndex(next);
   };
@@ -2379,6 +2471,14 @@ function ReaderScreen({
         ? target.getBoundingClientRect().left -
           article.getBoundingClientRect().left
         : pageIndexRef.current * step;
+      console.log("[DEBUG measure]", {
+        restore,
+        found: !!target,
+        offset,
+        step,
+        count,
+        goTo: Math.max(0, Math.min(count - 1, Math.round(offset / step))),
+      });
       goToPage(Math.max(0, Math.min(count - 1, Math.round(offset / step))));
     };
 
@@ -2425,6 +2525,13 @@ function ReaderScreen({
       const id = target?.dataset.sentenceId;
       const index = Number(target?.dataset.sentenceIndex);
       if (!id || Number.isNaN(index) || savedSentenceRef.current === id) return;
+      console.log("[DEBUG paged-track] saving savedSentenceRef", {
+        id,
+        prev: savedSentenceRef.current,
+        pageIndex,
+        pageStep,
+        pageCount,
+      });
       savedSentenceRef.current = id;
       progressRef.current(positionFor(bookRef.current, chapterIndex, index));
     }, 320);
@@ -3314,6 +3421,7 @@ interface PlayerControls {
   voices: PlayerVoice[];
   isPlaying: boolean;
   isPaused: boolean;
+  isBuffering: boolean;
   location: {
     bookId: string;
     chapterIndex: number;
@@ -3497,10 +3605,12 @@ function PlayerScreen({
           <button
             type="button"
             className="player-primary-control"
-            aria-label={playing ? "暂停" : "播放"}
+            aria-label={player.isBuffering && activeForBook ? "正在准备音频" : playing ? "暂停" : "播放"}
             onClick={toggle}
           >
-            {playing ? (
+            {player.isBuffering && activeForBook ? (
+              <LoaderCircle className="player-buffering-icon" size={31} />
+            ) : playing ? (
               <Pause size={33} fill="currentColor" />
             ) : (
               <Play size={34} fill="currentColor" />
@@ -3528,7 +3638,9 @@ function PlayerScreen({
           </button>
         </div>
 
-        {player.error && activeForBook ? (
+        {player.isBuffering && activeForBook ? (
+          <p className="player-preparing">正在准备音频，很快就会开始…</p>
+        ) : player.error && activeForBook ? (
           <p className="player-error">{player.error}</p>
         ) : null}
 
@@ -3669,6 +3781,7 @@ function MiniPlayer({
   book,
   chapterTitle,
   isPlaying,
+  isBuffering,
   onToggle,
   onOpen,
   onStop,
@@ -3676,6 +3789,7 @@ function MiniPlayer({
   book: Book;
   chapterTitle: string;
   isPlaying: boolean;
+  isBuffering: boolean;
   onToggle: () => void;
   onOpen: () => void;
   onStop: () => void;
@@ -3692,10 +3806,12 @@ function MiniPlayer({
       <button
         type="button"
         className="icon-button"
-        aria-label={isPlaying ? "暂停" : "继续"}
+        aria-label={isBuffering ? "正在准备音频" : isPlaying ? "暂停" : "继续"}
         onClick={onToggle}
       >
-        {isPlaying ? (
+        {isBuffering ? (
+          <LoaderCircle className="player-buffering-icon" size={20} />
+        ) : isPlaying ? (
           <Pause size={20} fill="currentColor" />
         ) : (
           <Play size={20} fill="currentColor" />
@@ -4419,6 +4535,7 @@ export default function MotingApp() {
                 "正文"
               }
               isPlaying={player.isPlaying}
+              isBuffering={player.isBuffering}
               onToggle={player.toggle}
               onOpen={() => setView({ name: "player", bookId: activeBook.id })}
               onStop={player.stop}
