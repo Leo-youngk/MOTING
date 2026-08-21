@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildEdgeSpeechBatches,
   buildSpeechBlocks,
   chaptersFromPlainText,
   createBook,
@@ -192,6 +193,35 @@ test("超长段落按句子边界切成多块", () => {
     blocks.map((block) => block.text).join(""),
     chapter.paragraphs[0].sentences.map((sentence) => sentence.speakableText).join("")
   );
+});
+
+test("云端朗读批次跨段落合并并保持句子下标", () => {
+  const chapter = createChapter(
+    "第一章",
+    [{ text: "甲。乙。" }, { text: "丙。丁。" }, { text: "戊。" }],
+    0
+  );
+  assert.ok(chapter);
+
+  const batches = buildEdgeSpeechBatches(chapter, 7);
+  assert.deepEqual(
+    batches.map((batch) => batch.text),
+    ["甲。乙。丙。", "丁。戊。"]
+  );
+  assert.deepEqual(
+    batches.flatMap((batch) => batch.spans.map((span) => span.sentenceIndex)),
+    [0, 1, 2, 3, 4]
+  );
+  for (const batch of batches) {
+    for (const span of batch.spans) {
+      assert.equal(
+        batch.text.slice(span.start, span.end),
+        chapter.paragraphs
+          .flatMap((paragraph) => paragraph.sentences)
+          [span.sentenceIndex].speakableText
+      );
+    }
+  }
 });
 
 test("阅读位置能够跨章节移动并计算进度", () => {

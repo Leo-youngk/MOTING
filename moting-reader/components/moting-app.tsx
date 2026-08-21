@@ -18,8 +18,10 @@ import {
   Headphones,
   Highlighter,
   Home,
+  Layers,
   Library,
   List,
+  Menu,
   LoaderCircle,
   MoreHorizontal,
   Pause,
@@ -55,6 +57,7 @@ import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
+import { useViewportFill } from "../hooks/use-viewport-fill";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
 import { AiRequestError, fetchAiModels, streamAiChat } from "../lib/ai";
 import {
@@ -77,9 +80,11 @@ import {
   getAllBooks,
   getAllChats,
   getAllNotes,
+  getAllSessions,
   getBookImage,
   getSettings,
   getStats,
+  saveSession,
   removeBook,
   removeNote,
   saveBook,
@@ -106,8 +111,17 @@ import {
   type PlayerVoice,
   type ReaderSettings,
   type ReaderTheme,
+  type ReadingSession,
   type ReadingStats,
 } from "../lib/types";
+import {
+  bookTotals,
+  dailySeconds,
+  groupSessionsByDay,
+  readingStreak,
+  totalSeconds,
+} from "../lib/reading-stats";
+import { useReadingSession } from "../hooks/use-reading-session";
 
 type ReaderFont = ReaderSettings["fontFamily"];
 
@@ -522,33 +536,28 @@ function formatSpan(seconds: number): string {
   return rest ? `${Math.floor(minutes / 60)} 时 ${rest} 分` : `${Math.floor(minutes / 60)} 时`;
 }
 
-/** 连续天数：今天还没读不算断，从昨天往回数。 */
-function readingStreak(days: Record<string, number>, now: number): number {
-  const cursor = new Date(now);
-  if ((days[dayKey(now)] ?? 0) < 60) cursor.setDate(cursor.getDate() - 1);
-  let streak = 0;
-  while ((days[dayKey(cursor.getTime())] ?? 0) >= 60) {
-    streak += 1;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-  return streak;
-}
-
 /** 主页看板：一笔圆相当今日进度环，缺口留在右上，下面七道墨痕是这一周。 */
 function ReadingBoard({
   stats,
+  sessions,
   onGoalChange,
 }: {
   stats: ReadingStats;
+  sessions: ReadingSession[];
   onGoalChange: (minutes: number) => void;
 }) {
   // 回到主页会重新挂载，所以每次进来都是当天的日期，不用再自己定时刷新。
   const [now] = useState(() => Date.now());
-  const todaySeconds = stats.days[dayKey(now)] ?? 0;
+  // 每天的总量由 session 现算，stats.days 只是早期版本留下的历史基数。
+  const days = useMemo(
+    () => dailySeconds(sessions, stats.days),
+    [sessions, stats.days]
+  );
+  const todaySeconds = days[dayKey(now)] ?? 0;
   const goalSeconds = stats.goalMinutes * 60;
   const ratio = Math.min(1, todaySeconds / goalSeconds);
-  const streak = readingStreak(stats.days, now);
-  const total = Object.values(stats.days).reduce((sum, item) => sum + item, 0);
+  const streak = readingStreak(days, now);
+  const total = totalSeconds(days);
 
   const week = Array.from({ length: 7 }, (_, offset) => {
     const date = new Date(now);
@@ -556,7 +565,7 @@ function ReadingBoard({
     return {
       key: dayKey(date.getTime()),
       label: WEEKDAY_LABELS[date.getDay()],
-      seconds: stats.days[dayKey(date.getTime())] ?? 0,
+      seconds: days[dayKey(date.getTime())] ?? 0,
       isToday: offset === 6,
     };
   });
@@ -657,9 +666,86 @@ function ReadingBoard({
   );
 }
 
+function dayLabel(key: string, now: number): string {
+  if (key === dayKey(now)) return "今天";
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (key === dayKey(yesterday.getTime())) return "昨天";
+  const [, month, day] = key.split("-");
+  return `${Number(month)} 月 ${Number(day)} 日`;
+}
+
+function clockLabel(time: number): string {
+  const date = new Date(time);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(
+    date.getMinutes()
+  ).padStart(2, "0")}`;
+}
+
+/** 阅读记录：按天倒序摊开每一段读/听，看得见具体读的哪本、从哪读到哪。 */
+function ReadingLog({ sessions }: { sessions: ReadingSession[] }) {
+  const [now] = useState(() => Date.now());
+  const [expanded, setExpanded] = useState(false);
+  const days = useMemo(() => groupSessionsByDay(sessions), [sessions]);
+  const totals = useMemo(() => bookTotals(sessions), [sessions]);
+  const shown = expanded ? days : days.slice(0, 3);
+
+  if (!days.length) return null;
+
+  return (
+    <section className="zen-log">
+      <h2 className="zen-log__title">阅读记录</h2>
+
+      {totals.length > 1 ? (
+        <div className="zen-log__books">
+          {totals.slice(0, 4).map((item) => (
+            <div key={item.bookId} className="zen-log__book">
+              <span>{item.bookTitle}</span>
+              <small>{formatSpan(item.seconds)}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {shown.map((day) => (
+        <div key={day.key} className="zen-log__day">
+          <div className="zen-log__day-head">
+            <span>{dayLabel(day.key, now)}</span>
+            <small>{formatSpan(day.seconds)}</small>
+          </div>
+          {day.sessions.map((session) => (
+            <div key={session.id} className="zen-log__entry">
+              <span className="zen-log__clock">{clockLabel(session.startedAt)}</span>
+              <span className="zen-log__book-name">{session.bookTitle}</span>
+              <span className="zen-log__kind">
+                {session.kind === "listen" ? "听" : "读"}
+              </span>
+              <span className="zen-log__span">{formatSpan(session.seconds)}</span>
+              <span className="zen-log__progress">
+                {Math.round(session.startPercent)}% → {Math.round(session.endPercent)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
+
+      {days.length > 3 ? (
+        <button
+          type="button"
+          className="zen-log__more"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起" : `展开全部 ${days.length} 天`}
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
 function HomeScreen({
   books,
   stats,
+  sessions,
   onOpenReader,
   onPlay,
   onOpenPlayer,
@@ -669,6 +755,7 @@ function HomeScreen({
 }: {
   books: Book[];
   stats: ReadingStats;
+  sessions: ReadingSession[];
   onOpenReader: (book: Book) => void;
   onPlay: (book: Book) => void;
   onOpenPlayer: (book: Book) => void;
@@ -763,7 +850,12 @@ function HomeScreen({
             </section>
           ) : null}
 
-          <ReadingBoard stats={stats} onGoalChange={onGoalChange} />
+          <ReadingBoard
+            stats={stats}
+            sessions={sessions}
+            onGoalChange={onGoalChange}
+          />
+          <ReadingLog sessions={sessions} />
         </>
       )}
     </div>
@@ -1997,6 +2089,11 @@ function ReaderPopover({
 /** 章节全文太长会把请求撑爆、也烧钱，只带前面这么多字，够回答「这章讲了什么」就行。 */
 const AI_CHAPTER_TEXT_LIMIT = 6000;
 
+/** 认定滚动方向所需的最小位移，低于这个数的抖动和回弹不算。 */
+const BAR_SCROLL_THRESHOLD = 12;
+/** 顶部这一段内不收顶栏，免得刚往下拨一点顶栏就跑了。 */
+const BAR_HIDE_AFTER = 48;
+
 const aiMarkdownComponents = {
   a: (props: ComponentPropsWithoutRef<"a">) => (
     <a {...props} target="_blank" rel="noreferrer noopener" />
@@ -2043,7 +2140,13 @@ function AiAskPanel({
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const chatRef = useRef<HTMLDivElement | null>(null);
+  const lastScrollTopRef = useRef(0);
+  const barHiddenRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const lastScrollRef = useRef(0);
+  // 自动滚到底（新回答进来时）不是用户手势，不该顺手把顶栏收掉。
+  const autoScrollRef = useRef(false);
 
   useScrollLock();
   useEffect(() => () => controllerRef.current?.abort(), []);
@@ -2144,7 +2247,13 @@ function AiAskPanel({
   };
 
   return (
-    <div className="ai-chat" role="dialog" aria-modal="true" aria-label="问 AI">
+    <div
+      className="ai-chat"
+      ref={chatRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label="问 AI"
+    >
       <header className="ai-chat__bar">
         <button
           type="button"
@@ -2153,7 +2262,7 @@ function AiAskPanel({
           aria-expanded={showPicker}
           onClick={() => setShowPicker((value) => !value)}
         >
-          <SlidersHorizontal size={20} />
+          <Menu size={24} />
         </button>
         <span className="ai-chat__title">{book.title}</span>
         <button
@@ -2162,7 +2271,7 @@ function AiAskPanel({
           aria-label="关闭"
           onClick={onClose}
         >
-          <X size={22} />
+          <X size={24} />
         </button>
       </header>
 
@@ -2172,8 +2281,25 @@ function AiAskPanel({
         </div>
       ) : null}
 
-      <div className="ai-chat__scroll" ref={scrollRef}>
-        <div className="ai-chat__thread">
+      <div
+        className="ai-chat__scroll"
+        ref={scrollRef}
+        onScroll={(event) => {
+          const top = event.currentTarget.scrollTop;
+          const last = lastScrollTopRef.current;
+          // 抖动和回弹都会触发 scroll，走够一段才认方向。
+          if (Math.abs(top - last) < BAR_SCROLL_THRESHOLD) return;
+          lastScrollTopRef.current = top;
+          const hidden = top > last && top > BAR_HIDE_AFTER;
+          if (hidden === barHiddenRef.current) return;
+          barHiddenRef.current = hidden;
+          // 走 DOM 属性而不是 state：滚动中重渲染整个面板（一堆 Markdown）就是卡顿本身。
+          chatRef.current?.toggleAttribute("data-immersive", hidden);
+        }}
+      >
+        <div
+          className={`ai-chat__thread${turns.length || isFreshQuote ? " ai-chat__thread--fill" : ""}`}
+        >
           {isFreshQuote ? (
             <section className="ai-chat__source">
               <span>正在讨论</span>
@@ -2270,7 +2396,7 @@ function AiAskPanel({
           <textarea
             ref={inputRef}
             rows={1}
-            placeholder={isFreshQuote ? "留空就是让 AI 讲讲这段话" : "问点什么"}
+            placeholder={isFreshQuote ? "留空就是让 AI 讲讲这段话" : "发消息或输入问题..."}
             value={question}
             onChange={(event) => {
               setQuestion(event.target.value);
@@ -2294,25 +2420,27 @@ function AiAskPanel({
               className="ai-chat__model-pill"
               onClick={() => setShowPicker((value) => !value)}
             >
-              <Sparkles size={14} />
+              <Layers size={15} />
               <span>{settings.aiModel || "选择模型"}</span>
               <ChevronDown
-                size={13}
+                size={14}
                 style={{ transform: showPicker ? "rotate(180deg)" : "rotate(0deg)" }}
               />
             </button>
-            <button
-              type="button"
-              className="ai-chat__send"
-              onClick={() => {
-                if (busy) controllerRef.current?.abort();
-                else void ask();
-              }}
-              disabled={!busy && !canSend}
-              aria-label={busy ? "停止回答" : "发送"}
-            >
-              {busy ? <Square size={14} fill="currentColor" /> : <ArrowUp size={21} />}
-            </button>
+            {/* 没东西可发就整个不渲染发送键，跟截图一样右侧留空。 */}
+            {busy || canSend ? (
+              <button
+                type="button"
+                className="ai-chat__send"
+                onClick={() => {
+                  if (busy) controllerRef.current?.abort();
+                  else void ask();
+                }}
+                aria-label={busy ? "停止回答" : "发送"}
+              >
+                {busy ? <Square size={14} fill="currentColor" /> : <ArrowUp size={21} />}
+              </button>
+            ) : null}
           </div>
         </div>
       </div>
@@ -3831,6 +3959,7 @@ function MiniPlayer({
 
 export default function MotingApp() {
   useKeyboardInset();
+  useViewportFill();
   const [books, setBooks] = useState<Book[]>([]);
   const [notes, setNotes] = useState<BookNote[]>([]);
   const [chats, setChats] = useState<BookAiChat[]>([]);
@@ -3839,6 +3968,7 @@ export default function MotingApp() {
   const [settings, setSettings] =
     useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [stats, setStats] = useState<ReadingStats>(DEFAULT_STATS);
+  const [sessions, setSessions] = useState<ReadingSession[]>([]);
   const [view, setView] = useState<AppView>({ name: "home" });
   const [showSettings, setShowSettings] = useState(false);
   const [ready, setReady] = useState(false);
@@ -3860,8 +3990,22 @@ export default function MotingApp() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getAllBooks(), getAllNotes(), getAllChats(), getSettings(), getStats()])
-      .then(async ([storedBooks, storedNotes, storedChats, storedSettings, storedStats]) => {
+    Promise.all([
+      getAllBooks(),
+      getAllNotes(),
+      getAllChats(),
+      getSettings(),
+      getStats(),
+      getAllSessions(),
+    ])
+      .then(async ([
+        storedBooks,
+        storedNotes,
+        storedChats,
+        storedSettings,
+        storedStats,
+        storedSessions,
+      ]) => {
         if (cancelled) return;
         if (!storedBooks.length) {
           const demo = createDemoBook();
@@ -3873,6 +4017,7 @@ export default function MotingApp() {
         setChats(storedChats);
         setSettings(storedSettings);
         setStats(storedStats);
+        setSessions(storedSessions);
       })
       .catch(() => {
         const demo = createDemoBook();
@@ -4084,43 +4229,37 @@ export default function MotingApp() {
     []
   );
 
-  // 打开阅读器就开始记时，页面切到后台的那段不算。跨天时按落账时刻归档。
   const isReading = view.name === "reader";
-  useEffect(() => {
-    if (!isReading) return;
-    let since = Date.now();
-    const take = () => {
-      const now = Date.now();
-      const elapsed = Math.round((now - since) / 1000);
-      since = now;
-      // 后台标签页的定时器会被压到几分钟一次，超过一轮的量当作没在读。
-      return elapsed > 0 && elapsed <= 90 ? elapsed : 0;
-    };
-    const record = (seconds: number) => {
-      if (!seconds) return;
-      updateStats((current) => {
-        const key = dayKey(Date.now());
-        return {
-          ...current,
-          days: { ...current.days, [key]: (current.days[key] ?? 0) + seconds },
-        };
-      });
-    };
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") record(take());
-      else since = Date.now();
-    }, 30000);
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") record(take());
-      else since = Date.now();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
-      if (document.visibilityState === "visible") record(take());
-    };
-  }, [isReading, updateStats]);
+
+  const persistSession = useCallback((session: ReadingSession) => {
+    setSessions((current) => {
+      const idx = current.findIndex((item) => item.id === session.id);
+      if (idx === -1) return [session, ...current];
+      const next = [...current];
+      next[idx] = session;
+      return next;
+    });
+    saveSession(session).catch(() => undefined);
+  }, []);
+
+  // 在放就按听算（锁屏后台也算），否则看是不是开着阅读器。两者都不是就不记。
+  const listeningBook = player.isPlaying ? activeBook : undefined;
+  const readingSessionTarget = listeningBook
+    ? {
+        bookId: listeningBook.id,
+        bookTitle: listeningBook.title,
+        kind: "listen" as const,
+        percent: listeningBook.listeningPosition?.percent ?? 0,
+      }
+    : isReading && selectedBook
+      ? {
+          bookId: selectedBook.id,
+          bookTitle: selectedBook.title,
+          kind: "read" as const,
+          percent: selectedBook.readingPosition?.percent ?? 0,
+        }
+      : null;
+  useReadingSession(readingSessionTarget, player.isPlaying, persistSession);
 
   // PWA 全屏时 iOS 用 theme-color 给状态栏那条填色。写死一个值的话，
   // 换书架或翻开书后状态栏和页面就裂成两块颜色，看着像没做全屏。
@@ -4366,6 +4505,7 @@ export default function MotingApp() {
     setNotes([]);
     setSettings(DEFAULT_SETTINGS);
     setStats(DEFAULT_STATS);
+    setSessions([]);
     setConfirmClear(false);
     setShowSettings(false);
     setView({ name: "home" });
@@ -4470,6 +4610,7 @@ export default function MotingApp() {
               <HomeScreen
                 books={books}
                 stats={stats}
+                sessions={sessions}
                 onOpenReader={(book) => openReader(book)}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}

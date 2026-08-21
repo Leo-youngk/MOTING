@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  buildEdgeSpeechBatches,
   buildSpeechBlocks,
   flattenChapter,
   initialPosition,
@@ -53,6 +54,7 @@ interface SpeechPlayerState {
   voices: PlayerVoice[];
   isPlaying: boolean;
   isPaused: boolean;
+  isBuffering: boolean;
   location: SpeechLocation | null;
   currentSentenceId: string;
   error: string;
@@ -80,6 +82,8 @@ function voiceScore(voice: SpeechSynthesisVoice): number {
 const CJK_CHARS_PER_SECOND = 5.2;
 const LATIN_CHARS_PER_SECOND = 15;
 const HIGHLIGHT_INTERVAL_MS = 100;
+/** 用户点击后的首段保持短小，真实设备通常数秒即可出声；后续仍走长批次。 */
+const QUICK_START_SPEECH_LENGTH = 360;
 
 function estimateCharsPerSecond(text: string, rate: number): number {
   const cjk = text.match(/[㐀-鿿]/g)?.length ?? 0;
@@ -164,6 +168,7 @@ export function useSpeechPlayer({
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
   const [location, setLocation] = useState<SpeechLocation | null>(null);
   const [currentSentenceId, setCurrentSentenceId] = useState("");
   const [error, setError] = useState("");
@@ -187,8 +192,14 @@ export function useSpeechPlayer({
   const abortRef = useRef<AbortController | null>(null);
   const prefetchRef = useRef<PrefetchEntry | null>(null);
   const edgeDownRef = useRef(false);
+  const waitingForClipRef = useRef(false);
   const playAtRef = useRef<
-    ((bookId: string, chapterIndex: number, sentenceIndex: number) => void) | null
+    ((
+      bookId: string,
+      chapterIndex: number,
+      sentenceIndex: number,
+      quickStart?: boolean
+    ) => void) | null
   >(null);
 
   useEffect(() => {
@@ -268,8 +279,10 @@ export function useSpeechPlayer({
   // 回到前台连「继续」都没得点。只置成暂停，原地等用户点一下。
   const holdForResume = useCallback((message: string) => {
     playingRef.current = false;
+    waitingForClipRef.current = false;
     setIsPlaying(false);
     setIsPaused(true);
+    setIsBuffering(false);
     setError(message);
   }, []);
 
@@ -287,6 +300,7 @@ export function useSpeechPlayer({
     tokenRef.current += 1;
     playingRef.current = false;
     engineRef.current = null;
+    waitingForClipRef.current = false;
     clearTimers();
     abortRef.current?.abort();
     abortRef.current = null;
@@ -309,13 +323,18 @@ export function useSpeechPlayer({
     setCurrentSentenceId("");
     setIsPlaying(false);
     setIsPaused(false);
+    setIsBuffering(false);
   }, [clearTimers, releaseClip, releasePrefetch, silenceAudio]);
 
-  const blocksFor = useCallback((chapter: Chapter): SpeechBlock[] => {
-    const cached = blocksCacheRef.current.get(chapter.id);
+  const blocksFor = useCallback((chapter: Chapter, engine: Engine): SpeechBlock[] => {
+    const key = `${engine}:${chapter.id}`;
+    const cached = blocksCacheRef.current.get(key);
     if (cached) return cached;
-    const blocks = buildSpeechBlocks(chapter);
-    blocksCacheRef.current.set(chapter.id, blocks);
+    const blocks =
+      engine === "edge"
+        ? buildEdgeSpeechBatches(chapter)
+        : buildSpeechBlocks(chapter);
+    blocksCacheRef.current.set(key, blocks);
     return blocks;
   }, []);
 
@@ -368,7 +387,12 @@ export function useSpeechPlayer({
   );
 
   const playAt = useCallback(
-    (bookId: string, chapterIndex: number, sentenceIndex: number) => {
+    (
+      bookId: string,
+      chapterIndex: number,
+      sentenceIndex: number,
+      quickStart = false
+    ) => {
       const book = booksRef.current.find((item) => item.id === bookId);
       if (!book) {
         setError("这本书已经不在书架中");
@@ -377,7 +401,15 @@ export function useSpeechPlayer({
       }
 
       const chapter = book.chapters[chapterIndex];
-      const blocks = chapter ? blocksFor(chapter) : [];
+      const voiceURI = settingsRef.current.voiceURI;
+      const useEdge =
+        !edgeDownRef.current && (!voiceURI || isEdgeVoiceURI(voiceURI));
+      const selectedEngine: Engine = useEdge ? "edge" : "system";
+      const blocks = chapter
+        ? useEdge && quickStart
+          ? buildEdgeSpeechBatches(chapter, QUICK_START_SPEECH_LENGTH)
+          : blocksFor(chapter, selectedEngine)
+        : [];
       if (!chapter || !blocks.length) {
         setError("当前章节没有可朗读内容");
         stop();
@@ -389,7 +421,7 @@ export function useSpeechPlayer({
           stop();
           return;
         }
-        playAtRef.current?.(bookId, chapterIndex + 1, 0);
+        playAtRef.current?.(bookId, chapterIndex + 1, 0, false);
       };
 
       let blockIndex = blocks.findIndex(
@@ -460,7 +492,7 @@ export function useSpeechPlayer({
           advanceChapter();
           return;
         }
-        playAtRef.current?.(bookId, chapterIndex, lastSentenceIndex + 1);
+        playAtRef.current?.(bookId, chapterIndex, lastSentenceIndex + 1, false);
       };
 
       const startSystem = () => {
@@ -475,6 +507,8 @@ export function useSpeechPlayer({
         }
 
         engineRef.current = "system";
+        waitingForClipRef.current = false;
+        setIsBuffering(false);
         silenceAudio();
         releaseClip();
         const utterance = new SpeechSynthesisUtterance(segment.text);
@@ -562,16 +596,28 @@ export function useSpeechPlayer({
         const voiceName = edgeVoiceName(settingsRef.current.voiceURI);
 
         const prefetchNext = () => {
-          const next = blocks[blockIndex + 1];
-          if (next?.text.trim()) {
-            prefetchClip(next.text, voiceName);
-            return;
-          }
-          // 本章最后一块没有下一块可预取，但章节交界处同样不能冷场，
-          // 提前把下一章开头备好，换章那一刻也走「无缝切换」。
-          const nextChapter = book.chapters[chapterIndex + 1];
-          const firstOfNext = nextChapter ? blocksFor(nextChapter)[0] : undefined;
-          if (firstOfNext?.text.trim()) prefetchClip(firstOfNext.text, voiceName);
+          const lastSentenceIndex =
+            segment.spans[segment.spans.length - 1].sentenceIndex;
+          const nextChapterIndex =
+            lastSentenceIndex >= chapter.sentenceCount - 1
+              ? chapterIndex + 1
+              : chapterIndex;
+          const nextSentenceIndex =
+            nextChapterIndex === chapterIndex ? lastSentenceIndex + 1 : 0;
+          const nextChapter = book.chapters[nextChapterIndex];
+          if (!nextChapter) return;
+
+          // 快速首段之后要预取的是“长批次的精确续点”，不能预取另一个短块，
+          // 否则首段读完还要重新等一次网络。
+          const nextBlocks = blocksFor(nextChapter, "edge");
+          const nextBlock = nextBlocks.find(
+            (block) =>
+              block.spans[block.spans.length - 1].sentenceIndex >=
+              nextSentenceIndex
+          );
+          if (!nextBlock) return;
+          const next = sliceSpeechBlock(nextBlock, nextSentenceIndex);
+          if (next.text.trim()) prefetchClip(next.text, voiceName);
         };
 
         const beginClip = (clip: ReadyClip) => {
@@ -588,6 +634,8 @@ export function useSpeechPlayer({
           audio.src = clip.url;
           if (previous) URL.revokeObjectURL(previous);
           audio.playbackRate = settingsRef.current.speechRate;
+          waitingForClipRef.current = false;
+          setIsBuffering(false);
           void audio.play().catch(() => {
             if (token !== tokenRef.current) return;
             holdForResume("播放被系统打断了，点一下继续");
@@ -617,6 +665,8 @@ export function useSpeechPlayer({
         waitingAudio.onerror = null;
         waitingAudio.loop = true;
         waitingAudio.src = silentClipUrl();
+        waitingForClipRef.current = true;
+        setIsBuffering(true);
         void waitingAudio.play().catch(() => undefined);
 
         const controller = new AbortController();
@@ -636,13 +686,22 @@ export function useSpeechPlayer({
             // 否则一句超长文本就能让后面整本书都变成机器音。
             const serviceDown =
               !(reason instanceof SpeechClipError) || reason.serviceDown;
-            if (serviceDown) {
-              edgeDownRef.current = true;
-              setError("云端语音暂不可用，已切换到系统朗读");
-            } else {
-              setError("这一段云端读不了，先用系统朗读");
-            }
-            startSystem();
+            edgeDownRef.current = true;
+            waitingForClipRef.current = false;
+            setIsBuffering(false);
+            setError(
+              serviceDown
+                ? "云端语音暂不可用，已切换到系统朗读"
+                : "这一段云端读不了，已切换到系统朗读"
+            );
+            // 云端批次远长于系统 utterance，必须按系统语音的小块重新定位，
+            // 不能把几千字直接塞进 SpeechSynthesisUtterance。
+            playAtRef.current?.(
+              bookId,
+              chapterIndex,
+              segment.spans[0].sentenceIndex,
+              true
+            );
           });
       };
 
@@ -650,9 +709,6 @@ export function useSpeechPlayer({
       setIsPlaying(true);
       setIsPaused(false);
 
-      const voiceURI = settingsRef.current.voiceURI;
-      const useEdge =
-        !edgeDownRef.current && (!voiceURI || isEdgeVoiceURI(voiceURI));
       if (useEdge) startEdge();
       else startSystem();
     },
@@ -684,7 +740,7 @@ export function useSpeechPlayer({
       blockedVoicesRef.current.clear();
       const nextPosition =
         position ?? book.listeningPosition ?? initialPosition(book);
-      playAt(bookId, nextPosition.chapterIndex, nextPosition.sentenceIndex);
+      playAt(bookId, nextPosition.chapterIndex, nextPosition.sentenceIndex, true);
     },
     [playAt]
   );
@@ -701,6 +757,11 @@ export function useSpeechPlayer({
         playingRef.current = false;
         setIsPlaying(false);
         setIsPaused(true);
+        setIsBuffering(false);
+        return;
+      }
+      if (waitingForClipRef.current) {
+        playAt(current.bookId, current.chapterIndex, current.sentenceIndex, true);
         return;
       }
       if (audio?.src && !audio.ended) {
@@ -710,7 +771,7 @@ export function useSpeechPlayer({
         void audio.play().catch(() => undefined);
         return;
       }
-      playAt(current.bookId, current.chapterIndex, current.sentenceIndex);
+      playAt(current.bookId, current.chapterIndex, current.sentenceIndex, true);
       return;
     }
 
@@ -728,14 +789,14 @@ export function useSpeechPlayer({
         setIsPaused(true);
         setIsPlaying(false);
       } else {
-        playAt(current.bookId, current.chapterIndex, current.sentenceIndex);
+        playAt(current.bookId, current.chapterIndex, current.sentenceIndex, true);
       }
       return;
     }
 
     // 已停止，重新起播；顺便给云端一次机会，之前的失败可能只是临时断网。
     edgeDownRef.current = false;
-    playAt(current.bookId, current.chapterIndex, current.sentenceIndex);
+    playAt(current.bookId, current.chapterIndex, current.sentenceIndex, true);
   }, [playAt]);
 
   const skipSentences = useCallback(
@@ -751,7 +812,7 @@ export function useSpeechPlayer({
         delta
       );
       if (!next) return;
-      playAt(book.id, next.chapterIndex, next.sentenceIndex);
+      playAt(book.id, next.chapterIndex, next.sentenceIndex, true);
     },
     [playAt]
   );
@@ -766,7 +827,7 @@ export function useSpeechPlayer({
         0,
         Math.min(book.chapters.length - 1, current.chapterIndex + delta)
       );
-      playAt(book.id, chapterIndex, 0);
+      playAt(book.id, chapterIndex, 0, true);
     },
     [playAt]
   );
@@ -903,6 +964,7 @@ export function useSpeechPlayer({
     voices,
     isPlaying,
     isPaused,
+    isBuffering,
     location,
     currentSentenceId,
     error,

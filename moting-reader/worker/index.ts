@@ -1,7 +1,7 @@
 /** Cloudflare Worker entry point. */
 import handler from "vinext/server/app-router-entry";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
-import { buildBoundaryTimeline } from "../lib/speech-timeline";
+import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
 import { synthesizeSpeech } from "./edge-tts";
 
 interface Env {
@@ -15,7 +15,9 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
-const MAX_TTS_TEXT_LENGTH = 400;
+const MAX_TTS_TEXT_LENGTH = 5000;
+const TTS_CHUNK_LENGTH = 360;
+const TTS_CONCURRENCY = 4;
 // 音色名会拼进 SSML 属性，必须限死格式，否则等于把 SSML 注入点暴露出去。
 const VOICE_PATTERN = /^[a-z]{2,3}-[A-Z]{2}-[A-Za-z]+Neural$/;
 
@@ -148,6 +150,28 @@ function frameResponse(
   return body;
 }
 
+async function synthesizeLongSpeech(text: string, voice: string) {
+  const chunks = splitSpeechText(text, TTS_CHUNK_LENGTH);
+  const results = new Array<Awaited<ReturnType<typeof synthesizeSpeech>>>(
+    chunks.length
+  );
+  let cursor = 0;
+
+  // 限制并发，既缩短长音频首播等待，也避免同时开太多上游 WebSocket。
+  const workers = Array.from(
+    { length: Math.min(TTS_CONCURRENCY, chunks.length) },
+    async () => {
+      while (cursor < chunks.length) {
+        const index = cursor;
+        cursor += 1;
+        results[index] = await synthesizeSpeech(chunks[index].text, voice);
+      }
+    }
+  );
+  await Promise.all(workers);
+  return joinSpeechChunks(chunks, results);
+}
+
 async function handleSpeech(
   request: Request,
   ctx: ExecutionContext
@@ -182,9 +206,9 @@ async function handleSpeech(
   if (cached) return cached;
 
   let audio: Uint8Array;
-  let boundaries;
+  let timeline;
   try {
-    ({ audio, boundaries } = await synthesizeSpeech(text, voice));
+    ({ audio, timeline } = await synthesizeLongSpeech(text, voice));
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "朗读服务不可用" },
@@ -196,7 +220,7 @@ async function handleSpeech(
     return Response.json({ error: "朗读服务没有返回音频" }, { status: 502 });
   }
 
-  const body = frameResponse(buildBoundaryTimeline(text, boundaries), audio);
+  const body = frameResponse(timeline, audio);
   const response = new Response(body, {
     headers: {
       "content-type": "application/octet-stream",

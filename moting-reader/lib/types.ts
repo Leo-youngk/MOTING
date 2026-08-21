@@ -210,7 +210,26 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   aiDeepThinking: false,
 };
 
-/** 每天的阅读秒数，键是本地时区的 YYYY-MM-DD。 */
+export type ReadingKind = "read" | "listen";
+
+/**
+ * 一段连续的阅读/收听。换书、换模式、跨天都会封账重开，
+ * 所以每条都能落到确定的某一天、某一本书上。
+ */
+export interface ReadingSession {
+  id: string;
+  bookId: string;
+  /** 冗余存一份书名：书删了历史记录也还读得出来。 */
+  bookTitle: string;
+  kind: ReadingKind;
+  startedAt: number;
+  endedAt: number;
+  seconds: number;
+  startPercent: number;
+  endPercent: number;
+}
+
+/** days 是早期版本留下的按天总数，只当历史基数用，不再往里写。 */
 export interface ReadingStats {
   days: Record<string, number>;
   goalMinutes: number;

@@ -1142,6 +1142,117 @@ button:disabled {
   }
 }
 
+.zen-log {
+  margin: 0 20px 30px;
+  padding: 22px 20px;
+  border-radius: 26px;
+  background: var(--surface);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent);
+}
+
+.zen-log__title {
+  margin: 0 0 14px;
+  font-family: var(--font-serif);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.zen-log__books {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.zen-log__book {
+  display: flex;
+  max-width: 100%;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  font-size: 12px;
+}
+
+.zen-log__book span {
+  overflow: hidden;
+  max-width: 9em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zen-log__book small {
+  color: var(--muted);
+}
+
+.zen-log__day + .zen-log__day {
+  margin-top: 16px;
+}
+
+.zen-log__day-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--subtle);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+}
+
+.zen-log__entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 0;
+  font-size: 12px;
+}
+
+.zen-log__clock {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 书名占住剩下的宽度，长标题截断，后面几项才不会被挤出去。 */
+.zen-log__book-name {
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zen-log__kind {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-deep);
+  font-size: 11px;
+}
+
+.zen-log__span {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.zen-log__progress {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.zen-log__more {
+  width: 100%;
+  margin-top: 16px;
+  padding: 10px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .book-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1793,49 +1904,74 @@ button:disabled {
   position: fixed;
   z-index: 120;
   inset: 0;
-  /* 底边停在键盘上沿，输入框才不会被键盘埋掉。dvh／inset:0 在 iOS 弹键盘时不缩，用它兜不住。 */
-  bottom: var(--keyboard-inset);
+  /* 键盘收起时底边往下探 --viewport-fill-bottom：standalone + black-translucent 下
+     布局视口比物理屏矮一截，不探就会在浮层底下露出一条 body 背景。
+     但那条带子只用来铺背景：它在布局视口之外，能不能完整显示不由我们说了算，
+     内容探进去就会被物理屏齐刷刷切掉（输入卡长高一点就露馅）。用等高的
+     padding 把内容整体挡回可视区内。 */
+  bottom: calc(-1 * var(--viewport-fill-bottom, 0px));
+  padding-bottom: var(--viewport-fill-bottom, 0px);
   display: flex;
   flex-direction: column;
+  --ai-bar-height: calc(env(safe-area-inset-top) + 64px);
   --ai-canvas: color-mix(in srgb, var(--surface) 94%, var(--paper));
+  --ai-canvas-deep: color-mix(in srgb, var(--ink) 7%, var(--ai-canvas));
   --ai-control: color-mix(in srgb, var(--ink) 6%, var(--ai-canvas));
-  background: var(--ai-canvas);
+  /* 顶部近白、往下压出一层冷灰，输入卡浮在最深的那头。 */
+  background: linear-gradient(180deg, var(--ai-canvas) 0%, var(--ai-canvas) 34%, var(--ai-canvas-deep) 100%);
   animation: fade-in 160ms ease both;
 }
 
+/* 顶栏浮在内容之上，不占布局位置。收放只动 transform 和 opacity——这两个是
+   合成器属性，不触发重排；之前用 margin-top 收占位，滚动时每帧都要重新布局
+   整个滚动容器，手感就是一顿一顿的。 */
 .ai-chat__bar {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  left: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 72px;
-  padding: calc(env(safe-area-inset-top) + 12px) 18px 12px;
+  min-height: var(--ai-bar-height);
+  padding: calc(env(safe-area-inset-top) + 10px) 20px 10px;
   background: var(--ai-canvas);
+  transition: transform 0.28s ease, opacity 0.2s ease;
+  will-change: transform;
 }
 
+/* 往下滚收起，往上滚放回来。 */
+.ai-chat[data-immersive] .ai-chat__bar {
+  transform: translateY(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 裸图标，没有圆底也没有描边——顶栏只剩三个符号浮在背景上。 */
 .ai-chat__bar-btn {
   display: inline-flex;
-  width: 48px;
-  height: 48px;
+  width: 44px;
+  height: 44px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--ink) 3%, var(--ai-canvas));
-  color: color-mix(in srgb, var(--ink) 72%, var(--muted));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 62%, transparent);
+  background: transparent;
+  color: color-mix(in srgb, var(--ink) 82%, transparent);
+  box-shadow: none;
 }
 
 .ai-chat__bar-btn:active {
-  transform: scale(0.96);
-  background: var(--ai-control);
+  opacity: 0.5;
 }
 
 .ai-chat__title {
   overflow: hidden;
   flex: 1;
   color: var(--ink);
-  font-family: var(--font-serif);
+  font-family: var(--font-sans);
   font-size: 17px;
   font-weight: 500;
   text-align: center;
@@ -1843,9 +1979,11 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* 顶栏脱离了文档流，这两块得自己让开它的高度。 */
 .ai-chat__picker {
   max-height: min(58dvh, 520px);
   overflow-y: auto;
+  margin-top: var(--ai-bar-height);
   padding: 14px 18px 18px;
   border-bottom: 1px solid var(--line-soft);
   background: var(--ai-canvas);
@@ -1854,8 +1992,11 @@ button:disabled {
 .ai-chat__scroll {
   flex: 1;
   overflow-y: auto;
+  padding-top: var(--ai-bar-height);
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-direction: column;
 }
 
 .ai-chat__thread {
@@ -1865,6 +2006,13 @@ button:disabled {
   gap: 30px;
   margin: 0 auto;
   padding: 18px 20px 68px;
+}
+
+/* 有实际对话内容时贴底显示，紧挨输入框，不留半截空白；内容多到溢出时
+   margin-top 不再有空间可占，自然从顶部开始正常滚动。纯欢迎语（.ai-chat__intro）
+   不走这条，保留它自己的居中留白。 */
+.ai-chat__thread--fill {
+  margin-top: auto;
 }
 
 .ai-chat__source {
@@ -1932,14 +2080,21 @@ button:disabled {
   width: min(100%, 720px);
   flex-direction: column;
   margin: 0 auto;
-  padding: 10px 16px calc(env(safe-area-inset-bottom) + 8px);
+  /* 不给 Home Indicator 留安全区，8px 只是让白卡的圆角浮起来、不被屏幕圆角切。 */
+  padding: 10px 16px 8px;
   border-top: 0;
   background: linear-gradient(
     to bottom,
     transparent,
-    var(--ai-canvas) 20px,
-    var(--ai-canvas)
+    var(--ai-canvas-deep) 24px,
+    var(--ai-canvas-deep)
   );
+}
+
+/* 键盘弹起时底边停在键盘上沿（不再往下探物理屏底，那块已被键盘盖住）。 */
+html[data-keyboard-open] .ai-chat {
+  bottom: var(--keyboard-inset);
+  padding-bottom: 0;
 }
 
 /* 键盘弹起时安全区在 standalone 下不保证归零，底部留白写死。 */
@@ -1953,12 +2108,12 @@ html[data-keyboard-open] .ai-chat__composer {
   align-items: center;
   gap: 6px;
   max-width: calc(100% - 12px);
-  padding: 8px 12px;
+  padding: 9px 14px;
   border: 0;
   border-radius: 980px;
-  background: color-mix(in srgb, var(--ink) 5%, var(--surface));
-  color: color-mix(in srgb, var(--ink) 74%, var(--muted));
-  font-size: 14px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  color: color-mix(in srgb, var(--accent-deep) 78%, var(--ink));
+  font-size: 15px;
 }
 
 .ai-chat__model-pill span {
@@ -1968,7 +2123,7 @@ html[data-keyboard-open] .ai-chat__composer {
 }
 
 .ai-chat__model-pill svg:first-child {
-  color: var(--accent);
+  color: var(--accent-deep);
 }
 
 .ai-chat__model-pill svg:last-child {
@@ -1978,19 +2133,17 @@ html[data-keyboard-open] .ai-chat__composer {
 .ai-chat__input {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 10px 10px 16px;
-  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
-  border-radius: 24px;
+  gap: 14px;
+  padding: 18px 12px 12px 18px;
+  border: 0;
+  border-radius: 30px;
   background: var(--surface);
-  box-shadow:
-    0 10px 28px color-mix(in srgb, var(--ink) 8%, transparent),
-    inset 0 1px rgb(255 255 255 / 45%);
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 7%, transparent);
 }
 
 .ai-chat__input textarea {
   width: 100%;
-  min-height: 26px;
+  min-height: 28px;
   max-height: 140px;
   padding: 0 2px;
   border: 0;
@@ -1998,7 +2151,7 @@ html[data-keyboard-open] .ai-chat__composer {
   background: transparent;
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1.5;
   resize: none;
 }
@@ -2028,14 +2181,8 @@ html[data-keyboard-open] .ai-chat__composer {
   transition: transform 140ms ease, opacity 140ms ease;
 }
 
-.ai-chat__send:active:not(:disabled) {
+.ai-chat__send:active {
   transform: scale(0.94);
-}
-
-.ai-chat__send:disabled {
-  background: var(--ai-control);
-  color: var(--subtle);
-  opacity: 1;
 }
 
 .ai-ask__quote {

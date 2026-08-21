@@ -338,6 +338,7 @@ export function flattenChapter(chapter: Chapter): Sentence[] {
 }
 
 const MAX_SPEECH_BLOCK_LENGTH = 240;
+export const MAX_EDGE_SPEECH_BATCH_LENGTH = 4800;
 
 export function buildSpeechBlocks(chapter: Chapter): SpeechBlock[] {
   const blocks: SpeechBlock[] = [];
@@ -374,6 +375,47 @@ export function buildSpeechBlocks(chapter: Chapter): SpeechBlock[] {
     flush();
   }
 
+  return blocks;
+}
+
+/**
+ * 云端语音会在 Worker 内部安全分片再拼回一条 MP3，因此客户端可以跨段落合成
+ * 一个长媒体资源。退到后台后由系统媒体管线连续播放，不必每几十秒唤醒 JS 换源。
+ */
+export function buildEdgeSpeechBatches(
+  chapter: Chapter,
+  maxLength = MAX_EDGE_SPEECH_BATCH_LENGTH
+): SpeechBlock[] {
+  const blocks: SpeechBlock[] = [];
+  let text = "";
+  let spans: SpeechSpan[] = [];
+  let sentenceIndex = 0;
+
+  const flush = () => {
+    if (spans.length && text.trim()) blocks.push({ text, spans });
+    text = "";
+    spans = [];
+  };
+
+  for (const paragraph of chapter.paragraphs) {
+    for (const sentence of paragraph.sentences) {
+      const speakable = sentence.speakableText || sentence.text;
+      if (text && text.length + speakable.length > maxLength) flush();
+      const separator =
+        !text || /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
+      const start = text.length + separator.length;
+      text += separator + speakable;
+      spans.push({
+        sentenceId: sentence.id,
+        sentenceIndex,
+        start,
+        end: text.length,
+      });
+      sentenceIndex += 1;
+    }
+  }
+
+  flush();
   return blocks;
 }
 

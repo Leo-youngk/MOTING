@@ -4,17 +4,19 @@ import type {
   BookImage,
   BookNote,
   ReaderSettings,
+  ReadingSession,
   ReadingStats,
 } from "./types";
 import { DEFAULT_SETTINGS, DEFAULT_STATS } from "./types";
 
 const DB_NAME = "moting-reader";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const BOOK_STORE = "books";
 const NOTE_STORE = "notes";
 const SETTINGS_STORE = "settings";
 const IMAGE_STORE = "images";
 const CHAT_STORE = "chats";
+const SESSION_STORE = "sessions";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -64,6 +66,10 @@ function openDatabase(): Promise<IDBDatabase> {
         // 一本书一条常驻对话，bookId 本身就是主键，不用像 notes 那样另建索引。
         db.createObjectStore(CHAT_STORE, { keyPath: "bookId" });
       }
+      if (!db.objectStoreNames.contains(SESSION_STORE)) {
+        const sessions = db.createObjectStore(SESSION_STORE, { keyPath: "id" });
+        sessions.createIndex("bookId", "bookId", { unique: false });
+      }
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -109,6 +115,7 @@ function deleteByBookId(store: IDBObjectStore, bookId: string): void {
   };
 }
 
+/** 阅读记录不跟着删：书没了，那段时间也确实读过。 */
 export async function removeBook(bookId: string): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(
@@ -188,6 +195,24 @@ export async function saveChat(chat: BookAiChat): Promise<void> {
   await transactionDone(transaction);
 }
 
+export async function getAllSessions(): Promise<ReadingSession[]> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SESSION_STORE, "readonly");
+  const sessions = await requestToPromise(
+    transaction.objectStore(SESSION_STORE).getAll() as IDBRequest<
+      ReadingSession[]
+    >
+  );
+  return sessions.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+export async function saveSession(session: ReadingSession): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SESSION_STORE, "readwrite");
+  transaction.objectStore(SESSION_STORE).put(session);
+  await transactionDone(transaction);
+}
+
 export async function getSettings(): Promise<ReaderSettings> {
   const db = await openDatabase();
   const transaction = db.transaction(SETTINGS_STORE, "readonly");
@@ -225,7 +250,14 @@ export async function saveStats(stats: ReadingStats): Promise<void> {
 export async function clearLibrary(): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(
-    [BOOK_STORE, NOTE_STORE, SETTINGS_STORE, IMAGE_STORE, CHAT_STORE],
+    [
+      BOOK_STORE,
+      NOTE_STORE,
+      SETTINGS_STORE,
+      IMAGE_STORE,
+      CHAT_STORE,
+      SESSION_STORE,
+    ],
     "readwrite"
   );
   transaction.objectStore(BOOK_STORE).clear();
@@ -233,5 +265,6 @@ export async function clearLibrary(): Promise<void> {
   transaction.objectStore(SETTINGS_STORE).clear();
   transaction.objectStore(IMAGE_STORE).clear();
   transaction.objectStore(CHAT_STORE).clear();
+  transaction.objectStore(SESSION_STORE).clear();
   await transactionDone(transaction);
 }
