@@ -72,6 +72,8 @@ export interface Book {
   author: string;
   format: BookFormat;
   fileName?: string;
+  /** 同一在线版本只导入一次，删除后可重新下载。 */
+  onlineSourceId?: string;
   coverDataUrl?: string;
   accent: string;
   status: BookStatus;

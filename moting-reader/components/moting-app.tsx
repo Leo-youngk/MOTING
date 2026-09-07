@@ -75,6 +75,8 @@ import {
 } from "../lib/content";
 import { createDemoBook } from "../lib/demo";
 import { parseBookFile } from "../lib/parsers";
+import { OnlineLibrary } from "./online-library";
+import "./online-library.css";
 import {
   clearLibrary,
   getAllBooks,
@@ -89,6 +91,7 @@ import {
   removeNote,
   saveBook,
   saveBookImages,
+  saveImportedBook,
   saveChat,
   saveNote,
   saveSettings,
@@ -866,6 +869,7 @@ function HomeScreen({
 function LibraryScreen({
   books,
   onImport,
+  onOnlineImport,
   onOpen,
   onPlay,
   onOpenNotes,
@@ -873,6 +877,7 @@ function LibraryScreen({
 }: {
   books: Book[];
   onImport: () => void;
+  onOnlineImport: (file: File, sourceId: string, onProgress: (label: string) => void) => Promise<void>;
   onOpen: (book: Book) => void;
   onPlay: (book: Book) => void;
   onOpenNotes: (book: Book) => void;
@@ -880,6 +885,7 @@ function LibraryScreen({
 }) {
   const [query, setQuery] = useState("");
   const [sheetBook, setSheetBook] = useState<Book | null>(null);
+  const [online, setOnline] = useState(false);
 
   const filtered = books.filter((book) =>
     `${book.title} ${book.author}`.toLowerCase().includes(query.toLowerCase())
@@ -901,6 +907,12 @@ function LibraryScreen({
         }
       />
 
+      <div className="library-segments" role="group" aria-label="书库来源">
+        <button type="button" aria-pressed={!online} onClick={() => setOnline(false)}>本地书库</button>
+        <button type="button" aria-pressed={online} onClick={() => setOnline(true)}>在线找书</button>
+      </div>
+
+      {online ? <OnlineLibrary books={books} onImport={onOnlineImport} onOpen={onOpen} /> : <>
       <label className="ios-search">
         <Search size={16} />
         <input
@@ -974,6 +986,8 @@ function LibraryScreen({
           )}
         </>
       )}
+
+      </>}
 
       {sheetBook ? (
         <Modal title={sheetBook.title} onClose={() => setSheetBook(null)}>
@@ -4696,6 +4710,15 @@ export default function MotingApp() {
     if (!failed) setImportFileName("");
   };
 
+  const handleOnlineImport = async (file: File, sourceId: string, onProgress: (label: string) => void) => {
+    if (books.some((book) => book.onlineSourceId === sourceId)) return;
+    const { book, images } = await parseBookFile(file, (progress) => onProgress(progress.label));
+    book.onlineSourceId = sourceId;
+    onProgress("正在保存到本地书库…");
+    await saveImportedBook(book, images);
+    setBooks((current) => [book, ...current]);
+  };
+
   const openReader = (book: Book, position?: BookPosition) => {
     const nextPosition =
       position ?? book.readingPosition ?? initialPosition(book);
@@ -4976,6 +4999,7 @@ export default function MotingApp() {
               <LibraryScreen
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
+                onOnlineImport={handleOnlineImport}
                 onOpen={(book) => openReader(book)}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenNotes={(book) =>

@@ -1,0 +1,39 @@
+# 在线找书
+
+## 范围
+
+在书库切换到「在线找书」，按书名或作者搜索 Z-Library，选择格式与版本后直接下载并自动解析入库。继续使用原有本地阅读、听书与 IndexedDB，不增加云端书库或新部署服务。
+
+目标站点固定为用户提供的 `https://zh.z-lib.gd`。不要求粘贴书籍链接。支持 EPUB、文字型 PDF、TXT、Markdown，沿用 80 MB 导入上限。同一在线版本通过 `onlineSourceId` 识别；删除后可以重新导入。
+
+## 接口依据
+
+- https://github.com/bipinkrish/Zlibrary-API/blob/main/Zlibrary.py ：EAPI 搜索、书籍文件接口、会话 Cookie 协议。
+- https://github.com/ZlibraryKO/zlibrary.koplugin/blob/main/zlibrary/api.lua ：当前网站 `rpc.php` 登录参数和 `response.user_id/user_key`，搜索分页、下载次数限制处理。
+- https://github.com/ZlibraryKO/zlibrary.koplugin/blob/main/zlibrary/config.lua ：当前登录与搜索路径。
+
+此处独立实现 TypeScript/Web Fetch 客户端，参考通信协议，没有复制或嵌入 Python/Lua 库源码，也不增加 Python 运行时。
+
+## 实现
+
+- `worker/zlibrary.ts`：同源 POST 接口；服务端转发固定站点，登录密码不持久化，会话通过当前设备 HttpOnly / SameSite=Strict Cookie 保存，HTTPS 部署设置 Secure。上游登录过期清除会话。退出只清除此设备连接。
+- `lib/zlibrary.ts`：搜索与文件流下载、取消、超时、下载中断和网页响应检查。
+- `components/online-library.tsx`：搜索、格式选择、结果分页、登录、加入书库、重复版本识别。
+- `lib/storage.ts`：正文与插图在同一 IndexedDB 事务保存，避免保存失败留下半本书。
+
+所有响应 `no-store`，所有入口采用 POST，避免 PWA Service Worker 缓存账号或下载响应。账号 Cookie 不转发到文件 CDN；下载地址只能由固定站点的书籍接口提供。协议异常、站点拦截和配额不足明确显示错误，没有假结果或自动切换其他书源。
+
+## 验证要求
+
+运行 typecheck、构建及 Node 测试；浏览器按 iPhone 尺寸检查登录、搜索、分页、取消、成功导入、重复识别、错误状态与页面宽度。协议夹具只存在测试文件中。真实端到端验证与夹具测试分开记录，未取得真实登录或下载结果时不声称已跑通。
+
+### 2026-09-07 本地验证结果
+
+- `npm run typecheck` 通过。
+- `npm test`：构建与 Cloudflare 产物校验通过，56 项测试通过，其中 13 项覆盖在线书源协议及失败路径。
+- 新增 TypeScript/TSX 文件的 ESLint 检查通过；全仓库 `npm run lint` 仍受已有代码及 `.wrangler` 临时文件错误影响，不属于本次修改范围。
+- `python tests/online-library-browser.py` 通过：真实 Worker 会话路由 + 明确标注的书源夹具，覆盖密码错误、登录、搜索、分页去重、超大文件、取消下载、连接失败、网页伪装文件、EPUB 实际解析入库、刷新后重复识别、打开正文、空结果、会话过期。
+- 375 / 390 / 430 像素手机视口均无横向溢出，无浏览器页面错误；搜索区域高度在空结果与加载完成后保持固定。截图保存在忽略目录 `.wrangler/online-library-tests/`。真机 iOS 手势未验证。
+- Wrangler 部署预检通过，构建产物中未发现部署凭据。
+
+部署凭据位于项目根下的 `.env.deploy.local`（Git 忽略），通过 Node `process.loadEnvFile()` 读取后再启动 Wrangler，不把凭据放进命令行。该文件只用于部署，与用户的 Z-Library 登录无关。

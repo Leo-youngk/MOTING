@@ -138,6 +138,15 @@ export async function saveBookImages(images: BookImage[]): Promise<void> {
   await transactionDone(transaction);
 }
 
+/** 在线导入将正文与插图放在同一个事务，存储失败时不留下半本书。 */
+export async function saveImportedBook(book: Book, images: BookImage[]): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction([BOOK_STORE, IMAGE_STORE], "readwrite");
+  transaction.objectStore(BOOK_STORE).put(book);
+  for (const image of images) transaction.objectStore(IMAGE_STORE).put(image);
+  await transactionDone(transaction);
+}
+
 export async function getBookImage(
   imageId: string
 ): Promise<BookImage | undefined> {

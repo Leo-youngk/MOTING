@@ -3,6 +3,7 @@ import handler from "vinext/server/app-router-entry";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
 import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
 import { synthesizeSpeech } from "./edge-tts";
+import { handleZlibrary } from "./zlibrary";
 
 interface Env {
   ASSETS: {
@@ -238,6 +239,7 @@ const worker = {
     ctx: ExecutionContext
   ): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    if (pathname.startsWith("/api/zlibrary/")) return handleZlibrary(request);
     if (pathname === "/api/tts") {
       return handleSpeech(request, ctx);
     }
