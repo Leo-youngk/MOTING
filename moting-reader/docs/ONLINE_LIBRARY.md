@@ -4,7 +4,7 @@
 
 在书库切换到「在线找书」，按书名或作者搜索 Z-Library，选择格式与版本后直接下载并自动解析入库。继续使用原有本地阅读、听书与 IndexedDB，不增加云端书库或新部署服务。
 
-目标站点固定为用户提供的 `https://zh.z-lib.gd`。不要求粘贴书籍链接。支持 EPUB、文字型 PDF、TXT、Markdown，沿用 80 MB 导入上限。同一在线版本通过 `onlineSourceId` 识别；删除后可以重新导入。
+目标站点固定为用户提供的 `https://zh.z-lib.gd`。不要求粘贴书籍链接。支持 EPUB、文字型 PDF、TXT、Markdown，单个文件上限 20 MB。同一在线版本通过 `onlineSourceId` 识别；删除后可以重新导入。
 
 ## 接口依据
 

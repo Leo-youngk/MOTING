@@ -3,6 +3,7 @@ import type {
   BookAiChat,
   BookImage,
   BookNote,
+  BookPosition,
   ReaderSettings,
   ReadingSession,
   ReadingStats,
@@ -17,8 +18,15 @@ const SETTINGS_STORE = "settings";
 const IMAGE_STORE = "images";
 const CHAT_STORE = "chats";
 const SESSION_STORE = "sessions";
+const READING_POSITION_PREFIX = "reading-position:";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+
+interface StoredReadingPosition {
+  position: BookPosition;
+  lastOpenedAt: number;
+  savedAt: number;
+}
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -44,7 +52,7 @@ function openDatabase(): Promise<IDBDatabase> {
   }
   if (dbPromise) return dbPromise;
 
-  dbPromise = new Promise((resolve, reject) => {
+  const promise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -76,26 +84,70 @@ function openDatabase(): Promise<IDBDatabase> {
       // 别的页面要升级数据库时让出连接，否则它会一直卡在 blocked。
       db.onversionchange = () => {
         db.close();
-        dbPromise = null;
+        if (dbPromise === promise) dbPromise = null;
+      };
+      db.onclose = () => {
+        if (dbPromise === promise) dbPromise = null;
       };
       resolve(db);
     };
-    request.onerror = () =>
+    request.onerror = () => {
+      if (dbPromise === promise) dbPromise = null;
       reject(request.error ?? new Error("无法打开浏览器本地书库"));
-    request.onblocked = () =>
+    };
+    request.onblocked = () => {
+      if (dbPromise === promise) dbPromise = null;
       reject(new Error("请关闭其他正在使用墨听的页面后重试"));
+    };
   });
+  dbPromise = promise;
 
   return dbPromise;
 }
 
+function readingPositionKey(bookId: string): string {
+  return `${READING_POSITION_PREFIX}${bookId}`;
+}
+
 export async function getAllBooks(): Promise<Book[]> {
   const db = await openDatabase();
-  const transaction = db.transaction(BOOK_STORE, "readonly");
-  const books = await requestToPromise(
-    transaction.objectStore(BOOK_STORE).getAll() as IDBRequest<Book[]>
-  );
-  return books.sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
+  const transaction = db.transaction([BOOK_STORE, SETTINGS_STORE], "readonly");
+  const booksRequest = transaction.objectStore(BOOK_STORE).getAll() as IDBRequest<Book[]>;
+  const settingsStore = transaction.objectStore(SETTINGS_STORE);
+  const settingsRequest = settingsStore.getAll() as IDBRequest<unknown[]>;
+  const keysRequest = settingsStore.getAllKeys();
+  const [books, settings, keys] = await Promise.all([
+    requestToPromise(booksRequest),
+    requestToPromise(settingsRequest),
+    requestToPromise(keysRequest),
+  ]);
+  const positions = new Map<string, StoredReadingPosition>();
+  keys.forEach((key, index) => {
+    if (typeof key !== "string" || !key.startsWith(READING_POSITION_PREFIX)) return;
+    const value = settings[index];
+    if (!value || typeof value !== "object") return;
+    const record = value as Partial<StoredReadingPosition>;
+    if (
+      !record.position ||
+      typeof record.savedAt !== "number" ||
+      !Number.isFinite(record.savedAt) ||
+      typeof record.lastOpenedAt !== "number" ||
+      !Number.isFinite(record.lastOpenedAt)
+    ) return;
+    positions.set(key.slice(READING_POSITION_PREFIX.length), record as StoredReadingPosition);
+  });
+  return books
+    .map((book) => {
+      const record = positions.get(book.id);
+      if (!record || record.savedAt <= book.updatedAt) return book;
+      return {
+        ...book,
+        readingPosition: record.position,
+        lastOpenedAt: Math.max(book.lastOpenedAt, record.lastOpenedAt),
+        updatedAt: record.savedAt,
+      };
+    })
+    .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
 }
 
 export async function saveBook(book: Book): Promise<void> {
@@ -119,22 +171,40 @@ function deleteByBookId(store: IDBObjectStore, bookId: string): void {
 export async function removeBook(bookId: string): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(
-    [BOOK_STORE, NOTE_STORE, IMAGE_STORE, CHAT_STORE],
+    [BOOK_STORE, NOTE_STORE, IMAGE_STORE, CHAT_STORE, SETTINGS_STORE],
     "readwrite"
   );
   transaction.objectStore(BOOK_STORE).delete(bookId);
   deleteByBookId(transaction.objectStore(NOTE_STORE), bookId);
   deleteByBookId(transaction.objectStore(IMAGE_STORE), bookId);
   transaction.objectStore(CHAT_STORE).delete(bookId);
+  transaction.objectStore(SETTINGS_STORE).delete(readingPositionKey(bookId));
   await transactionDone(transaction);
 }
 
-export async function saveBookImages(images: BookImage[]): Promise<void> {
-  if (!images.length) return;
+/** 只保存阅读位置，不复制整本正文；正文仍由 saveBook 负责持久化。 */
+export async function saveReadingPositions(
+  entries: Array<{
+    bookId: string;
+    position: BookPosition;
+    lastOpenedAt: number;
+    savedAt: number;
+  }>
+): Promise<void> {
+  if (!entries.length) return;
   const db = await openDatabase();
-  const transaction = db.transaction(IMAGE_STORE, "readwrite");
-  const store = transaction.objectStore(IMAGE_STORE);
-  for (const image of images) store.put(image);
+  const transaction = db.transaction(SETTINGS_STORE, "readwrite");
+  const store = transaction.objectStore(SETTINGS_STORE);
+  for (const entry of entries) {
+    store.put(
+      {
+        position: entry.position,
+        lastOpenedAt: entry.lastOpenedAt,
+        savedAt: entry.savedAt,
+      } satisfies StoredReadingPosition,
+      readingPositionKey(entry.bookId)
+    );
+  }
   await transactionDone(transaction);
 }
 

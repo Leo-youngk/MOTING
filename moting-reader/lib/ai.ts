@@ -11,13 +11,18 @@ export class AiRequestError extends Error {
   }
 }
 
-export async function fetchAiModels(baseUrl: string, apiKey: string): Promise<string[]> {
+export async function fetchAiModels(
+  baseUrl: string,
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<string[]> {
   let response: Response;
   try {
     response = await fetch("/api/ai/models", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ baseUrl, apiKey }),
+      signal,
     });
   } catch {
     throw new AiRequestError("连不上服务器，稍后再试");
@@ -81,32 +86,39 @@ export async function streamAiChat(options: AiChatOptions, onDelta: (delta: AiSt
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  const processLine = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return false;
+    const payload = trimmed.slice(5).trim();
+    if (payload === "[DONE]") return true;
+    let parsed: {
+      choices?: { delta?: { content?: string; reasoning_content?: string } }[];
+    } | null = null;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return false;
+    }
+    const delta = parsed?.choices?.[0]?.delta;
+    if (delta && (delta.content || delta.reasoning_content)) {
+      onDelta({ content: delta.content, reasoning: delta.reasoning_content });
+    }
+    return false;
+  };
 
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice(5).trim();
-      if (payload === "[DONE]") return;
-      let parsed: {
-        choices?: { delta?: { content?: string; reasoning_content?: string } }[];
-      } | null = null;
-      try {
-        parsed = JSON.parse(payload);
-      } catch {
-        continue;
-      }
-      const delta = parsed?.choices?.[0]?.delta;
-      if (!delta) continue;
-      if (delta.content || delta.reasoning_content) {
-        onDelta({ content: delta.content, reasoning: delta.reasoning_content });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      if (lines.some(processLine)) return;
+      if (done) {
+        if (buffer) processLine(buffer);
+        break;
       }
     }
+  } finally {
+    reader.releaseLock();
   }
 }

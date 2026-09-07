@@ -3,8 +3,10 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { BookOpen, Check, Download, LoaderCircle, Search, UserRound, X } from "lucide-react";
 import { downloadZlibrary, getZlibrarySession, loginZlibrary, logoutZlibrary, searchZlibrary, ZlibraryError } from "../lib/zlibrary";
+import { MAX_BOOK_FILE_LABEL } from "../lib/file-limits";
 import { ONLINE_BOOK_FORMATS, ONLINE_BOOK_MAX_BYTES, type OnlineBook } from "../lib/zlibrary-types";
 import type { Book } from "../lib/types";
+import "./online-library.css";
 
 export function OnlineLibrary({ books, onImport, onOpen }: {
   books: Book[];
@@ -170,7 +172,7 @@ export function OnlineLibrary({ books, onImport, onOpen }: {
           <input aria-label="在线搜索书名或作者" placeholder="搜索书名或作者" value={query} maxLength={200} onChange={(event) => setQuery(event.target.value)} enterKeyHint="search" disabled={!!downloading} />
           {query ? <button type="button" aria-label="清除在线搜索" onClick={() => setQuery("")} disabled={!!downloading}><X size={15} /></button> : null}
         </label>
-        <button className="primary-button" disabled={!query.trim() || !!downloading || authBusy} type="submit">搜索</button>
+        <button className="primary-button" disabled={!query.trim() || !!downloading || authBusy || searching} type="submit">搜索</button>
       </form>
       <div className="online-toolbar">
         <label>格式 <select aria-label="在线书籍格式" value={format} onChange={(event) => setFormat(event.target.value)} disabled={!!downloading}>
@@ -214,7 +216,7 @@ export function OnlineLibrary({ books, onImport, onOpen }: {
                 <div className="online-book__action">
                   <button type="button" className="secondary-button" disabled={!!downloading || searching || (!existing && (!supported || tooLarge))} onClick={() => existing ? onOpen(existing) : void addBook(book)}>
                     {existing ? <Check size={14} /> : active ? <LoaderCircle size={14} /> : <Download size={14} />}
-                    {existing ? "已加入 · 阅读" : active ? "处理中…" : tooLarge ? "超过 80 MB" : !supported ? "格式暂不支持" : "加入书库"}
+                    {existing ? "已加入 · 阅读" : active ? "处理中…" : tooLarge ? `超过 ${MAX_BOOK_FILE_LABEL}` : !supported ? "格式暂不支持" : "加入书库"}
                   </button>
                   {active && !saving ? <button type="button" className="text-button" onClick={() => { downloadController.current?.abort(); setNotice("已取消下载"); }}>取消</button> : null}
                 </div>

@@ -95,7 +95,7 @@ with sync_playwright() as playwright:
     page.get_by_label("在线搜索书名或作者").fill("测试 & 作者")
     page.get_by_role("button", name="搜索", exact=True).click()
     expect(page.get_by_role("heading", name="在线导入测试", exact=True)).to_be_visible()
-    expect(page.get_by_role("button", name="超过 80 MB")).to_be_disabled()
+    expect(page.get_by_role("button", name="超过 20 MB")).to_be_disabled()
     page.get_by_role("button", name="更多结果").click()
     expect(page.locator(".online-book")).to_have_count(3)
     assert state["searches"][-1]["page"] == 2

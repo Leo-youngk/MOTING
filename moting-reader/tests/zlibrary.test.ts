@@ -9,6 +9,7 @@ function request(action: string, body: object = {}, headers: Record<string, stri
   return new Request(`https://reader.example/api/zlibrary/${action}`, { method: "POST", headers: { "content-type": "application/json", origin: "https://reader.example", ...headers }, body: JSON.stringify(body) });
 }
 function reply(data: unknown) { return Response.json(data); }
+async function responseJson<T>(response: Response): Promise<T> { return (await response.json()) as T; }
 function fetcher(fn: (url: string, init?: RequestInit) => Response | Promise<Response>): typeof fetch {
   return async (url, init) => fn(String(url), init);
 }
@@ -36,7 +37,8 @@ test("login uses current website protocol and returns only HttpOnly session cook
 test("incorrect login is surfaced instead of accepting a validation response", async () => {
   const response = await handleZlibrary(request("login", { email: "reader@example.org", password: "wrong" }), fetcher(() => reply({ errors: [], response: { validationError: true, message: "Incorrect email or password" } })));
   assert.equal(response.status, 401);
-  assert.match((await response.json()).error, /邮箱或密码/);
+  const data = await responseJson<{ error: string }>(response);
+  assert.match(data.error, /邮箱或密码/);
   assert.equal(response.headers.getSetCookie().length, 0);
 });
 
@@ -56,14 +58,31 @@ test("search encodes Chinese query, forwards only its account, normalizes result
     assert.equal(form.get("message"), "书名 & 作者");
     assert.equal(form.get("page"), "2");
     assert.equal(form.get("extensions[0]"), "epub");
-    assert.equal(new Headers(init?.headers).get("cookie"), "siteLanguageV2=zh; remix_userid=123; remix_userkey=test_session_key_123");
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("cookie"), "siteLanguageV2=zh; remix_userid=123; remix_userkey=test_session_key_123");
+    assert.equal(headers.get("remix-userid"), "123");
+    assert.equal(headers.get("remix-userkey"), "test_session_key_123");
+    assert.equal(headers.get("x-requested-with"), "XMLHttpRequest");
     return reply({ success: 1, books: [{ ...sample, id: 18, extension: "pdf" }, sample], pagination: { total_items: 43 } });
   }));
-  const data = await response.json();
+  const data = await responseJson<{ books: Array<{ extension: string; bytes: number }>; page: number; hasMore: boolean }>(response);
   assert.equal(data.books[0].extension, "epub");
   assert.equal(data.books[0].bytes, 2048);
   assert.equal(data.page, 2);
   assert.equal(data.hasMore, true);
+});
+
+test("search retries one transient upstream stall and reuses the form body", async () => {
+  let calls = 0;
+  const response = await handleZlibrary(request("search", { query: "重试测试" }), fetcher((_url, init) => {
+    calls += 1;
+    assert.equal(String(init?.body), "message=%E9%87%8D%E8%AF%95%E6%B5%8B%E8%AF%95&page=1&limit=20&extensions%5B0%5D=epub&extensions%5B1%5D=pdf&extensions%5B2%5D=txt&extensions%5B3%5D=md");
+    if (calls === 1) throw new Error("upstream timeout");
+    return reply({ success: 1, books: [{ ...sample, id: 19 }] });
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(calls, 2);
+  assert.equal((await responseJson<{ books: unknown[] }>(response)).books.length, 1);
 });
 
 test("guest search and exact match response are supported", async () => {
@@ -73,17 +92,17 @@ test("guest search and exact match response are supported", async () => {
     assert.equal(form.has("extensions[1]"), false);
     return reply({ success: 1, exactMatch: { books: [{ ...sample, extension: "pdf" }] } });
   }));
-  assert.equal((await response.json()).books.length, 1);
+  assert.equal((await responseJson<{ books: unknown[] }>(response)).books.length, 1);
 });
 
 test("malformed upstream JSON and changed schemas do not masquerade as empty searches", async () => {
   for (const make of [() => new Response("<html>Verify</html>"), () => reply({ success: 1 }), () => reply({ books: [{ title: "missing identity" }] })]) {
     const response = await handleZlibrary(request("search", { query: "测试" }), fetcher(make));
     assert.equal(response.status, 502);
-    assert.ok((await response.json()).error);
+    assert.ok((await responseJson<{ error?: unknown }>(response)).error);
   }
   const empty = await handleZlibrary(request("search", { query: "测试" }), fetcher(() => reply({ books: [] })));
-  assert.deepEqual((await empty.json()).books, []);
+  assert.deepEqual((await responseJson<{ books: unknown[] }>(empty)).books, []);
 });
 
 test("auth rejection clears an expired session and opens a re-login path", async () => {

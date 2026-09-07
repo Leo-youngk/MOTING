@@ -11,6 +11,7 @@ import {
   makeId,
   normalizeWhitespace,
 } from "./content";
+import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "./file-limits";
 import type {
   BlockKind,
   Book,
@@ -28,7 +29,6 @@ export interface ParsedBook {
   images: BookImage[];
 }
 
-const MAX_FILE_SIZE = 80 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 24 * 1024 * 1024;
 
 function report(
@@ -561,8 +561,8 @@ export async function parseBookFile(
   file: File,
   onProgress?: ProgressCallback
 ): Promise<ParsedBook> {
-  if (file.size > MAX_FILE_SIZE) {
-    throw new Error("文件超过 80 MB，请先压缩或拆分后再导入");
+  if (file.size > MAX_BOOK_FILE_BYTES) {
+    throw new Error(MAX_BOOK_FILE_ERROR);
   }
 
   const extension = extensionOf(file.name);

@@ -36,15 +36,18 @@ export function useReadingSession(
   const listeningRef = useRef(listening);
   const persistRef = useRef(persist);
   const stateRef = useRef<SessionState>(EMPTY_SESSION_STATE);
-  const lastActiveRef = useRef(Date.now());
+  const lastActiveRef = useRef<number | null>(null);
 
-  targetRef.current = target;
-  listeningRef.current = listening;
-  persistRef.current = persist;
+  useEffect(() => {
+    targetRef.current = target;
+    listeningRef.current = listening;
+    persistRef.current = persist;
+  }, [target, listening, persist]);
 
   const key = target ? `${target.kind}:${target.bookId}` : "";
 
   useEffect(() => {
+    lastActiveRef.current = Date.now();
     const tick = () => {
       const current = targetRef.current;
       const now = Date.now();
@@ -52,7 +55,7 @@ export function useReadingSession(
         current?.kind === "listen"
           ? listeningRef.current
           : document.visibilityState === "visible" &&
-            now - lastActiveRef.current < IDLE_MS;
+            now - (lastActiveRef.current ?? now) < IDLE_MS;
       const { state, closed } = advanceSession(
         stateRef.current,
         current ? { ...current, countable, now } : null

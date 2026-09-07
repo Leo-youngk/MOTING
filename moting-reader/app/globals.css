@@ -3409,6 +3409,12 @@ html[data-keyboard-open] .bottom-bar {
   text-wrap: pretty;
 }
 
+/* 连续阅读只让视口附近的段落参与布局，分页模式保留完整多栏测量。 */
+.reader-shell.is-scroll .reader-article .reader-block {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
+
 .reader-article .reader-block.is-heading {
   margin: 2em 0 0.9em;
   font-weight: 600;

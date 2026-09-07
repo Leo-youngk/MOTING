@@ -5,34 +5,158 @@ import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
 import { synthesizeSpeech } from "./edge-tts";
 import { handleZlibrary } from "./zlibrary";
 
-interface Env {
-  ASSETS: {
-    fetch(request: Request): Promise<Response>;
-  };
-}
-
-interface ExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
-  passThroughOnException(): void;
-}
-
 const MAX_TTS_TEXT_LENGTH = 5000;
 const TTS_CHUNK_LENGTH = 360;
 const TTS_CONCURRENCY = 4;
+const MAX_TTS_AUDIO_BYTES = 20 * 1024 * 1024;
+const MAX_AI_MODELS_BODY_BYTES = 32 * 1024;
+const MAX_AI_CHAT_BODY_BYTES = 512 * 1024;
+const MAX_TTS_BODY_BYTES = 64 * 1024;
+const MAX_AI_MODELS_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_AI_ERROR_RESPONSE_BYTES = 64 * 1024;
+const AI_MODELS_TIMEOUT_MS = 30000;
+const AI_CHAT_TIMEOUT_MS = 120000;
 // 音色名会拼进 SSML 属性，必须限死格式，否则等于把 SSML 注入点暴露出去。
 const VOICE_PATTERN = /^[a-z]{2,3}-[A-Z]{2}-[A-Za-z]+Neural$/;
 
+type AiRole = "system" | "user" | "assistant";
+
+interface AiMessage {
+  role: AiRole;
+  content: string;
+}
+
+class PayloadError extends Error {
+  constructor(
+    message: string,
+    readonly status: number = 400
+  ) {
+    super(message);
+    this.name = "PayloadError";
+  }
+}
+
+async function readJsonBody(request: Request, maxBytes: number): Promise<unknown> {
+  const contentLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new PayloadError("请求体过大", 413);
+  }
+  const reader = request.body?.getReader();
+  if (!reader) throw new PayloadError("请求体为空", 400);
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        throw new PayloadError("请求体过大", 413);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(body)) as unknown;
+  } catch {
+    throw new PayloadError("请求体不是合法 JSON", 400);
+  }
+}
+
+async function readResponseText(response: Response, maxBytes: number): Promise<string> {
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new PayloadError("上游响应过大", 502);
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        throw new PayloadError("上游响应过大", 502);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return decoder.decode(body);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringField(value: unknown, maxLength: number): string | null {
+  return typeof value === "string" && value.length <= maxLength ? value : null;
+}
+
+function normalizeMessages(value: unknown): AiMessage[] | null {
+  if (!Array.isArray(value) || value.length > 50) return null;
+  let totalLength = 0;
+  const messages: AiMessage[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) return null;
+    const role = item.role;
+    const content = stringField(item.content, 20000);
+    if ((role !== "system" && role !== "user" && role !== "assistant") || content === null) {
+      return null;
+    }
+    totalLength += content.length;
+    if (totalLength > 256000) return null;
+    messages.push({ role, content });
+  }
+  return messages;
+}
+
 function aiError(message: string, status: number): Response {
-  return Response.json({ error: { message } }, { status });
+  return Response.json(
+    { error: { message } },
+    { status, headers: { "cache-control": "no-store" } }
+  );
 }
 
 /** 用户填的接口地址，转发前只做最基本的校验：必须是 https，防止拿这个转发口子当开放代理打内网/奇怪协议。 */
 function normalizeAiBaseUrl(raw: unknown): string | null {
-  if (typeof raw !== "string" || !raw.trim()) return null;
+  if (typeof raw !== "string" || !raw.trim() || raw.length > 2048) return null;
   const trimmed = raw.trim().replace(/\/+$/, "");
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== "https:") return null;
+    const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    const blockedHost =
+      host === "localhost" ||
+      host.endsWith(".local") ||
+      host.endsWith(".internal") ||
+      host === "::1" ||
+      host.startsWith("127.") ||
+      host.startsWith("10.") ||
+      host.startsWith("192.168.") ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+      host.startsWith("169.254.");
+    if (blockedHost) return null;
     return trimmed;
   } catch {
     return null;
@@ -44,54 +168,73 @@ function normalizeAiBaseUrl(raw: unknown): string | null {
 async function handleAiModels(request: Request): Promise<Response> {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
-  let payload: { baseUrl?: unknown; apiKey?: unknown };
+  let payload: Record<string, unknown>;
   try {
-    payload = (await request.json()) as typeof payload;
-  } catch {
-    return aiError("请求体不是合法 JSON", 400);
+    const body = await readJsonBody(request, MAX_AI_MODELS_BODY_BYTES);
+    if (!isRecord(body)) throw new PayloadError("请求格式不对", 400);
+    payload = body;
+  } catch (error) {
+    return aiError(
+      error instanceof PayloadError ? error.message : "请求体不是合法 JSON",
+      error instanceof PayloadError ? error.status : 400
+    );
   }
 
   const baseUrl = normalizeAiBaseUrl(payload.baseUrl);
   if (!baseUrl) return aiError("接口地址无效，必须是 https 开头", 400);
-  const apiKey = typeof payload.apiKey === "string" ? payload.apiKey : "";
+  const apiKey = stringField(payload.apiKey ?? "", 4096);
+  if (apiKey === null) return aiError("API Key 过长", 400);
 
   let upstream: Response;
   try {
     upstream = await fetch(`${baseUrl}/models`, {
       headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(AI_MODELS_TIMEOUT_MS)]),
     });
   } catch {
     return aiError("连不上这个接口地址，检查地址是否正确", 502);
   }
 
-  const body = await upstream.text();
-  return new Response(body, {
-    status: upstream.status,
-    headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
-  });
+  try {
+    const body = await readResponseText(upstream, MAX_AI_MODELS_RESPONSE_BYTES);
+    return new Response(body, {
+      status: upstream.status,
+      headers: {
+        "cache-control": "no-store",
+        "content-type": upstream.headers.get("content-type") ?? "application/json",
+      },
+    });
+  } catch (error) {
+    return aiError(
+      error instanceof PayloadError ? error.message : "上游响应读取失败",
+      error instanceof PayloadError ? error.status : 502
+    );
+  }
 }
 
 async function handleAiChat(request: Request): Promise<Response> {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
-  let payload: {
-    baseUrl?: unknown;
-    apiKey?: unknown;
-    model?: unknown;
-    messages?: unknown;
-    deepThinking?: unknown;
-  };
+  let payload: Record<string, unknown>;
   try {
-    payload = (await request.json()) as typeof payload;
-  } catch {
-    return aiError("请求体不是合法 JSON", 400);
+    const body = await readJsonBody(request, MAX_AI_CHAT_BODY_BYTES);
+    if (!isRecord(body)) throw new PayloadError("请求格式不对", 400);
+    payload = body;
+  } catch (error) {
+    return aiError(
+      error instanceof PayloadError ? error.message : "请求体不是合法 JSON",
+      error instanceof PayloadError ? error.status : 400
+    );
   }
 
   const baseUrl = normalizeAiBaseUrl(payload.baseUrl);
   if (!baseUrl) return aiError("接口地址无效，必须是 https 开头", 400);
-  if (typeof payload.model !== "string" || !payload.model) return aiError("没有指定模型", 400);
-  if (!Array.isArray(payload.messages)) return aiError("消息格式不对", 400);
-  const apiKey = typeof payload.apiKey === "string" ? payload.apiKey : "";
+  const model = stringField(payload.model, 200)?.trim();
+  if (!model) return aiError("没有指定模型", 400);
+  const messages = normalizeMessages(payload.messages);
+  if (!messages) return aiError("消息格式不对或内容过长", 400);
+  const apiKey = stringField(payload.apiKey ?? "", 4096);
+  if (apiKey === null) return aiError("API Key 过长", 400);
 
   let upstream: Response;
   try {
@@ -102,26 +245,41 @@ async function handleAiChat(request: Request): Promise<Response> {
         ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
       },
       body: JSON.stringify({
-        model: payload.model,
-        messages: payload.messages,
+        model,
+        messages,
         stream: true,
         ...(payload.deepThinking ? { enable_thinking: true } : {}),
       }),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(AI_CHAT_TIMEOUT_MS)]),
     });
   } catch {
     return aiError("连不上这个接口地址，检查地址是否正确", 502);
   }
 
   if (!upstream.ok || !upstream.body) {
-    const detail = await upstream.text();
-    return new Response(detail || JSON.stringify({ error: { message: `AI 服务返回 ${upstream.status}` } }), {
-      status: upstream.status,
-      headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
-    });
+    try {
+      const detail = await readResponseText(upstream, MAX_AI_ERROR_RESPONSE_BYTES);
+      return new Response(detail || JSON.stringify({ error: { message: `AI 服务返回 ${upstream.status}` } }), {
+        status: upstream.status,
+        headers: {
+          "cache-control": "no-store",
+          "content-type": upstream.headers.get("content-type") ?? "application/json",
+        },
+      });
+    } catch (error) {
+      return aiError(
+        error instanceof PayloadError ? error.message : `AI 服务返回 ${upstream.status}`,
+        error instanceof PayloadError ? error.status : upstream.status
+      );
+    }
   }
 
   return new Response(upstream.body, {
-    headers: { "content-type": upstream.headers.get("content-type") ?? "text/event-stream" },
+    headers: {
+      "cache-control": "no-store",
+      "content-type": upstream.headers.get("content-type") ?? "text/event-stream",
+      "x-content-type-options": "nosniff",
+    },
   });
 }
 
@@ -151,12 +309,17 @@ function frameResponse(
   return body;
 }
 
-async function synthesizeLongSpeech(text: string, voice: string) {
+async function synthesizeLongSpeech(
+  text: string,
+  voice: string,
+  signal: AbortSignal
+) {
   const chunks = splitSpeechText(text, TTS_CHUNK_LENGTH);
   const results = new Array<Awaited<ReturnType<typeof synthesizeSpeech>>>(
     chunks.length
   );
   let cursor = 0;
+  let audioBytes = 0;
 
   // 限制并发，既缩短长音频首播等待，也避免同时开太多上游 WebSocket。
   const workers = Array.from(
@@ -165,7 +328,12 @@ async function synthesizeLongSpeech(text: string, voice: string) {
       while (cursor < chunks.length) {
         const index = cursor;
         cursor += 1;
-        results[index] = await synthesizeSpeech(chunks[index].text, voice);
+        const result = await synthesizeSpeech(chunks[index].text, voice, signal);
+        audioBytes += result.audio.byteLength;
+        if (audioBytes > MAX_TTS_AUDIO_BYTES) {
+          throw new Error("朗读音频过大");
+        }
+        results[index] = result;
       }
     }
   );
@@ -181,11 +349,16 @@ async function handleSpeech(
     return new Response("Method Not Allowed", { status: 405 });
   }
 
-  let payload: { text?: unknown; voice?: unknown };
+  let payload: Record<string, unknown>;
   try {
-    payload = (await request.json()) as typeof payload;
-  } catch {
-    return Response.json({ error: "请求体不是合法 JSON" }, { status: 400 });
+    const body = await readJsonBody(request, MAX_TTS_BODY_BYTES);
+    if (!isRecord(body)) throw new PayloadError("请求格式不对", 400);
+    payload = body;
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof PayloadError ? error.message : "请求体不是合法 JSON" },
+      { status: error instanceof PayloadError ? error.status : 400 }
+    );
   }
 
   const text = typeof payload.text === "string" ? payload.text.trim() : "";
@@ -209,7 +382,7 @@ async function handleSpeech(
   let audio: Uint8Array;
   let timeline;
   try {
-    ({ audio, timeline } = await synthesizeLongSpeech(text, voice));
+    ({ audio, timeline } = await synthesizeLongSpeech(text, voice, request.signal));
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "朗读服务不可用" },
@@ -228,7 +401,13 @@ async function handleSpeech(
       "cache-control": "public, max-age=31536000, immutable",
     },
   });
-  ctx.waitUntil(cache.put(key, response.clone()));
+  ctx.waitUntil(
+    cache.put(key, response.clone()).catch((error) => {
+      console.warn("tts_cache_put_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    })
+  );
   return response;
 }
 
@@ -251,6 +430,6 @@ const worker = {
     }
     return handler.fetch(request, env, ctx);
   },
-};
+} satisfies ExportedHandler<Env>;
 
 export default worker;

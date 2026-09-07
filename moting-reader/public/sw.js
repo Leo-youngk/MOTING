@@ -1,6 +1,6 @@
 // SHELL 里的文件名不带内容哈希，缓存又是 cache-first，
 // 改了 manifest 或图标就必须顺手把版本号加一，否则已装的 PWA 永远拿旧的。
-const CACHE_NAME = "moting-shell-v7";
+const CACHE_NAME = "moting-shell-v8";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -45,7 +45,11 @@ self.addEventListener("fetch", (event) => {
       fetch(request)
         .then((response) => {
           const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put("/", copy));
+          event.waitUntil(
+            caches.open(CACHE_NAME)
+              .then((cache) => cache.put("/", copy))
+              .catch(() => undefined)
+          );
           return response;
         })
         .catch(() => caches.match("/"))
@@ -60,7 +64,11 @@ self.addEventListener("fetch", (event) => {
         fetch(request).then((response) => {
           if (response.ok) {
             const copy = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+            event.waitUntil(
+              caches.open(CACHE_NAME)
+                .then((cache) => cache.put(request, copy))
+                .catch(() => undefined)
+            );
           }
           return response;
         })

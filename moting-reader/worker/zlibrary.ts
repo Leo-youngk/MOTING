@@ -1,12 +1,21 @@
 // 协议参考：bipinkrish/Zlibrary-API 与 ZlibraryKO/zlibrary.koplugin。
 // 独立的 Web Fetch 实现；凭据仅用于用户指定的站点，不转交下载 CDN。
+import { MAX_BOOK_FILE_ERROR } from "../lib/file-limits.ts";
 import { ONLINE_BOOK_FORMATS, ONLINE_BOOK_MAX_BYTES, ZLIBRARY_ORIGIN, type OnlineBook } from "../lib/zlibrary-types.ts";
 
 type Json = Record<string, unknown>;
 type Fetcher = typeof fetch;
 const PAGE_SIZE = 20;
+const SEARCH_TIMEOUT_MS = 15_000;
+const SEARCH_RETRY_DELAY_MS = 250;
 const COOKIE_ID = "moting_zlib_id";
 const COOKIE_KEY = "moting_zlib_key";
+const RETRYABLE_UPSTREAM_STATUS = new Set([408, 425, 500, 502, 503, 504]);
+
+interface ApiOptions {
+  timeoutMs?: number;
+  retryTransient?: boolean;
+}
 
 class ServiceError extends Error {
   status: number;
@@ -85,31 +94,89 @@ async function readJson(response: Response, limit: number): Promise<Json> {
   }
 }
 
-async function api(path: string, request: Request, fetcher: Fetcher, form?: URLSearchParams): Promise<Json> {
+function waitForRetry(request: Request, delayMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (request.signal.aborted) {
+      reject(request.signal.reason ?? new DOMException("请求已取消", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      request.signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(request.signal.reason ?? new DOMException("请求已取消", "AbortError"));
+    };
+    request.signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function api(path: string, request: Request, fetcher: Fetcher, form?: URLSearchParams, options: ApiOptions = {}): Promise<Json> {
   const credentials = session(request);
-  const headers = new Headers({ accept: "application/json", "accept-language": "zh-CN,zh;q=0.9", "user-agent": "Mozilla/5.0", origin: ZLIBRARY_ORIGIN, referer: `${ZLIBRARY_ORIGIN}/` });
+  const headers = new Headers({
+    accept: "application/json, text/javascript, */*; q=0.01",
+    "accept-language": "zh-CN,zh;q=0.9",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    origin: ZLIBRARY_ORIGIN,
+    referer: `${ZLIBRARY_ORIGIN}/`,
+  });
   headers.set("cookie", `siteLanguageV2=zh${credentials ? `; remix_userid=${credentials.id}; remix_userkey=${credentials.key}` : ""}`);
-  if (form) headers.set("content-type", "application/x-www-form-urlencoded; charset=UTF-8");
-  if (path === "/rpc.php") headers.set("x-requested-with", "XMLHttpRequest");
-  let response: Response;
-  try {
-    response = await fetcher(`${ZLIBRARY_ORIGIN}${path}`, { method: form ? "POST" : "GET", headers, body: form, redirect: "manual", signal: AbortSignal.any([request.signal, AbortSignal.timeout(25_000)]) });
-  } catch {
-    throw new ServiceError("暂时连接不上 zh.z-lib.gd，请稍后重试", 503);
+  if (credentials) {
+    // 部分 EAPI 入口只读取请求头，部分入口只读取 Cookie；两种都带上才能保持登录会话。
+    headers.set("remix-userid", credentials.id);
+    headers.set("remix-userkey", credentials.key);
   }
-  if (response.status >= 300 && response.status < 400) {
-    await response.body?.cancel();
-    throw new ServiceError("Z-Library 要求跳转到其他页面，当前接口暂时不可用");
+  if (form) {
+    headers.set("content-type", "application/x-www-form-urlencoded; charset=UTF-8");
+    headers.set("x-requested-with", "XMLHttpRequest");
   }
-  if (!response.ok) {
-    await response.body?.cancel();
-    if (response.status === 401) throw new ServiceError("请先登录 Z-Library", 401);
-    if (response.status === 429) throw new ServiceError("Z-Library 请求或下载次数已达上限，请稍后重试", 429);
-    throw new ServiceError(`Z-Library 返回 ${response.status}${response.status === 403 ? "，当前请求被网站拦截" : "，请稍后重试"}`);
+
+  const maxAttempts = options.retryTransient ? 2 : 1;
+  const timeoutMs = options.timeoutMs ?? 25_000;
+  const body = form?.toString();
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetcher(`${ZLIBRARY_ORIGIN}${path}`, {
+        method: form ? "POST" : "GET",
+        headers,
+        body,
+        redirect: "manual",
+        cache: "no-store",
+        signal: AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)]),
+      });
+    } catch (error) {
+      if (request.signal.aborted) throw error;
+      if (attempt + 1 < maxAttempts) {
+        console.warn("zlibrary_upstream_retry", { path, attempt: attempt + 1, reason: "network" });
+        await waitForRetry(request, SEARCH_RETRY_DELAY_MS);
+        continue;
+      }
+      throw new ServiceError("暂时连接不上 zh.z-lib.gd，请稍后重试", 503);
+    }
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      throw new ServiceError("Z-Library 要求跳转到其他页面，当前接口暂时不可用");
+    }
+    if (!response.ok) {
+      const retryable = options.retryTransient && RETRYABLE_UPSTREAM_STATUS.has(response.status);
+      if (retryable && attempt + 1 < maxAttempts) {
+        await response.body?.cancel();
+        console.warn("zlibrary_upstream_retry", { path, attempt: attempt + 1, reason: `http_${response.status}` });
+        await waitForRetry(request, SEARCH_RETRY_DELAY_MS);
+        continue;
+      }
+      await response.body?.cancel();
+      if (response.status === 401) throw new ServiceError("请先登录 Z-Library", 401);
+      if (response.status === 429) throw new ServiceError("Z-Library 请求或下载次数已达上限，请稍后重试", 429);
+      throw new ServiceError(`Z-Library 返回 ${response.status}${response.status === 403 ? "，当前请求被网站拦截" : "，请稍后重试"}`);
+    }
+    const data = await readJson(response, 2 * 1024 * 1024);
+    if (data.success === false || data.success === 0 || data.error) failUpstream(data, "Z-Library 未能完成请求");
+    return data;
   }
-  const data = await readJson(response, 2 * 1024 * 1024);
-  if (data.success === false || data.success === 0 || data.error) failUpstream(data, "Z-Library 未能完成请求");
-  return data;
+  throw new ServiceError("Z-Library 请求失败，请稍后重试");
 }
 
 function normalizeBook(raw: unknown): OnlineBook | null {
@@ -167,7 +234,7 @@ async function download(request: Request, payload: Json, fetcher: Fetcher): Prom
   const length = Number(response.headers.get("content-length")) || 0;
   if (/html|json/i.test(type) || length > ONLINE_BOOK_MAX_BYTES) {
     await response.body.cancel();
-    throw new ServiceError(length > ONLINE_BOOK_MAX_BYTES ? "文件超过 80 MB，暂时无法导入" : "下载返回了网页而非书籍文件，请重新登录后重试", 422);
+    throw new ServiceError(length > ONLINE_BOOK_MAX_BYTES ? MAX_BOOK_FILE_ERROR : "下载返回了网页而非书籍文件，请重新登录后重试", 422);
   }
   const filename = `${text(file.description).replace(/[<>:"/\\|?*\x00-\x1f]/g, " ").trim().slice(0, 140) || id}.${extension}`;
   const headers = new Headers({ "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", "x-book-filename": encodeURIComponent(filename), "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}` });
@@ -176,7 +243,7 @@ async function download(request: Request, payload: Json, fetcher: Fetcher): Prom
   const limited = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       received += chunk.byteLength;
-      if (received > ONLINE_BOOK_MAX_BYTES) throw new Error("Book exceeds 80 MB");
+      if (received > ONLINE_BOOK_MAX_BYTES) throw new Error(MAX_BOOK_FILE_ERROR);
       controller.enqueue(chunk);
     },
     flush() {
@@ -213,7 +280,7 @@ export async function handleZlibrary(request: Request, fetcher: Fetcher = fetch)
       if (format && !(ONLINE_BOOK_FORMATS as readonly string[]).includes(format)) throw new ServiceError("不支持这个文件格式", 400);
       const form = new URLSearchParams({ message: query, page: String(page), limit: String(PAGE_SIZE) });
       (format ? [format] : ONLINE_BOOK_FORMATS).forEach((value, index) => form.append(`extensions[${index}]`, value));
-      const data = await api("/eapi/book/search", request, fetcher, form);
+      const data = await api("/eapi/book/search", request, fetcher, form, { timeoutMs: SEARCH_TIMEOUT_MS, retryTransient: true });
       const raw = Array.isArray(data.books) ? data.books : object(data.exactMatch).books;
       if (!Array.isArray(raw)) throw new ServiceError("Z-Library 搜索结果格式已变化，暂时无法读取");
       const books = raw.map(normalizeBook).filter((book): book is OnlineBook => !!book);

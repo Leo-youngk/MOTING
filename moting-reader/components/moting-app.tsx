@@ -40,8 +40,9 @@ import {
 } from "lucide-react";
 import {
   Fragment,
+  lazy,
+  Suspense,
   type ChangeEvent,
-  type ComponentPropsWithoutRef,
   type CSSProperties,
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -54,8 +55,6 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
@@ -74,9 +73,7 @@ import {
   withImageSizes,
 } from "../lib/content";
 import { createDemoBook } from "../lib/demo";
-import { parseBookFile } from "../lib/parsers";
-import { OnlineLibrary } from "./online-library";
-import "./online-library.css";
+import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "../lib/file-limits";
 import {
   clearLibrary,
   getAllBooks,
@@ -90,8 +87,8 @@ import {
   removeBook,
   removeNote,
   saveBook,
-  saveBookImages,
   saveImportedBook,
+  saveReadingPositions,
   saveChat,
   saveNote,
   saveSettings,
@@ -124,6 +121,25 @@ import {
   totalSeconds,
 } from "../lib/reading-stats";
 import { useReadingSession } from "../hooks/use-reading-session";
+
+const OnlineLibrary = lazy(() =>
+  import("./online-library").then(({ OnlineLibrary: Component }) => ({
+    default: Component,
+  }))
+);
+const LazyAiMarkdown = lazy(() =>
+  import("./ai-markdown").then(({ AiMarkdown: Component }) => ({
+    default: Component,
+  }))
+);
+
+function AiMarkdown({ content }: { content: string }) {
+  return (
+    <Suspense fallback={<span className="ai-markdown-loading">正在排版…</span>}>
+      <LazyAiMarkdown content={content} />
+    </Suspense>
+  );
+}
 
 type ReaderFont = ReaderSettings["fontFamily"];
 
@@ -912,7 +928,11 @@ function LibraryScreen({
         <button type="button" aria-pressed={online} onClick={() => setOnline(true)}>在线找书</button>
       </div>
 
-      {online ? <OnlineLibrary books={books} onImport={onOnlineImport} onOpen={onOpen} /> : <>
+      {online ? (
+        <Suspense fallback={<div className="online-loading">正在打开在线书库…</div>}>
+          <OnlineLibrary books={books} onImport={onOnlineImport} onOpen={onOpen} />
+        </Suspense>
+      ) : <>
       <label className="ios-search">
         <Search size={16} />
         <input
@@ -1169,7 +1189,7 @@ function NotesCalendar({
   const month = cursor.getMonth();
   const firstWeekday = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const todayKey = dayKey(Date.now());
+  const [todayKey] = useState(() => dayKey(Date.now()));
   const monthKey = `${year}-${String(month + 1).padStart(2, "0")}`;
   const monthHasNotes = Array.from(countsByDay.keys()).some((key) =>
     key.startsWith(monthKey)
@@ -1643,27 +1663,42 @@ function AiModelPicker({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
+  const [baseUrl, setBaseUrl] = useState(settings.aiBaseUrl);
+  const [apiKey, setApiKey] = useState(settings.aiApiKey);
+  const modelControllerRef = useRef<AbortController | null>(null);
+  const initialLoadRef = useRef(false);
 
-  const loadModels = async () => {
-    if (!settings.aiBaseUrl.trim()) return;
+  const loadModels = useCallback(async (nextBaseUrl = baseUrl, nextApiKey = apiKey) => {
+    if (!nextBaseUrl.trim()) return;
+    modelControllerRef.current?.abort();
+    const controller = new AbortController();
+    modelControllerRef.current = controller;
     setLoading(true);
     setError("");
     try {
-      const list = await fetchAiModels(settings.aiBaseUrl, settings.aiApiKey);
+      const list = await fetchAiModels(nextBaseUrl, nextApiKey, controller.signal);
+      if (controller.signal.aborted) return;
       setModels(list);
-      if (!settings.aiModel && list[0]) onChange({ ...settings, aiModel: list[0] });
+      if (!settings.aiModel && list[0]) {
+        onChange({ ...settings, aiBaseUrl: nextBaseUrl, aiApiKey: nextApiKey, aiModel: list[0] });
+      }
     } catch (err) {
-      setError(err instanceof AiRequestError ? err.message : "获取模型列表失败");
+      if (!controller.signal.aborted) {
+        setError(err instanceof AiRequestError ? err.message : "获取模型列表失败");
+      }
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
-  };
+  }, [apiKey, baseUrl, onChange, settings]);
 
   // 面板一打开、地址之前就填过的话，不该等用户点进输入框再点出来才去拉列表。
   useEffect(() => {
-    loadModels();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (initialLoadRef.current || !baseUrl.trim()) return;
+    initialLoadRef.current = true;
+    const timer = window.setTimeout(() => void loadModels(), 0);
+    return () => window.clearTimeout(timer);
+  }, [baseUrl, loadModels]);
+  useEffect(() => () => modelControllerRef.current?.abort(), []);
 
   const visible = query.trim()
     ? models.filter((model) =>
@@ -1690,24 +1725,26 @@ function AiModelPicker({
           <input
             type="text"
             inputMode="url"
-            value={settings.aiBaseUrl}
+            value={baseUrl}
             placeholder="https://api.example.com/v1"
-            onChange={(event) =>
-              onChange({ ...settings, aiBaseUrl: event.target.value })
-            }
-            onBlur={loadModels}
+            onChange={(event) => setBaseUrl(event.target.value)}
+            onBlur={() => {
+              onChange({ ...settings, aiBaseUrl: baseUrl, aiApiKey: apiKey });
+              void loadModels(baseUrl, apiKey);
+            }}
           />
         </label>
         <label className="ai-setup__field">
           <span>API Key</span>
           <input
             type="password"
-            value={settings.aiApiKey}
+            value={apiKey}
             placeholder="sk-…"
-            onChange={(event) =>
-              onChange({ ...settings, aiApiKey: event.target.value })
-            }
-            onBlur={loadModels}
+            onChange={(event) => setApiKey(event.target.value)}
+            onBlur={() => {
+              onChange({ ...settings, aiBaseUrl: baseUrl, aiApiKey: apiKey });
+              void loadModels(baseUrl, apiKey);
+            }}
           />
         </label>
         <p className="ai-setup__note">
@@ -1721,8 +1758,8 @@ function AiModelPicker({
           <button
             type="button"
             className="ai-setup__reload"
-            disabled={loading || !settings.aiBaseUrl.trim()}
-            onClick={() => void loadModels()}
+            disabled={loading || !baseUrl.trim()}
+            onClick={() => void loadModels(baseUrl, apiKey)}
           >
             {loading ? (
               <LoaderCircle size={13} className="is-spinning" />
@@ -2075,6 +2112,8 @@ function ReaderImage({
   // alt 要等图片到位再给，否则空 img 会把 alt 文案当占位内容画出来。
   return (
     <figure className="reader-block is-image">
+      {/* IndexedDB 返回的是 blob URL，不能交给 next/image 的远程优化器。 */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src={url || undefined}
         alt={url ? alt : ""}
@@ -2183,12 +2222,6 @@ const BAR_SCROLL_THRESHOLD = 12;
 /** 顶部这一段内不收顶栏，免得刚往下拨一点顶栏就跑了。 */
 const BAR_HIDE_AFTER = 48;
 
-const aiMarkdownComponents = {
-  a: (props: ComponentPropsWithoutRef<"a">) => (
-    <a {...props} target="_blank" rel="noreferrer noopener" />
-  ),
-};
-
 /** 起手提问：拿真实的书名和章节标题拼，只是把常问的几件事摆出来，不编造内容。 */
 function starterPrompts(
   book: Book,
@@ -2259,15 +2292,6 @@ async function askAi({
   );
 }
 
-/** AI 回答的 markdown 渲染，边流式接收边整段重新解析，不做增量 diff。 */
-function AiMarkdown({ content }: { content: string }) {
-  return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={aiMarkdownComponents}>
-      {content}
-    </ReactMarkdown>
-  );
-}
-
 /** 划词后「问 AI」，多轮聊天面板；模型设置默认收起，把注意力留给原文和对话。 */
 function AiAskPanel({
   text,
@@ -2300,15 +2324,21 @@ function AiAskPanel({
   const lastScrollTopRef = useRef(0);
   const barHiddenRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const lastScrollRef = useRef(0);
-  // 自动滚到底（新回答进来时）不是用户手势，不该顺手把顶栏收掉。
-  const autoScrollRef = useRef(false);
+  const streamTextRef = useRef({ content: "", reasoning: "" });
+  const streamFrameRef = useRef<number | null>(null);
+  const scrollFrameRef = useRef<number | null>(null);
 
   useScrollLock();
   useEffect(() => () => controllerRef.current?.abort(), []);
   useEffect(
     () => () => {
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      if (streamFrameRef.current !== null) {
+        window.cancelAnimationFrame(streamFrameRef.current);
+      }
+      if (scrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
     },
     []
   );
@@ -2325,9 +2355,29 @@ function AiAskPanel({
   };
   useEffect(() => {
     // 只滚消息区自己。scrollIntoView 会把所有可滚祖先一起滚，连带把整页拖走。
-    const scroller = scrollRef.current;
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    if (scrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+    }
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const scroller = scrollRef.current;
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    });
   }, [turns]);
+
+  const scheduleStreamRender = useCallback(() => {
+    if (streamFrameRef.current !== null) return;
+    streamFrameRef.current = window.requestAnimationFrame(() => {
+      streamFrameRef.current = null;
+      const { content, reasoning } = streamTextRef.current;
+      setTurns((prev) => {
+        if (!prev.length) return prev;
+        const next = [...prev];
+        next[next.length - 1] = { role: "assistant", content, reasoning };
+        return next;
+      });
+    });
+  }, []);
 
   // 找最近一次「带了新片段」的用户提问，用来判断眼下这段是不是已经问过。
   // text === "" 是从历史入口直接打开、没有选中文字的情况，不算新片段。
@@ -2356,6 +2406,7 @@ function AiAskPanel({
     controllerRef.current = controller;
     let content = "";
     let reasoning = "";
+    streamTextRef.current = { content: "", reasoning: "" };
     try {
       await askAi({
         book,
@@ -2366,17 +2417,20 @@ function AiAskPanel({
         onDelta: (delta) => {
           if (delta.content) content += delta.content;
           if (delta.reasoning) reasoning += delta.reasoning;
-          setTurns((prev) => {
-            const next = [...prev];
-            next[next.length - 1] = { role: "assistant", content, reasoning };
-            return next;
-          });
+          streamTextRef.current = { content, reasoning };
+          scheduleStreamRender();
         },
       });
     } catch (err) {
       if (err instanceof AiRequestError) setError(err.message);
       else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
     } finally {
+      if (streamFrameRef.current !== null) {
+        window.cancelAnimationFrame(streamFrameRef.current);
+        streamFrameRef.current = null;
+      }
+      streamTextRef.current = { content, reasoning };
+      setTurns([...history, { role: "assistant", content, reasoning }]);
       setBusy(false);
       onTurnsChange([...history, { role: "assistant", content, reasoning }]);
     }
@@ -2796,12 +2850,6 @@ function ReaderScreen({
   onSettingsChange: (settings: ReaderSettings) => void;
 }) {
   const initial = book.readingPosition ?? initialPosition(book);
-  const mountIdRef = useRef(Math.random().toString(36).slice(2, 8));
-  console.log("[DEBUG render]", {
-    mountId: mountIdRef.current,
-    initialSentenceId: initial.sentenceId,
-    initialChapterIndex: initial.chapterIndex,
-  });
   const [chapterIndex, setChapterIndex] = useState(initial.chapterIndex);
   const [showChapters, setShowChapters] = useState(false);
   const tocListRef = useRevealActiveChapter(showChapters);
@@ -2829,18 +2877,18 @@ function ReaderScreen({
   useEffect(() => {
     progressRef.current = onProgress;
     bookRef.current = book;
-  });
+  }, [book, onProgress]);
   const paged = settings.readingMode === "page";
   const [pageIndex, setPageIndex] = useState(0);
   const [pageCount, setPageCount] = useState(1);
   const [pageStep, setPageStep] = useState(0);
   // 连按翻页时 state 还没重渲染，只能靠 ref 记住已经翻到第几页。
   const pageIndexRef = useRef(0);
-  const goToPage = (next: number) => {
-    console.log("[DEBUG goToPage]", next, new Error().stack?.split("\n")[2]);
+  const goToPage = useCallback((next: number) => {
     pageIndexRef.current = next;
     setPageIndex(next);
-  };
+    setPopup(null);
+  }, []);
   const chapter = book.chapters[chapterIndex];
 
   // 滚动模式是连续阅读：range 覆盖的这几章一起挂在 DOM 里，滑到边缘再往外接一章、
@@ -2918,14 +2966,6 @@ function ReaderScreen({
         ? target.getBoundingClientRect().left -
           article.getBoundingClientRect().left
         : pageIndexRef.current * step;
-      console.log("[DEBUG measure]", {
-        restore,
-        found: !!target,
-        offset,
-        step,
-        count,
-        goTo: Math.max(0, Math.min(count - 1, Math.round(offset / step))),
-      });
       goToPage(Math.max(0, Math.min(count - 1, Math.round(offset / step))));
     };
 
@@ -2941,6 +2981,7 @@ function ReaderScreen({
     settings.lineHeight,
     settings.fontFamily,
     settings.contentWidth,
+    goToPage,
   ]);
 
   useEffect(() => {
@@ -2972,13 +3013,6 @@ function ReaderScreen({
       const id = target?.dataset.sentenceId;
       const index = Number(target?.dataset.sentenceIndex);
       if (!id || Number.isNaN(index) || savedSentenceRef.current === id) return;
-      console.log("[DEBUG paged-track] saving savedSentenceRef", {
-        id,
-        prev: savedSentenceRef.current,
-        pageIndex,
-        pageStep,
-        pageCount,
-      });
       savedSentenceRef.current = id;
       progressRef.current(positionFor(bookRef.current, chapterIndex, index));
     }, 320);
@@ -3211,6 +3245,8 @@ function ReaderScreen({
   useEffect(() => {
     const reset = { start: chapterIndex, end: chapterIndex };
     rangeRef.current = reset;
+    // 这里是在换书／切模式后同步重置窗口，避免旧章节窗口短暂残留。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRange(reset);
     justJumpedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3300,10 +3336,11 @@ function ReaderScreen({
     setChromeVisible((value) => !value);
   };
 
-  const changeChapter = (nextIndex: number, landing: "first" | "last" = "first") => {
-    const safe = Math.max(0, Math.min(book.chapters.length - 1, nextIndex));
+  const changeChapter = useCallback((nextIndex: number, landing: "first" | "last" = "first") => {
+    const currentBook = bookRef.current;
+    const safe = Math.max(0, Math.min(currentBook.chapters.length - 1, nextIndex));
     setChapterIndex(safe);
-    const position = positionFor(book, safe, 0);
+    const position = positionFor(currentBook, safe, 0);
     savedSentenceRef.current = position.sentenceId;
     onProgress(position);
     restoreRef.current = landing === "last" ? "last" : null;
@@ -3324,33 +3361,38 @@ function ReaderScreen({
       // 还原到开浮层前——但这里已经跳到新章节了，不能被那次还原覆盖回旧位置。
       if (scrollLockCount > 0) suppressScrollRestore();
     }
-  };
+  }, [goToPage, onProgress, paged]);
 
-  const turnPage = (delta: number) => {
+  const turnPage = useCallback((delta: number) => {
     const next = pageIndexRef.current + delta;
     if (next < 0) {
       if (chapterIndex > 0) changeChapter(chapterIndex - 1, "last");
       return;
     }
     if (next >= pageCount) {
-      if (chapterIndex < book.chapters.length - 1) changeChapter(chapterIndex + 1);
+      if (chapterIndex < bookRef.current.chapters.length - 1) changeChapter(chapterIndex + 1);
       return;
     }
     goToPage(next);
-  };
+  }, [chapterIndex, changeChapter, goToPage, pageCount]);
+
+  const turnPageRef = useRef(turnPage);
+  useEffect(() => {
+    turnPageRef.current = turnPage;
+  }, [turnPage]);
 
   useEffect(() => {
     if (!paged) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key === "ArrowRight" || event.key === "PageDown") turnPage(1);
-      else if (event.key === "ArrowLeft" || event.key === "PageUp") turnPage(-1);
+      if (event.key === "ArrowRight" || event.key === "PageDown") turnPageRef.current(1);
+      else if (event.key === "ArrowLeft" || event.key === "PageUp") turnPageRef.current(-1);
       else return;
       event.preventDefault();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  });
+  }, [paged]);
 
   const swipeRef = useRef<{ x: number; y: number } | null>(null);
   const turnedRef = useRef(false);
@@ -3365,7 +3407,7 @@ function ReaderScreen({
     };
     document.addEventListener("pointerup", onPointerUp);
     return () => document.removeEventListener("pointerup", onPointerUp);
-  });
+  }, []);
 
   useEffect(() => {
     const onSelectionChange = () => {
@@ -3377,10 +3419,6 @@ function ReaderScreen({
     return () =>
       document.removeEventListener("selectionchange", onSelectionChange);
   }, []);
-
-  useEffect(() => {
-    setPopup(null);
-  }, [pageIndex]);
 
   // 浮条是 fixed 定位、锚点是划线那一刻的视口坐标，一滚就会飘到别的句子上面去。
   useEffect(() => {
@@ -4362,11 +4400,39 @@ export default function MotingApp() {
   const [thoughtDraft, setThoughtDraft] = useState("");
   const [toast, setToast] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const storageErrorRef = useRef(0);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
-    window.setTimeout(() => setToast(""), 2600);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast("");
+    }, 2600);
   }, []);
+
+  const reportStorageError = useCallback(
+    (operation: string, error: unknown) => {
+      console.error(`[storage:${operation}]`, error);
+      const now = Date.now();
+      if (now - storageErrorRef.current < 4000) return;
+      storageErrorRef.current = now;
+      showToast("本地保存失败，请检查浏览器存储空间");
+    },
+    [showToast]
+  );
+
+  useEffect(
+    () => () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -4448,8 +4514,8 @@ export default function MotingApp() {
         .map((book) => (book.id === updated.id ? updated : book))
         .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
     );
-    saveBook(updated).catch(() => undefined);
-  }, []);
+    void saveBook(updated).catch((error) => reportStorageError("book", error));
+  }, [reportStorageError]);
 
   // 听书每读一句就回调一次。以前这里直接把整本书 put 回 IndexedDB 并重排书库，
   // 长篇小说等于每几秒克隆上万个句子对象再重渲染整个列表，手机上是肉眼可见的卡顿。
@@ -4460,6 +4526,61 @@ export default function MotingApp() {
   useEffect(() => {
     booksRef.current = books;
   }, [books]);
+
+  const pendingReadingProgressRef = useRef(
+    new Map<
+      string,
+      { position: BookPosition; lastOpenedAt: number; savedAt: number }
+    >()
+  );
+  const readingUiProgressRef = useRef(new Map<string, number>());
+  const readingProgressTimerRef = useRef<number | null>(null);
+  const flushReadingProgress = useCallback(async () => {
+    if (readingProgressTimerRef.current !== null) {
+      window.clearTimeout(readingProgressTimerRef.current);
+      readingProgressTimerRef.current = null;
+    }
+    const entries = [...pendingReadingProgressRef.current.entries()].map(
+      ([bookId, value]) => ({ bookId, ...value })
+    );
+    pendingReadingProgressRef.current.clear();
+    if (!entries.length) return;
+    try {
+      await saveReadingPositions(entries);
+      const byBookId = new Map(entries.map((entry) => [entry.bookId, entry]));
+      setBooks((current) =>
+        current
+          .map((book) => {
+            const entry = byBookId.get(book.id);
+            return entry
+              ? {
+                  ...book,
+                  readingPosition: entry.position,
+                  lastOpenedAt: Math.max(book.lastOpenedAt, entry.lastOpenedAt),
+                  updatedAt: entry.savedAt,
+                }
+              : book;
+          })
+          .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
+      );
+    } catch (error) {
+      for (const entry of entries) {
+        const current = pendingReadingProgressRef.current.get(entry.bookId);
+        if (!current || current.savedAt < entry.savedAt) {
+          pendingReadingProgressRef.current.set(entry.bookId, entry);
+        }
+      }
+      reportStorageError("reading-position", error);
+    }
+  }, [reportStorageError]);
+
+  const scheduleReadingProgressFlush = useCallback(() => {
+    if (readingProgressTimerRef.current !== null) return;
+    readingProgressTimerRef.current = window.setTimeout(() => {
+      readingProgressTimerRef.current = null;
+      void flushReadingProgress();
+    }, 2500);
+  }, [flushReadingProgress]);
 
   // 这次改动之前导入的书没记插图尺寸，正文里就没法预留位置，图片一加载就把下文推走。
   // 开机后在后台按本补量一次，量到就写回书里，之后再打开这本书版面就是稳的。
@@ -4472,31 +4593,47 @@ export default function MotingApp() {
     if (readingBookId || sizingRef.current) return;
     let cancelled = false;
     sizingRef.current = true;
-    (async () => {
-      for (const book of booksRef.current) {
-        if (sizedBooksRef.current.has(book.id)) continue;
-        const sizes = new Map<string, { width: number; height: number }>();
-        for (const chapter of book.chapters) {
-          for (const paragraph of chapter.paragraphs) {
-            const id = paragraph.imageId;
-            if (paragraph.kind !== "image" || !id) continue;
-            if (paragraph.imageHeight || sizes.has(id)) continue;
-            const image = await getBookImage(id).catch(() => undefined);
-            const size = image ? await imageSize(image.blob) : null;
-            if (cancelled) return;
-            if (size) sizes.set(id, size);
+    const sizeImages = async () => {
+      try {
+        for (const book of booksRef.current) {
+          if (sizedBooksRef.current.has(book.id)) continue;
+          const sizes = new Map<string, { width: number; height: number }>();
+          for (const chapter of book.chapters) {
+            for (const paragraph of chapter.paragraphs) {
+              const id = paragraph.imageId;
+              if (paragraph.kind !== "image" || !id) continue;
+              if (paragraph.imageHeight || sizes.has(id)) continue;
+              const image = await getBookImage(id).catch(() => undefined);
+              const size = image ? await imageSize(image.blob) : null;
+              if (cancelled) return;
+              if (size) sizes.set(id, size);
+            }
           }
+          sizedBooksRef.current.add(book.id);
+          if (!sizes.size) continue;
+          // 量图期间阅读进度可能已经写过一轮，要拿最新的那份来补，别把进度盖回去。
+          const latest = booksRef.current.find((item) => item.id === book.id);
+          if (latest) updateBook(withImageSizes(latest, sizes));
         }
-        sizedBooksRef.current.add(book.id);
-        if (!sizes.size) continue;
-        // 量图期间阅读进度可能已经写过一轮，要拿最新的那份来补，别把进度盖回去。
-        const latest = booksRef.current.find((item) => item.id === book.id);
-        if (latest) updateBook(withImageSizes(latest, sizes));
+      } finally {
+        if (!cancelled) sizingRef.current = false;
       }
-      sizingRef.current = false;
-    })();
+    };
+    let idleId: number | null = null;
+    let timeoutId: number | null = null;
+    const idleWindow = window as Window & {
+      requestIdleCallback?: Window["requestIdleCallback"];
+      cancelIdleCallback?: Window["cancelIdleCallback"];
+    };
+    if (typeof idleWindow.requestIdleCallback === "function") {
+      idleId = idleWindow.requestIdleCallback(() => void sizeImages(), { timeout: 2000 });
+    } else {
+      timeoutId = window.setTimeout(() => void sizeImages(), 0);
+    }
     return () => {
       cancelled = true;
+      if (idleId !== null) idleWindow.cancelIdleCallback?.(idleId);
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
       sizingRef.current = false;
     };
   }, [books.length, readingBookId, updateBook]);
@@ -4508,8 +4645,10 @@ export default function MotingApp() {
     }
     const pending = pendingBookRef.current;
     pendingBookRef.current = null;
-    if (pending) saveBook(pending).catch(() => undefined);
-  }, []);
+    if (pending) {
+      void saveBook(pending).catch((error) => reportStorageError("listening-position", error));
+    }
+  }, [reportStorageError]);
 
   const updateListeningProgress = useCallback(
     (bookId: string, position: BookPosition) => {
@@ -4529,25 +4668,35 @@ export default function MotingApp() {
           flushTimerRef.current = null;
           const pending = pendingBookRef.current;
           pendingBookRef.current = null;
-          if (pending) saveBook(pending).catch(() => undefined);
+          if (pending) {
+            void saveBook(pending).catch((error) => reportStorageError("listening-position", error));
+          }
         }, 20000);
       }
     },
-    []
+    [reportStorageError]
   );
 
   useEffect(() => {
     const onHide = () => {
-      if (document.visibilityState === "hidden") flushListeningProgress();
+      if (document.visibilityState === "hidden") {
+        flushListeningProgress();
+        void flushReadingProgress();
+      }
     };
     document.addEventListener("visibilitychange", onHide);
-    window.addEventListener("pagehide", flushListeningProgress);
+    const onPageHide = () => {
+      flushListeningProgress();
+      void flushReadingProgress();
+    };
+    window.addEventListener("pagehide", onPageHide);
     return () => {
       document.removeEventListener("visibilitychange", onHide);
-      window.removeEventListener("pagehide", flushListeningProgress);
+      window.removeEventListener("pagehide", onPageHide);
       flushListeningProgress();
+      void flushReadingProgress();
     };
-  }, [flushListeningProgress]);
+  }, [flushListeningProgress, flushReadingProgress]);
 
   const player = useSpeechPlayer({
     books,
@@ -4590,12 +4739,12 @@ export default function MotingApp() {
       next[idx] = chat;
       return next;
     });
-    saveChat(chat).catch(() => undefined);
-  }, []);
+    void saveChat(chat).catch((error) => reportStorageError("chat", error));
+  }, [reportStorageError]);
 
   const changeSettings = (next: ReaderSettings) => {
     setSettings(next);
-    saveSettings(next).catch(() => undefined);
+    void saveSettings(next).catch((error) => reportStorageError("settings", error));
   };
 
   const isReading = view.name === "reader";
@@ -4608,8 +4757,8 @@ export default function MotingApp() {
       next[idx] = session;
       return next;
     });
-    saveSession(session).catch(() => undefined);
-  }, []);
+    void saveSession(session).catch((error) => reportStorageError("session", error));
+  }, [reportStorageError]);
 
   // 在放就按听算（锁屏后台也算），否则看是不是开着阅读器。两者都不是就不记。
   const listeningBook = player.isPlaying ? activeBook : undefined;
@@ -4682,21 +4831,21 @@ export default function MotingApp() {
         percent: 1,
       });
       try {
+        if (file.size > MAX_BOOK_FILE_BYTES) throw new Error(MAX_BOOK_FILE_ERROR);
+        const { parseBookFile } = await import("../lib/parsers");
         const { book, images } = await parseBookFile(file, setImportProgress);
         setImportProgress({
           stage: "saving",
           label: "正在保存到本地书架",
           percent: 94,
         });
-        await saveBookImages(images);
-        await saveBook(book);
+        await saveImportedBook(book, images);
         setBooks((current) => [book, ...current]);
         setImportProgress({
           stage: "saving",
           label: "导入完成",
           percent: 100,
         });
-        await new Promise((resolve) => setTimeout(resolve, 450));
       } catch (error) {
         failed = true;
         setImportError(
@@ -4712,6 +4861,8 @@ export default function MotingApp() {
 
   const handleOnlineImport = async (file: File, sourceId: string, onProgress: (label: string) => void) => {
     if (books.some((book) => book.onlineSourceId === sourceId)) return;
+    if (file.size > MAX_BOOK_FILE_BYTES) throw new Error(MAX_BOOK_FILE_ERROR);
+    const { parseBookFile } = await import("../lib/parsers");
     const { book, images } = await parseBookFile(file, (progress) => onProgress(progress.label));
     book.onlineSourceId = sourceId;
     onProgress("正在保存到本地书库…");
@@ -4721,7 +4872,10 @@ export default function MotingApp() {
 
   const openReader = (book: Book, position?: BookPosition) => {
     const nextPosition =
-      position ?? book.readingPosition ?? initialPosition(book);
+      position ??
+      pendingReadingProgressRef.current.get(book.id)?.position ??
+      book.readingPosition ??
+      initialPosition(book);
     const updated: Book = {
       ...book,
       readingPosition: nextPosition,
@@ -4766,7 +4920,10 @@ export default function MotingApp() {
       excerpt,
       createdAt: Date.now(),
     };
-    await saveNote(note).catch(() => undefined);
+    await saveNote(note).catch((error) => {
+      reportStorageError("note", error);
+      throw error;
+    });
     setNotes((current) => [note, ...current]);
     showToast("已标记当前听书位置");
   };
@@ -4801,7 +4958,14 @@ export default function MotingApp() {
       } satisfies BookNote;
     });
     if (!created.length) return null;
-    await Promise.all(created.map((note) => saveNote(note).catch(() => undefined)));
+    await Promise.all(
+      created.map((note) =>
+        saveNote(note).catch((error) => {
+          reportStorageError("note", error);
+          throw error;
+        })
+      )
+    );
     setNotes((current) => [...created, ...current]);
     return created[0];
   };
@@ -4816,25 +4980,57 @@ export default function MotingApp() {
     });
     notes
       .filter((item) => groupKey(item) === group)
-      .forEach((item) => void saveNote(patch(item)).catch(() => undefined));
+      .forEach((item) =>
+        void saveNote(patch(item)).catch((error) => reportStorageError("note", error))
+      );
     setNotes((current) =>
       current.map((item) => (groupKey(item) === group ? patch(item) : item))
     );
   };
 
-  const handleReadProgress = (book: Book, position: BookPosition) => {
-    updateBook({
-      ...book,
-      readingPosition: position,
-      lastOpenedAt: Date.now(),
-      updatedAt: Date.now(),
-    });
-  };
+  const handleReadProgress = useCallback(
+    (book: Book, position: BookPosition) => {
+      const now = Date.now();
+      const nextPosition = { ...position, updatedAt: now };
+      pendingReadingProgressRef.current.set(book.id, {
+        position: nextPosition,
+        lastOpenedAt: now,
+        savedAt: now,
+      });
+      // 进度落盘可以更慢，但界面上的百分比不能等到落盘才动；按半秒节流，
+      // 既保住书架上的实时反馈，也不让长文每句都重排整个应用。
+      const lastUiUpdate = readingUiProgressRef.current.get(book.id) ?? 0;
+      if (now - lastUiUpdate >= 500) {
+        readingUiProgressRef.current.set(book.id, now);
+        setBooks((current) =>
+          current.map((item) =>
+            item.id === book.id
+              ? {
+                  ...item,
+                  readingPosition: nextPosition,
+                  lastOpenedAt: now,
+                  updatedAt: now,
+                }
+              : item
+          )
+        );
+      }
+      scheduleReadingProgressFlush();
+    },
+    [scheduleReadingProgressFlush]
+  );
 
   const confirmDeleteBook = async () => {
     if (!deleteTarget) return;
     if (player.location?.bookId === deleteTarget.id) player.stop();
-    await removeBook(deleteTarget.id).catch(() => undefined);
+    pendingReadingProgressRef.current.delete(deleteTarget.id);
+    readingUiProgressRef.current.delete(deleteTarget.id);
+    try {
+      await removeBook(deleteTarget.id);
+    } catch (error) {
+      reportStorageError("delete-book", error);
+      return;
+    }
     setBooks((current) =>
       current.filter((book) => book.id !== deleteTarget.id)
     );
@@ -4851,9 +5047,12 @@ export default function MotingApp() {
   const deleteBookNote = async (note: BookNote) => {
     const group = groupKey(note);
     const doomed = notes.filter((item) => groupKey(item) === group);
-    await Promise.all(
-      doomed.map((item) => removeNote(item.id).catch(() => undefined))
-    );
+    try {
+      await Promise.all(doomed.map((item) => removeNote(item.id)));
+    } catch (error) {
+      reportStorageError("delete-note", error);
+      return;
+    }
     setNotes((current) =>
       current.filter((item) => groupKey(item) !== group)
     );
@@ -4876,9 +5075,29 @@ export default function MotingApp() {
 
   const clearEverything = async () => {
     player.stop();
-    await clearLibrary().catch(() => undefined);
+    try {
+      await clearLibrary();
+    } catch (error) {
+      reportStorageError("clear-library", error);
+      return;
+    }
+    pendingReadingProgressRef.current.clear();
+    readingUiProgressRef.current.clear();
+    if (readingProgressTimerRef.current !== null) {
+      window.clearTimeout(readingProgressTimerRef.current);
+      readingProgressTimerRef.current = null;
+    }
+    pendingBookRef.current = null;
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
     const demo = createDemoBook();
-    await saveBook(demo).catch(() => undefined);
+    try {
+      await saveBook(demo);
+    } catch (error) {
+      reportStorageError("save-demo", error);
+    }
     setBooks([demo]);
     setNotes([]);
     setSettings(DEFAULT_SETTINGS);
