@@ -37,3 +37,11 @@
 - Wrangler 部署预检通过，构建产物中未发现部署凭据。
 
 部署凭据位于项目根下的 `.env.deploy.local`（Git 忽略），通过 Node `process.loadEnvFile()` 读取后再启动 Wrangler，不把凭据放进命令行。该文件只用于部署，与用户的 Z-Library 登录无关。
+
+### 发布记录与真实联调边界
+
+- 功能提交：`4a4b86e`，已推送 `origin/master`。
+- 生产地址：https://moting-reader.yk2958374240.workers.dev
+- Cloudflare 发布成功，版本：`7a87c230-deae-42cb-8be7-ba913fcf39cb`。
+- 发布后本机访问生产地址时，Python HTTP 请求和 Edge 浏览器均连接超时，尚未收到生产搜索接口的响应。本机对 `workers.dev` 的 DNS 返回 `157.240.17.41`，存在网络解析异常，不能据此判定云端书源接口失效。
+- 当前没有用户的 Z-Library 登录会话，真实账号登录与真实书籍下载尚未验证。上面的端到端通过结果指明确标注的测试 EPUB 与书源夹具，不代表真实站点的完整链路已通过。
