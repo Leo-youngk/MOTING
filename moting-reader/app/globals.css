@@ -1847,8 +1847,177 @@ button:disabled {
   resize: vertical;
 }
 
-/* 问 AI：一张独立的“思考纸”。大留白、短顶栏、底部大输入卡，
-   让视觉重心像 Claude App 一样落在正在输入的这一句话。 */
+/* ==========================================================================
+   问 AI：正文里的批注（.ai-inline）和全屏长对话（.ai-chat）两套形态。
+   批注跟着阅读器的 --reader-* 配色走，因为它长在正文里；全屏对话是独立的
+   一层，走外壳的 --paper / --surface。
+   ========================================================================== */
+
+/* --- 划词后的正文批注 ------------------------------------------------ */
+
+/* 没有卡片、没有底色，只有一条竖线和小一号的无衬线字——跟正文是批注与被批注
+   的关系，不是并排的两块内容。 */
+.ai-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 20px 0 26px;
+  padding-left: 15px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  color: var(--reader-ink);
+  font-family: var(--font-sans);
+  font-size: max(13.5px, calc(var(--reader-font-size) * 0.8));
+  line-height: 1.75;
+  animation: ai-inline-in 200ms ease both;
+}
+
+@keyframes ai-inline-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.ai-inline__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--reader-muted);
+  font-size: 0.85em;
+  letter-spacing: 0.01em;
+}
+
+.ai-inline__head > svg:first-child {
+  flex-shrink: 0;
+  color: var(--accent-deep);
+}
+
+.ai-inline__head > span {
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-inline__close {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  margin-right: -6px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--reader-muted);
+}
+
+.ai-inline__close:active {
+  opacity: 0.5;
+}
+
+.ai-inline__compose {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 4px 14px;
+  border: 1px solid var(--reader-line);
+  border-radius: 999px;
+  background: var(--reader-surface);
+}
+
+.ai-inline__compose input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--reader-ink);
+  font-family: inherit;
+  font-size: 1em;
+}
+
+.ai-inline__compose input::placeholder {
+  color: var(--reader-muted);
+}
+
+.ai-inline__send {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.ai-inline__send:active {
+  transform: scale(0.94);
+}
+
+.ai-inline__starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.ai-inline__starter {
+  padding: 6px 12px;
+  border: 1px solid var(--reader-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--reader-muted);
+  font-family: inherit;
+  font-size: 0.85em;
+}
+
+.ai-inline__starter:active {
+  background: var(--reader-surface);
+}
+
+.ai-inline__hint,
+.ai-inline__error {
+  margin: 0;
+  color: var(--reader-muted);
+  font-size: 0.88em;
+}
+
+.ai-inline__error {
+  color: var(--danger);
+}
+
+.ai-inline__actions {
+  display: flex;
+  gap: 14px;
+}
+
+.ai-inline__actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  color: var(--reader-muted);
+  font-family: inherit;
+  font-size: 0.85em;
+}
+
+.ai-inline__actions button:active {
+  opacity: 0.55;
+}
+
+/* 正在被讨论的那几句，留一层淡底当锚点。 */
+.reader-article .is-asking {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* --- 全屏长对话 ------------------------------------------------------ */
+
 .ai-chat {
   position: fixed;
   z-index: 120;
@@ -1862,12 +2031,9 @@ button:disabled {
   padding-bottom: var(--viewport-fill-bottom, 0px);
   display: flex;
   flex-direction: column;
-  --ai-bar-height: calc(env(safe-area-inset-top) + 64px);
-  --ai-canvas: color-mix(in srgb, var(--surface) 94%, var(--paper));
-  --ai-canvas-deep: color-mix(in srgb, var(--ink) 7%, var(--ai-canvas));
-  --ai-control: color-mix(in srgb, var(--ink) 6%, var(--ai-canvas));
-  /* 顶部近白、往下压出一层冷灰，输入卡浮在最深的那头。 */
-  background: linear-gradient(180deg, var(--ai-canvas) 0%, var(--ai-canvas) 34%, var(--ai-canvas-deep) 100%);
+  --ai-bar-height: calc(env(safe-area-inset-top) + 56px);
+  /* 一块平整的纸，不做渐变——之前那层冷灰渐变在半空的屏幕上像没加载完。 */
+  background: var(--paper);
   animation: fade-in 160ms ease both;
 }
 
@@ -1882,11 +2048,10 @@ button:disabled {
   left: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   min-height: var(--ai-bar-height);
-  padding: calc(env(safe-area-inset-top) + 10px) 20px 10px;
-  background: var(--ai-canvas);
+  padding: calc(env(safe-area-inset-top) + 8px) 14px 8px 20px;
+  background: var(--paper);
   transition: transform 0.28s ease, opacity 0.2s ease;
   will-change: transform;
 }
@@ -1898,17 +2063,30 @@ button:disabled {
   pointer-events: none;
 }
 
-/* 裸图标，没有圆底也没有描边——顶栏只剩三个符号浮在背景上。 */
+/* 书名左对齐当页眉，右边只留一个关闭。配置模型的入口收进输入区那一枚灰字
+   按钮，顶栏不再放第二个。 */
+.ai-chat__title {
+  overflow: hidden;
+  flex: 1;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ai-chat__bar-btn {
   display: inline-flex;
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
   background: transparent;
-  color: color-mix(in srgb, var(--ink) 82%, transparent);
+  color: color-mix(in srgb, var(--ink) 55%, transparent);
   box-shadow: none;
 }
 
@@ -1916,112 +2094,114 @@ button:disabled {
   opacity: 0.5;
 }
 
-.ai-chat__title {
-  overflow: hidden;
-  flex: 1;
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: 17px;
-  font-weight: 500;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 顶栏脱离了文档流，这两块得自己让开它的高度。 */
-.ai-chat__picker {
-  max-height: min(58dvh, 520px);
-  overflow-y: auto;
-  margin-top: var(--ai-bar-height);
-  padding: 14px 18px 18px;
-  border-bottom: 1px solid var(--line-soft);
-  background: var(--ai-canvas);
-}
-
 .ai-chat__scroll {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   overflow-y: auto;
   padding-top: var(--ai-bar-height);
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  display: flex;
-  flex-direction: column;
 }
 
+/* 从顶往下排。之前用 margin-top:auto 把内容贴到底，只问一句时上面半屏是空的
+   ——那不是留白，是布局没填满。 */
 .ai-chat__thread {
   display: flex;
   width: min(100%, 720px);
   flex-direction: column;
-  gap: 30px;
+  gap: 12px;
   margin: 0 auto;
-  padding: 18px 20px 68px;
+  padding: 8px 20px 72px;
 }
 
-/* 有实际对话内容时贴底显示，紧挨输入框，不留半截空白；内容多到溢出时
-   margin-top 不再有空间可占，自然从顶部开始正常滚动。纯欢迎语（.ai-chat__intro）
-   不走这条，保留它自己的居中留白。 */
-.ai-chat__thread--fill {
-  margin-top: auto;
+/* 轮内（提问接回答）收紧，轮与轮之间拉开，读起来才有段落感。 */
+.ai-ask__turn-assistant + .ai-ask__turn-user {
+  margin-top: 22px;
 }
 
 .ai-chat__source {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-bottom: 6px;
 }
 
 .ai-chat__source > span {
-  padding-left: 4px;
   color: var(--muted);
   font-size: 12px;
   letter-spacing: 0.08em;
 }
 
+/* 纯欢迎态没有引用块打头，整块往下压一段，让标题落在视觉的黄金位置，
+   上下都留出呼吸——这是留白，不是把内容甩到屏幕边上剩一片空。 */
 .ai-chat__intro {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 14px;
-  padding: clamp(118px, 24dvh, 220px) 24px 0;
-  color: var(--muted);
-  text-align: center;
+  gap: 12px;
+  padding: 10dvh 0 0;
 }
 
-.ai-chat__intro-mark {
-  display: inline-flex;
-  width: 68px;
-  height: 68px;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 4px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 15%, var(--ai-canvas));
-  color: var(--accent-deep);
-  box-shadow: 0 12px 28px color-mix(in srgb, var(--accent) 14%, transparent);
-  transform: rotate(-8deg);
+/* 跟在引用块后面时不用再压，上面已经有内容了。 */
+.ai-chat__source + .ai-chat__intro {
+  padding-top: 2px;
 }
 
 .ai-chat__intro strong {
   color: var(--ink);
   font-family: var(--font-serif);
-  font-size: clamp(32px, 9vw, 44px);
+  font-size: 30px;
   font-weight: 500;
-  letter-spacing: -0.035em;
+  letter-spacing: -0.03em;
 }
 
 .ai-chat__intro p {
-  margin: 0;
-  max-width: 360px;
-  font-size: 14px;
-  line-height: 1.6;
+  margin: -4px 0 6px;
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.65;
+}
+
+/* 起手提问：拿真实的书名章节拼出来的三行，顺手就能点，也顺手把首屏填满。 */
+.ai-chat__starters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-chat__starter {
+  padding: 15px 17px;
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  text-align: left;
+}
+
+.ai-chat__starter:active {
+  background: var(--paper-deep);
+}
+
+.ai-chat__setup {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 18px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 500;
 }
 
 .ai-chat__error {
   margin: 0;
-  padding: 0 18px 6px;
-  color: var(--danger, #c0392b);
+  padding: 0 20px 6px;
+  color: var(--danger);
   font-size: 13px;
-  text-align: center;
 }
 
 .ai-chat__composer {
@@ -2029,15 +2209,9 @@ button:disabled {
   width: min(100%, 720px);
   flex-direction: column;
   margin: 0 auto;
-  /* 不给 Home Indicator 留安全区，8px 只是让白卡的圆角浮起来、不被屏幕圆角切。 */
+  /* 不给 Home Indicator 留安全区，8px 只是让输入卡的圆角浮起来、不被屏幕圆角切。 */
   padding: 10px 16px 8px;
-  border-top: 0;
-  background: linear-gradient(
-    to bottom,
-    transparent,
-    var(--ai-canvas-deep) 24px,
-    var(--ai-canvas-deep)
-  );
+  background: linear-gradient(to bottom, transparent, var(--paper) 24px, var(--paper));
 }
 
 /* 键盘弹起时底边停在键盘上沿（不再往下探物理屏底，那块已被键盘盖住）。 */
@@ -2051,48 +2225,20 @@ html[data-keyboard-open] .ai-chat__composer {
   padding-bottom: 8px;
 }
 
-.ai-chat__model-pill {
-  display: inline-flex;
-  align-self: flex-start;
-  align-items: center;
-  gap: 6px;
-  max-width: calc(100% - 12px);
-  padding: 9px 14px;
-  border: 0;
-  border-radius: 980px;
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
-  color: color-mix(in srgb, var(--accent-deep) 78%, var(--ink));
-  font-size: 15px;
-}
-
-.ai-chat__model-pill span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ai-chat__model-pill svg:first-child {
-  color: var(--accent-deep);
-}
-
-.ai-chat__model-pill svg:last-child {
-  transition: transform 0.15s ease;
-}
-
 .ai-chat__input {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 18px 12px 12px 18px;
-  border: 0;
-  border-radius: 30px;
+  gap: 12px;
+  padding: 16px 12px 10px 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: 26px;
   background: var(--surface);
-  box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 7%, transparent);
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 6%, transparent);
 }
 
 .ai-chat__input textarea {
   width: 100%;
-  min-height: 28px;
+  min-height: 26px;
   max-height: 140px;
   padding: 0 2px;
   border: 0;
@@ -2117,15 +2263,39 @@ html[data-keyboard-open] .ai-chat__composer {
   gap: 10px;
 }
 
+/* 配置项，压成一行灰字。之前那枚琥珀实心胶囊是全屏视觉最重的东西，喧宾夺主。 */
+.ai-chat__model-pill {
+  display: inline-flex;
+  align-self: center;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 60px);
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.ai-chat__model-pill span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-chat__model-pill:active {
+  opacity: 0.55;
+}
+
 .ai-chat__send {
   display: inline-flex;
-  width: 46px;
-  height: 46px;
+  width: 42px;
+  height: 42px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: #181818;
+  background: var(--accent);
   color: #fff;
   transition: transform 140ms ease, opacity 140ms ease;
 }
@@ -2135,22 +2305,24 @@ html[data-keyboard-open] .ai-chat__composer {
 }
 
 .ai-ask__quote {
+  overflow-y: auto;
+  max-height: 7.5em;
   margin: 0;
-  padding: 16px 17px;
-  border-left: 3px solid var(--accent);
-  border-radius: 0 18px 18px 0;
-  background: color-mix(in srgb, var(--accent) 8%, var(--ai-canvas));
+  padding: 12px 16px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  border-radius: 0 12px 12px 0;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: color-mix(in srgb, var(--ink) 88%, transparent);
   font-family: var(--font-serif);
   font-size: 15px;
-  line-height: 1.7;
-  max-height: 140px;
-  overflow-y: auto;
+  line-height: 1.75;
+  overscroll-behavior: contain;
 }
 
 .ai-ask__reasoning {
+  padding: 10px 13px;
   border-radius: 11px;
   background: var(--paper-deep);
-  padding: 10px 13px;
 }
 
 .ai-ask__reasoning-toggle {
@@ -2175,292 +2347,188 @@ html[data-keyboard-open] .ai-chat__composer {
   white-space: pre-wrap;
 }
 
-.ai-ask__answer {
-  padding: 0 2px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  font-family: var(--font-sans);
-  font-size: 16px;
-  line-height: 1.82;
-}
-
-.ai-ask__answer > :first-child {
-  margin-top: 0;
-}
-.ai-ask__answer > :last-child {
-  margin-bottom: 0;
-}
-
-.ai-ask__answer p {
-  margin: 0 0 10px;
-}
-
-.ai-ask__answer h1,
-.ai-ask__answer h2,
-.ai-ask__answer h3,
-.ai-ask__answer h4 {
-  margin: 16px 0 8px;
-  font-weight: 600;
-  line-height: 1.4;
-}
-.ai-ask__answer h1 {
-  font-size: 19px;
-}
-.ai-ask__answer h2 {
-  font-size: 17px;
-}
-.ai-ask__answer h3,
-.ai-ask__answer h4 {
-  font-size: 15px;
-}
-
-.ai-ask__answer ul,
-.ai-ask__answer ol {
-  margin: 0 0 10px;
-  padding-left: 22px;
-}
-.ai-ask__answer li {
-  margin: 4px 0;
-}
-
-.ai-ask__answer blockquote {
-  margin: 10px 0;
-  padding: 8px 12px;
-  border-left: 3px solid var(--accent);
-  border-radius: 0 8px 8px 0;
-  background: var(--paper-deep);
-  color: var(--muted);
-}
-.ai-ask__answer blockquote > :last-child {
-  margin-bottom: 0;
-}
-
-.ai-ask__answer code {
-  padding: 2px 5px;
-  border-radius: 5px;
-  background: var(--paper-deep);
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 0.88em;
-}
-
-.ai-ask__answer pre {
-  margin: 10px 0;
-  padding: 12px 13px;
-  border-radius: 9px;
-  background: var(--paper-deep);
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-.ai-ask__answer pre code {
-  padding: 0;
-  background: transparent;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.ai-ask__answer a {
-  color: var(--accent-deep);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  word-break: break-word;
-}
-
-.ai-ask__answer hr {
-  margin: 14px 0;
-  border: 0;
-  border-top: 1px solid var(--line-soft);
-}
-
-.ai-ask__answer table {
-  width: 100%;
-  margin: 10px 0;
-  border-collapse: collapse;
-  font-size: 13.5px;
-}
-.ai-ask__answer th,
-.ai-ask__answer td {
-  padding: 6px 8px;
-  border: 1px solid var(--line-soft);
-  text-align: left;
-}
-.ai-ask__answer th {
-  background: var(--paper-deep);
-  font-weight: 600;
-}
-
-.ai-ask__answer img {
-  max-width: 100%;
-  height: auto;
-  border-radius: 8px;
-}
-
-.ai-ask__answer input[type="checkbox"] {
-  accent-color: var(--accent);
-  margin-right: 6px;
-}
-
-.ai-model-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.ai-model-picker__hint {
-  margin: 0;
-  padding: 0 4px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.ai-model-picker__card {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border-radius: 13px;
-  background: var(--surface);
-  box-shadow: 0 0 0 0.5px var(--line-soft);
-}
-
-.ai-model-picker__row {
-  display: flex;
-  min-height: 44px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 14px;
-  border-top: 1px solid var(--line-soft);
-}
-
-.ai-model-picker__row:first-child {
-  border-top: 0;
-}
-
-.ai-model-picker__row > span:first-child {
-  flex-shrink: 0;
-  color: var(--ink);
-  font-size: 15px;
-}
-
-.ai-model-picker__row input[type="text"],
-.ai-model-picker__row input[type="password"],
-.ai-model-picker__row select {
-  flex: 1;
-  min-width: 0;
-  padding: 11px 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--ink);
-  font-size: 15px;
-  text-align: right;
-}
-
-.ai-model-picker__row input::placeholder {
-  color: var(--muted);
-}
-
-.ai-model-picker__row select {
-  appearance: none;
-  -webkit-appearance: none;
-  padding-right: 15px;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='16' viewBox='0 0 10 16'><path d='M1.5 1.5L7.5 8L1.5 14.5' fill='none' stroke='%23a8a29e' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right center;
-  background-size: 7px 12px;
-}
-
-.ai-model-picker__footnote {
-  margin: 0;
-  padding: 0 4px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.ai-model-picker__footnote--error {
-  color: var(--danger, #c0392b);
-}
-
-.ai-switch {
-  position: relative;
-  display: inline-flex;
-  width: 51px;
-  height: 31px;
-  flex-shrink: 0;
-}
-
-.ai-switch input {
-  position: absolute;
-  inset: 0;
-  margin: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.ai-switch__track {
-  position: absolute;
-  inset: 0;
-  border-radius: 999px;
-  background: rgb(120 120 128 / 32%);
-  transition: background 0.2s ease;
-}
-
-.ai-switch__thumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 27px;
-  height: 27px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow:
-    0 3px 8px rgba(0, 0, 0, 0.15),
-    0 1px 1px rgba(0, 0, 0, 0.1);
-  transition: transform 0.2s ease;
-}
-
-.ai-switch input:checked ~ .ai-switch__track {
-  background: var(--accent);
-}
-
-.ai-switch input:checked ~ .ai-switch__track .ai-switch__thumb {
-  transform: translateX(20px);
-}
-
+/* 提问：满屏宽、不做气泡。靠字号和字重跟回答分层，不靠一个右对齐的方块。 */
 .ai-ask__turn-user {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
+  gap: 9px;
 }
 
 .ai-ask__question {
-  align-self: flex-end;
   margin: 0;
-  padding: 11px 15px;
-  border: 1px solid color-mix(in srgb, var(--line-soft) 72%, transparent);
-  border-radius: 18px 18px 5px 18px;
-  background: var(--ai-control);
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 15px;
-  line-height: 1.6;
-  max-width: 88%;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.55;
   white-space: pre-wrap;
 }
 
-/* 发出去的引用：跟着问题贴右边，收窄一点，超长可滚动。 */
+/* 发出去的引用跟着问题走，收窄一档、压低对比度，别抢问题本身。 */
 .ai-ask__quote--sent {
-  align-self: flex-end;
-  max-width: 88%;
-  padding: 10px 13px;
-  border-left-width: 3px;
-  border-radius: 14px 14px 4px 14px;
-  font-size: 13px;
-  line-height: 1.6;
-  max-height: 108px;
+  max-height: 6em;
+  padding: 9px 13px;
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.ai-ask__turn-assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* markdown 正文排版。全屏回答和正文批注共用，尺寸一律走 em——批注的字号基准
+   小一号，规则不用写两遍。 */
+:is(.ai-ask__answer, .ai-inline__answer) {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--ink) 92%, transparent);
+  font-family: var(--font-sans);
+}
+
+.ai-ask__answer {
+  font-size: 16px;
+  line-height: 1.85;
+}
+
+.ai-inline__answer {
+  color: color-mix(in srgb, var(--reader-ink) 92%, transparent);
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) > :first-child {
+  margin-top: 0;
+}
+:is(.ai-ask__answer, .ai-inline__answer) > :last-child {
+  margin-bottom: 0;
+}
+
+/* 行高接近 1.85，段间距得跟着放大，不然两段黏成一片。 */
+:is(.ai-ask__answer, .ai-inline__answer) p {
+  margin: 0 0 1em;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) :is(h1, h2, h3, h4) {
+  margin: 1.35em 0 0.6em;
+  color: inherit;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) h1 {
+  font-size: 1.19em;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) h2 {
+  font-size: 1.09em;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) :is(h3, h4) {
+  font-size: 1em;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) :is(ul, ol) {
+  margin: 0 0 1em;
+  padding-left: 1.4em;
+  list-style-position: outside;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) ul {
+  list-style-type: disc;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) ol {
+  list-style-type: decimal;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) li {
+  margin: 0 0 0.4em;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) li > p {
+  margin: 0;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) blockquote {
+  margin: 0 0 1em;
+  padding: 0.1em 0 0.1em 0.9em;
+  border-left: 2px solid var(--line-soft);
+  color: var(--muted);
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) code {
+  padding: 0.12em 0.35em;
+  border-radius: 5px;
+  background: var(--paper-deep);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) pre {
+  overflow-x: auto;
+  margin: 0 0 1em;
+  padding: 0.85em 1em;
+  border-radius: 13px;
+  background: var(--paper-deep);
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) pre code {
+  padding: 0;
+  background: transparent;
+  font-size: 0.85em;
+  line-height: 1.65;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) a {
+  color: var(--accent-deep);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) hr {
+  margin: 1.4em 0;
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) table {
+  display: block;
+  overflow-x: auto;
+  width: 100%;
+  margin: 0 0 1em;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) :is(th, td) {
+  padding: 0.55em 0.75em;
+  border: 1px solid var(--line-soft);
+  text-align: left;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) th {
+  background: var(--paper-deep);
+  font-weight: 600;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) img {
+  max-width: 100%;
+  border-radius: 10px;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) input[type="checkbox"] {
+  margin-right: 6px;
+}
+
+:is(.ai-ask__answer, .ai-inline__answer) strong {
+  font-weight: 600;
 }
 
 .ai-ask__copy {
@@ -2468,21 +2536,14 @@ html[data-keyboard-open] .ai-chat__composer {
   align-self: flex-start;
   align-items: center;
   gap: 5px;
-  padding: 5px 11px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ink) 5%, var(--ai-canvas));
-  color: color-mix(in srgb, var(--ink) 62%, var(--muted));
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
   font-size: 12.5px;
 }
 
 .ai-ask__copy:active {
-  transform: scale(0.96);
-}
-
-.ai-ask__turn-assistant {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  opacity: 0.55;
 }
 
 .ai-chat__thinking {
@@ -2519,6 +2580,262 @@ html[data-keyboard-open] .ai-chat__composer {
     transform: translateY(-4px);
     opacity: 1;
   }
+}
+
+/* --- 模型配置（装在底部 sheet 里） ----------------------------------- */
+
+.ai-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding-bottom: 4px;
+}
+
+.ai-setup__group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 输入框有可见的底，之前那种右对齐的裸文字看不出能点。 */
+.ai-setup__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-setup__field > span {
+  color: var(--muted);
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+}
+
+.ai-setup__field input {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  outline: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+}
+
+.ai-setup__field input:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line-soft));
+}
+
+.ai-setup__field input::placeholder {
+  color: var(--subtle);
+}
+
+.ai-setup__note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.ai-setup__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-setup__head h3 {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ai-setup__reload {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  color: var(--accent-deep);
+  font-size: 13px;
+}
+
+.ai-setup__reload:disabled {
+  color: var(--subtle);
+}
+
+.ai-setup__reload .is-spinning {
+  animation: ai-setup-spin 0.9s linear infinite;
+}
+
+@keyframes ai-setup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 拉列表的结果一定说出来：拿到几个、失败了为什么、现在是不是在手填。 */
+.ai-setup__status {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.ai-setup__status--error {
+  color: var(--danger);
+}
+
+.ai-setup__search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 13px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.ai-setup__search input {
+  width: 100%;
+  padding: 11px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+}
+
+.ai-setup__models {
+  overflow-y: auto;
+  max-height: 46dvh;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: var(--surface);
+  overscroll-behavior: contain;
+}
+
+.ai-setup__model {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 15px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  text-align: left;
+}
+
+.ai-setup__model:last-child {
+  border-bottom: 0;
+}
+
+.ai-setup__model span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-setup__model.is-active {
+  color: var(--accent-deep);
+  font-weight: 600;
+}
+
+.ai-setup__model:active {
+  background: var(--paper-deep);
+}
+
+.ai-setup__empty {
+  margin: 0;
+  padding: 18px 15px;
+  color: var(--muted);
+  font-size: 13.5px;
+  text-align: center;
+}
+
+.ai-setup__switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.ai-setup__switch > span:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ai-setup__switch strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ai-setup__switch em {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-style: normal;
+  line-height: 1.5;
+}
+
+.ai-switch {
+  position: relative;
+  display: inline-flex;
+  width: 51px;
+  height: 31px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.ai-switch input {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  z-index: 1;
+}
+
+.ai-switch__track {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+  transition: background 0.2s ease;
+}
+
+.ai-switch__thumb {
+  display: block;
+  width: 27px;
+  height: 27px;
+  margin: 2px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 18%);
+  transition: transform 0.2s ease;
+}
+
+.ai-switch input:checked ~ .ai-switch__track {
+  background: var(--accent);
+}
+
+.ai-switch input:checked ~ .ai-switch__track .ai-switch__thumb {
+  transform: translateX(20px);
 }
 
 .settings-panel {
@@ -2913,6 +3230,11 @@ html[data-keyboard-open] .bottom-bar {
 .reader-chrome--bottom {
   bottom: 0;
   padding: 12px 16px calc(env(safe-area-inset-bottom) + 16px);
+}
+
+/* 底栏右侧是一组按钮（问 AI、阅读设置），靠这一下推成一组，别被 space-between 摊开。 */
+.reader-chrome--bottom .reader-chrome__menu:first-of-type {
+  margin-left: auto;
 }
 
 .reader-shell.chrome-hidden .reader-chrome {

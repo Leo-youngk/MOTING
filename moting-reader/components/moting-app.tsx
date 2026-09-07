@@ -21,7 +21,6 @@ import {
   Layers,
   Library,
   List,
-  Menu,
   LoaderCircle,
   MoreHorizontal,
   Pause,
@@ -40,6 +39,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  Fragment,
   type ChangeEvent,
   type ComponentPropsWithoutRef,
   type CSSProperties,
@@ -1628,6 +1628,7 @@ function AiModelPicker({
   const [models, setModels] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
 
   const loadModels = async () => {
     if (!settings.aiBaseUrl.trim()) return;
@@ -1650,78 +1651,140 @@ function AiModelPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const visible = query.trim()
+    ? models.filter((model) =>
+        model.toLowerCase().includes(query.trim().toLowerCase())
+      )
+    : models;
+
+  // 拉不到列表就退回手填，但得让人看见是退回来的，别默默变成一个空输入框。
+  const status = !settings.aiBaseUrl.trim()
+    ? "填好接口地址后会自动拉取可用模型"
+    : loading
+      ? "正在拉取模型列表…"
+      : error
+        ? `拉不到模型列表（${error}），可以直接手填模型名`
+        : models.length
+          ? `${models.length} 个可用模型`
+          : "这个接口没返回模型列表，直接手填模型名";
+
   return (
-    <div className="ai-model-picker">
-      <p className="ai-model-picker__hint">
-        自带 OpenAI 兼容接口的地址和密钥，请求经我们的服务器转发一次（避开跨域限制），不落盘保存。
-      </p>
-      <div className="ai-model-picker__card">
-        <label className="ai-model-picker__row">
+    <div className="ai-setup">
+      <div className="ai-setup__group">
+        <label className="ai-setup__field">
           <span>接口地址</span>
           <input
             type="text"
+            inputMode="url"
             value={settings.aiBaseUrl}
             placeholder="https://api.example.com/v1"
-            onChange={(event) => onChange({ ...settings, aiBaseUrl: event.target.value })}
+            onChange={(event) =>
+              onChange({ ...settings, aiBaseUrl: event.target.value })
+            }
             onBlur={loadModels}
           />
         </label>
-        <label className="ai-model-picker__row">
+        <label className="ai-setup__field">
           <span>API Key</span>
           <input
             type="password"
             value={settings.aiApiKey}
             placeholder="sk-…"
-            onChange={(event) => onChange({ ...settings, aiApiKey: event.target.value })}
+            onChange={(event) =>
+              onChange({ ...settings, aiApiKey: event.target.value })
+            }
             onBlur={loadModels}
           />
         </label>
-        <div className="ai-model-picker__row">
-          <span>模型</span>
-          {models.length ? (
-            <select
-              value={settings.aiModel}
-              onChange={(event) => onChange({ ...settings, aiModel: event.target.value })}
-            >
-              {!models.includes(settings.aiModel) && settings.aiModel ? (
-                <option value={settings.aiModel}>{settings.aiModel}</option>
-              ) : null}
-              {models.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
+        <p className="ai-setup__note">
+          OpenAI 兼容接口。请求经我们的 Worker 转发一次避开跨域，密钥只留在这台设备上。
+        </p>
+      </div>
+
+      <div className="ai-setup__group">
+        <div className="ai-setup__head">
+          <h3>模型</h3>
+          <button
+            type="button"
+            className="ai-setup__reload"
+            disabled={loading || !settings.aiBaseUrl.trim()}
+            onClick={() => void loadModels()}
+          >
+            {loading ? (
+              <LoaderCircle size={13} className="is-spinning" />
+            ) : null}
+            重新拉取
+          </button>
+        </div>
+        <p
+          className={`ai-setup__status${error ? " ai-setup__status--error" : ""}`}
+        >
+          {status}
+        </p>
+
+        {models.length ? (
+          <>
+            {models.length > 8 ? (
+              <div className="ai-setup__search">
+                <Search size={15} />
+                <input
+                  type="text"
+                  value={query}
+                  placeholder="筛选模型"
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              </div>
+            ) : null}
+            <div className="ai-setup__models">
+              {visible.map((model) => (
+                <button
+                  type="button"
+                  key={model}
+                  className={`ai-setup__model${settings.aiModel === model ? " is-active" : ""}`}
+                  onClick={() => onChange({ ...settings, aiModel: model })}
+                >
+                  <span>{model}</span>
+                  {settings.aiModel === model ? <Check size={16} /> : null}
+                </button>
               ))}
-            </select>
-          ) : (
+              {!visible.length ? (
+                <p className="ai-setup__empty">没有匹配「{query}」的模型</p>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <label className="ai-setup__field">
+            <span>模型名</span>
             <input
               type="text"
               value={settings.aiModel}
-              placeholder={loading ? "获取中…" : "手动填写模型名"}
-              onChange={(event) => onChange({ ...settings, aiModel: event.target.value })}
+              placeholder="gpt-4o-mini"
+              onChange={(event) =>
+                onChange({ ...settings, aiModel: event.target.value })
+              }
             />
-          )}
-        </div>
-        <label className="ai-model-picker__row">
-          <span>深度思考</span>
-          <span className="ai-switch">
-            <input
-              type="checkbox"
-              checked={settings.aiDeepThinking}
-              onChange={(event) => onChange({ ...settings, aiDeepThinking: event.target.checked })}
-            />
-            <span className="ai-switch__track">
-              <span className="ai-switch__thumb" />
-            </span>
-          </span>
-        </label>
+          </label>
+        )}
       </div>
-      <p
-        className={
-          error ? "ai-model-picker__footnote ai-model-picker__footnote--error" : "ai-model-picker__footnote"
-        }
-      >
-        {loading ? "正在获取模型列表…" : error || "深度思考需模型支持，开启后会展示思考过程。"}
-      </p>
+
+      <label className="ai-setup__switch">
+        <span>
+          <strong>深度思考</strong>
+          <em>需模型支持，开启后回答里会带上思考过程</em>
+        </span>
+        <span className="ai-switch">
+          <input
+            type="checkbox"
+            checked={settings.aiDeepThinking}
+            onChange={(event) =>
+              onChange({ ...settings, aiDeepThinking: event.target.checked })
+            }
+          />
+          <span className="ai-switch__track">
+            <span className="ai-switch__thumb" />
+          </span>
+        </span>
+      </label>
     </div>
   );
 }
@@ -2101,6 +2164,76 @@ const aiMarkdownComponents = {
   ),
 };
 
+/** 起手提问：拿真实的书名和章节标题拼，只是把常问的几件事摆出来，不编造内容。 */
+function starterPrompts(
+  book: Book,
+  chapter: Chapter | undefined,
+  hasQuote: boolean
+) {
+  if (hasQuote) return ["这段在说什么", "举个例子", "和前后文什么关系"];
+  const list = ["这本书主要在讲什么"];
+  if (chapter) list.push(`讲讲《${chapter.title}》这一章`);
+  list.push(`列一份《${book.title}》的阅读要点`);
+  return list;
+}
+
+/**
+ * 组装书籍上下文并发一次请求。内联批注和全屏对话共用这一套 prompt，
+ * 两处各写一遍迟早会漂移成两种回答风格。
+ */
+async function askAi({
+  book,
+  chapter,
+  settings,
+  history,
+  signal,
+  brief = false,
+  onDelta,
+}: {
+  book: Book;
+  chapter: Chapter | undefined;
+  settings: ReaderSettings;
+  history: AiChatTurn[];
+  signal: AbortSignal;
+  /** 正文批注只是页边的一小块，长篇大论会把正文淹掉，所以额外要一句简短。 */
+  brief?: boolean;
+  onDelta: (delta: { content?: string; reasoning?: string }) => void;
+}) {
+  const toc = book.chapters.map((c, i) => `${i + 1}. ${c.title}`).join("\n");
+  const chapterTitle = chapter?.title ?? "正文";
+  const chapterText = chapter
+    ? flattenChapter(chapter)
+        .map((sentence) => sentence.text)
+        .join("")
+        .slice(0, AI_CHAPTER_TEXT_LIMIT)
+    : "";
+  const chapterContext = chapter
+    ? `\n\n当前章节《${chapterTitle}》正文${chapterText.length >= AI_CHAPTER_TEXT_LIMIT ? "（篇幅较长，只截取了前面一部分）" : ""}：\n${chapterText}`
+    : "";
+  await streamAiChat(
+    {
+      baseUrl: settings.aiBaseUrl,
+      apiKey: settings.aiApiKey,
+      model: settings.aiModel,
+      deepThinking: settings.aiDeepThinking,
+      signal,
+      messages: [
+        {
+          role: "system",
+          content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。\n如有需要可使用 Markdown 格式（标题、加粗、列表、代码块等）让回答更清晰，但不必为简短回答刻意加格式。${brief ? "\n这次回答显示在正文旁边的批注里，控制在 200 字以内，直接说结论，不要用标题。" : ""}`,
+        },
+        ...history.map((turn) => ({
+          role: turn.role,
+          content: turn.quote
+            ? `引用原文：\n${turn.quote}\n\n${turn.content}`
+            : turn.content,
+        })),
+      ],
+    },
+    onDelta
+  );
+}
+
 /** AI 回答的 markdown 渲染，边流式接收边整段重新解析，不做增量 diff。 */
 function AiMarkdown({ content }: { content: string }) {
   return (
@@ -2180,9 +2313,12 @@ function AiAskPanel({
   const isFreshQuote = text !== "" && lastQuote !== text;
   const canSend = configured && !busy && (question.trim().length > 0 || isFreshQuote);
 
-  const ask = async () => {
-    if (!canSend) return;
-    const userText = question.trim() || "帮我讲讲这段话";
+  /** preset 是点起手提问进来的，不走输入框，所以不能拿 canSend 拦。 */
+  const ask = async (preset?: string) => {
+    if (busy || !configured) return;
+    const userText =
+      (preset ?? question).trim() || (isFreshQuote ? "帮我讲讲这段话" : "");
+    if (!userText) return;
     const userTurn: AiChatTurn = {
       role: "user",
       content: userText,
@@ -2198,37 +2334,14 @@ function AiAskPanel({
     controllerRef.current = controller;
     let content = "";
     let reasoning = "";
-    const toc = book.chapters.map((c, i) => `${i + 1}. ${c.title}`).join("\n");
-    const chapterTitle = chapter?.title ?? "正文";
-    const chapterText = chapter
-      ? flattenChapter(chapter)
-          .map((sentence) => sentence.text)
-          .join("")
-          .slice(0, AI_CHAPTER_TEXT_LIMIT)
-      : "";
-    const chapterContext = chapter
-      ? `\n\n当前章节《${chapterTitle}》正文${chapterText.length >= AI_CHAPTER_TEXT_LIMIT ? "（篇幅较长，只截取了前面一部分）" : ""}：\n${chapterText}`
-      : "";
     try {
-      await streamAiChat(
-        {
-          baseUrl: settings.aiBaseUrl,
-          apiKey: settings.aiApiKey,
-          model: settings.aiModel,
-          deepThinking: settings.aiDeepThinking,
-          signal: controller.signal,
-          messages: [
-            {
-              role: "system",
-              content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。\n如有需要可使用 Markdown 格式（标题、加粗、列表、代码块等）让回答更清晰，但不必为简短回答刻意加格式。`,
-            },
-            ...history.map((turn) => ({
-              role: turn.role,
-              content: turn.quote ? `引用原文：\n${turn.quote}\n\n${turn.content}` : turn.content,
-            })),
-          ],
-        },
-        (delta) => {
+      await askAi({
+        book,
+        chapter,
+        settings,
+        history,
+        signal: controller.signal,
+        onDelta: (delta) => {
           if (delta.content) content += delta.content;
           if (delta.reasoning) reasoning += delta.reasoning;
           setTurns((prev) => {
@@ -2236,8 +2349,8 @@ function AiAskPanel({
             next[next.length - 1] = { role: "assistant", content, reasoning };
             return next;
           });
-        }
-      );
+        },
+      });
     } catch (err) {
       if (err instanceof AiRequestError) setError(err.message);
       else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
@@ -2256,15 +2369,6 @@ function AiAskPanel({
       aria-label="问 AI"
     >
       <header className="ai-chat__bar">
-        <button
-          type="button"
-          className="ai-chat__bar-btn"
-          aria-label="配置模型"
-          aria-expanded={showPicker}
-          onClick={() => setShowPicker((value) => !value)}
-        >
-          <Menu size={24} />
-        </button>
         <span className="ai-chat__title">{book.title}</span>
         <button
           type="button"
@@ -2272,15 +2376,9 @@ function AiAskPanel({
           aria-label="关闭"
           onClick={onClose}
         >
-          <X size={24} />
+          <X size={22} />
         </button>
       </header>
-
-      {showPicker ? (
-        <div className="ai-chat__picker">
-          <AiModelPicker settings={settings} onChange={onSettingsChange} />
-        </div>
-      ) : null}
 
       <div
         className="ai-chat__scroll"
@@ -2298,9 +2396,7 @@ function AiAskPanel({
           chatRef.current?.toggleAttribute("data-immersive", hidden);
         }}
       >
-        <div
-          className={`ai-chat__thread${turns.length || isFreshQuote ? " ai-chat__thread--fill" : ""}`}
-        >
+        <div className="ai-chat__thread">
           {isFreshQuote ? (
             <section className="ai-chat__source">
               <span>正在讨论</span>
@@ -2308,17 +2404,41 @@ function AiAskPanel({
             </section>
           ) : null}
 
-          {!turns.length && !isFreshQuote ? (
+          {!turns.length ? (
             <div className="ai-chat__intro">
-              <span className="ai-chat__intro-mark" aria-hidden="true">
-                <Sparkles size={28} />
-              </span>
-              <strong>一起读点什么</strong>
-              <p>
-                {configured
-                  ? `可以讨论《${book.title}》里的观点、人物和细节。`
-                  : "先点左上角配置模型，然后就可以开始聊这本书。"}
-              </p>
+              {isFreshQuote ? null : (
+                <>
+                  <strong>聊聊这本书</strong>
+                  <p>
+                    {configured
+                      ? `《${book.title}》里的观点、人物、细节，想到哪问到哪。`
+                      : "先选一个模型，然后就可以开始聊这本书。"}
+                  </p>
+                </>
+              )}
+              {configured ? (
+                <div className="ai-chat__starters">
+                  {starterPrompts(book, chapter, isFreshQuote).map((preset) => (
+                    <button
+                      type="button"
+                      key={preset}
+                      className="ai-chat__starter"
+                      onClick={() => void ask(preset)}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="ai-chat__setup"
+                  onClick={() => setShowPicker(true)}
+                >
+                  <Layers size={16} />
+                  选择模型
+                </button>
+              )}
             </div>
           ) : null}
 
@@ -2416,17 +2536,14 @@ function AiAskPanel({
             }}
           />
           <div className="ai-chat__input-footer">
+            {/* 模型是配置项不是内容，压成一枚灰字按钮，别跟发送键抢注意力。 */}
             <button
               type="button"
               className="ai-chat__model-pill"
-              onClick={() => setShowPicker((value) => !value)}
+              onClick={() => setShowPicker(true)}
             >
-              <Layers size={15} />
+              <Layers size={14} />
               <span>{settings.aiModel || "选择模型"}</span>
-              <ChevronDown
-                size={14}
-                style={{ transform: showPicker ? "rotate(180deg)" : "rotate(0deg)" }}
-              />
             </button>
             {/* 没东西可发就整个不渲染发送键，跟截图一样右侧留空。 */}
             {busy || canSend ? (
@@ -2445,7 +2562,197 @@ function AiAskPanel({
           </div>
         </div>
       </div>
+
+      {showPicker ? (
+        <Modal title="模型" onClose={() => setShowPicker(false)}>
+          <AiModelPicker settings={settings} onChange={onSettingsChange} />
+        </Modal>
+      ) : null}
     </div>
+  );
+}
+
+/**
+ * 划词问 AI 的轻量形态：回答直接落在原文段落下面，像页边批注，不离开正文。
+ * 只做一问一答——想继续追问就把这一轮带进全屏对话，别在正文里长出一条聊天流。
+ */
+function AiInlineAsk({
+  text,
+  book,
+  chapter,
+  settings,
+  turns,
+  onTurnsChange,
+  onExpand,
+  onClose,
+}: {
+  text: string;
+  book: Book;
+  chapter: Chapter | undefined;
+  settings: ReaderSettings;
+  turns: AiChatTurn[];
+  onTurnsChange: (turns: AiChatTurn[]) => void;
+  onExpand: () => void;
+  onClose: () => void;
+}) {
+  const configured = Boolean(settings.aiBaseUrl && settings.aiModel);
+  const [question, setQuestion] = useState("");
+  const [asked, setAsked] = useState("");
+  const [answer, setAnswer] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const controllerRef = useRef<AbortController | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      controllerRef.current?.abort();
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    },
+    []
+  );
+
+  const run = async (preset?: string) => {
+    if (busy || !configured) return;
+    const userText = (preset ?? question).trim() || "帮我讲讲这段话";
+    const history: AiChatTurn[] = [
+      ...turns,
+      { role: "user", content: userText, quote: text },
+    ];
+    setAsked(userText);
+    setQuestion("");
+    setAnswer("");
+    setBusy(true);
+    setError("");
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    let content = "";
+    let reasoning = "";
+    try {
+      await askAi({
+        book,
+        chapter,
+        settings,
+        history,
+        signal: controller.signal,
+        brief: true,
+        onDelta: (delta) => {
+          if (delta.content) content += delta.content;
+          if (delta.reasoning) reasoning += delta.reasoning;
+          setAnswer(content);
+        },
+      });
+    } catch (err) {
+      if (err instanceof AiRequestError) setError(err.message);
+      else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
+    } finally {
+      setBusy(false);
+      // 这一轮照样进这本书的常驻对话，正文里的批注只是它的即时视图。
+      onTurnsChange([...history, { role: "assistant", content, reasoning }]);
+    }
+  };
+
+  const copy = async () => {
+    if (!answer) return;
+    try {
+      await navigator.clipboard.writeText(answer);
+      setCopied(true);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setError("复制失败，请手动选择文字");
+    }
+  };
+
+  return (
+    <aside className="ai-inline" aria-label="AI 批注">
+      <header className="ai-inline__head">
+        <Sparkles size={13} />
+        <span>{asked || "问 AI"}</span>
+        <button
+          type="button"
+          className="ai-inline__close"
+          aria-label="收起批注"
+          onClick={() => {
+            controllerRef.current?.abort();
+            onClose();
+          }}
+        >
+          <X size={15} />
+        </button>
+      </header>
+
+      {answer === null ? (
+        !configured ? (
+          <p className="ai-inline__hint">还没选模型，去对话里配置一次就能用。</p>
+        ) : (
+          <>
+            <div className="ai-inline__compose">
+              <input
+                type="text"
+                autoFocus
+                value={question}
+                placeholder="留空就是让 AI 讲讲这段"
+                onChange={(event) => setQuestion(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    void run();
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="ai-inline__send"
+                aria-label="发送"
+                onClick={() => void run()}
+              >
+                <ArrowUp size={17} />
+              </button>
+            </div>
+            <div className="ai-inline__starters">
+              {starterPrompts(book, chapter, true).map((preset) => (
+                <button
+                  type="button"
+                  key={preset}
+                  className="ai-inline__starter"
+                  onClick={() => void run(preset)}
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+          </>
+        )
+      ) : (
+        <div className="ai-inline__answer">
+          {answer ? <AiMarkdown content={answer} /> : null}
+          {busy && !answer ? (
+            <span className="ai-chat__thinking" aria-label="正在思考">
+              <i />
+              <i />
+              <i />
+            </span>
+          ) : null}
+        </div>
+      )}
+
+      {error ? <p className="ai-inline__error">{error}</p> : null}
+
+      {answer !== null && !busy ? (
+        <div className="ai-inline__actions">
+          <button type="button" onClick={() => void copy()}>
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+            {copied ? "已复制" : "复制"}
+          </button>
+          <button type="button" onClick={onExpand}>
+            <Sparkles size={13} />
+            继续聊
+          </button>
+        </div>
+      ) : null}
+    </aside>
   );
 }
 
@@ -2502,6 +2809,12 @@ function ReaderScreen({
     value: string;
   } | null>(null);
   const [askAiText, setAskAiText] = useState<string | null>(null);
+  // 划词问 AI 的批注就长在正文里，anchorId 是它挂在哪个段落后面。
+  const [inlineAsk, setInlineAsk] = useState<{
+    text: string;
+    sentenceIds: string[];
+    anchorId: string;
+  } | null>(null);
   const articleRef = useRef<HTMLElement>(null);
   const savedSentenceRef = useRef(initial.sentenceId);
   // onProgress 每次渲染都是新的箭头函数，book 也随每一次进度回写换引用。把它们直接
@@ -3112,6 +3425,12 @@ function ReaderScreen({
     }
   };
 
+  // 批注展开时给选中的那几句留一层淡底，不然不知道正在讨论哪一段。
+  const askingIds = useMemo(
+    () => new Set(inlineAsk?.sentenceIds ?? []),
+    [inlineAsk]
+  );
+
   const readerStyle = {
     "--reader-font-size": `${settings.fontSize}px`,
     "--reader-line-height": String(settings.lineHeight),
@@ -3207,9 +3526,12 @@ function ReaderScreen({
                     data-sentence-id={sentence.id}
                     data-sentence-index={indexById?.get(sentence.id)}
                     data-chapter-index={index}
-                    className={
-                      sentence.id === currentSentenceId ? "is-speaking" : ""
-                    }
+                    className={[
+                      sentence.id === currentSentenceId ? "is-speaking" : "",
+                      askingIds.has(sentence.id) ? "is-asking" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
                   >
                     {renderSentence(
                       sentence.text,
@@ -3218,11 +3540,40 @@ function ReaderScreen({
                   </span>
                 ));
 
+                // 批注挂在选区最后一句所在的段落后面：往下长不会推动正在读的这段。
+                const inlineCard =
+                  inlineAsk &&
+                  paragraph.sentences.some((s) => s.id === inlineAsk.anchorId) ? (
+                    <AiInlineAsk
+                      text={inlineAsk.text}
+                      book={book}
+                      chapter={chapter}
+                      settings={settings}
+                      turns={chatTurns}
+                      onTurnsChange={onChatChange}
+                      onExpand={() => {
+                        setInlineAsk(null);
+                        setAskAiText("");
+                      }}
+                      onClose={() => setInlineAsk(null)}
+                    />
+                  ) : null;
+
+                const withCard = (block: ReactNode) =>
+                  inlineCard ? (
+                    <Fragment key={paragraph.id}>
+                      {block}
+                      {inlineCard}
+                    </Fragment>
+                  ) : (
+                    block
+                  );
+
                 if (paragraph.kind === "heading") {
                   // 章节名已经占了 h1，章内小标题从 h2 起排。
                   const Heading =
                     HEADING_TAGS[(paragraph.level ?? 3) - 1] ?? "h3";
-                  return (
+                  return withCard(
                     <Heading
                       key={paragraph.id}
                       className="reader-block is-heading"
@@ -3232,7 +3583,7 @@ function ReaderScreen({
                   );
                 }
                 if (paragraph.kind === "quote") {
-                  return (
+                  return withCard(
                     <blockquote
                       key={paragraph.id}
                       className="reader-block is-quote"
@@ -3241,7 +3592,7 @@ function ReaderScreen({
                     </blockquote>
                   );
                 }
-                return (
+                return withCard(
                   <p
                     key={paragraph.id}
                     className={`reader-block ${
@@ -3273,6 +3624,18 @@ function ReaderScreen({
         <span className="reader-chrome__pos">
           {paged ? `${pageIndex + 1} / ${pageCount} 页` : `已读 ${readPercent}%`}
         </span>
+        {/* 划词问 AI 走正文批注，这本书的常驻对话得另有入口，否则聊过的就找不回来了。 */}
+        <button
+          type="button"
+          className="reader-chrome__menu"
+          aria-label="问 AI"
+          onClick={() => {
+            setInlineAsk(null);
+            setAskAiText("");
+          }}
+        >
+          <Sparkles size={19} />
+        </button>
         <button
           type="button"
           className="reader-chrome__menu"
@@ -3331,16 +3694,28 @@ function ReaderScreen({
             setPopup(null);
           }}
           onAskAi={() => {
-            const text =
-              popup.kind === "selection" ? popup.text : groupText(popup.note);
+            const isSelection = popup.kind === "selection";
+            const text = isSelection ? popup.text : groupText(popup.note);
+            const ids = isSelection
+              ? popup.parts.map((part) => part.sentenceId)
+              : notes
+                  .filter((item) => groupKey(item) === groupKey(popup.note))
+                  .map((item) => item.sentenceId);
             window.getSelection()?.removeAllRanges();
             setPopup(null);
-            setAskAiText(text);
+            // 分页模式往正文里插内容会把分好的页算乱，那边照旧开全屏对话。
+            if (paged || !ids.length) setAskAiText(text);
+            else
+              setInlineAsk({
+                text,
+                sentenceIds: ids,
+                anchorId: ids[ids.length - 1],
+              });
           }}
         />
       ) : null}
 
-      {askAiText ? (
+      {askAiText !== null ? (
         <AiAskPanel
           text={askAiText}
           initialTurns={chatTurns}
