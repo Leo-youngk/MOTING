@@ -2031,67 +2031,37 @@ button:disabled {
   padding-bottom: var(--viewport-fill-bottom, 0px);
   display: flex;
   flex-direction: column;
-  --ai-bar-height: calc(env(safe-area-inset-top) + 56px);
   /* 一块平整的纸，不做渐变——之前那层冷灰渐变在半空的屏幕上像没加载完。 */
   background: var(--paper);
   animation: fade-in 160ms ease both;
 }
 
-/* 顶栏浮在内容之上，不占布局位置。收放只动 transform 和 opacity——这两个是
-   合成器属性，不触发重排；之前用 margin-top 收占位，滚动时每帧都要重新布局
-   整个滚动容器，手感就是一顿一顿的。 */
-.ai-chat__bar {
+/* 没有标题栏。之前那条铺满 safe-area 的纯色顶栏正是要躲开的挡块——现在内容
+   一路铺到屏幕最顶，只留一枚浮在角上的关闭。往下滚时它跟着淡出。 */
+.ai-chat__close {
   position: absolute;
   z-index: 2;
-  top: 0;
-  right: 0;
-  left: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: var(--ai-bar-height);
-  padding: calc(env(safe-area-inset-top) + 8px) 14px 8px 20px;
-  background: var(--paper);
-  transition: transform 0.28s ease, opacity 0.2s ease;
-  will-change: transform;
-}
-
-/* 往下滚收起，往上滚放回来。 */
-.ai-chat[data-immersive] .ai-chat__bar {
-  transform: translateY(-100%);
-  opacity: 0;
-  pointer-events: none;
-}
-
-/* 书名左对齐当页眉，右边只留一个关闭。配置模型的入口收进输入区那一枚灰字
-   按钮，顶栏不再放第二个。 */
-.ai-chat__title {
-  overflow: hidden;
-  flex: 1;
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ai-chat__bar-btn {
+  top: calc(env(safe-area-inset-top) + 6px);
+  right: 10px;
   display: inline-flex;
-  width: 40px;
-  height: 40px;
-  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: transparent;
-  color: color-mix(in srgb, var(--ink) 55%, transparent);
-  box-shadow: none;
+  background: color-mix(in srgb, var(--paper) 72%, transparent);
+  backdrop-filter: blur(10px);
+  color: color-mix(in srgb, var(--ink) 50%, transparent);
+  transition: opacity 0.22s ease;
 }
 
-.ai-chat__bar-btn:active {
+.ai-chat__close:active {
   opacity: 0.5;
+}
+
+.ai-chat[data-immersive] .ai-chat__close {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .ai-chat__scroll {
@@ -2099,20 +2069,21 @@ button:disabled {
   flex: 1;
   flex-direction: column;
   overflow-y: auto;
-  padding-top: var(--ai-bar-height);
+  padding-top: calc(env(safe-area-inset-top) + 12px);
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
 
-/* 从顶往下排。之前用 margin-top:auto 把内容贴到底，只问一句时上面半屏是空的
-   ——那不是留白，是布局没填满。 */
+/* 内容少的时候贴着输入框往上排：视觉重心本来就在输入框，上方那片留白是页面
+   顶部的呼吸（顶栏已经去掉了，没有东西框住它）。夹在内容和输入框中间的空白
+   才是死白。内容多到溢出时 margin-top 没有空间可占，自然回到从顶滚。 */
 .ai-chat__thread {
   display: flex;
   width: min(100%, 720px);
   flex-direction: column;
   gap: 12px;
-  margin: 0 auto;
-  padding: 8px 20px 72px;
+  margin: auto auto 0;
+  padding: 8px 20px 24px;
 }
 
 /* 轮内（提问接回答）收紧，轮与轮之间拉开，读起来才有段落感。 */
@@ -2133,18 +2104,11 @@ button:disabled {
   letter-spacing: 0.08em;
 }
 
-/* 纯欢迎态没有引用块打头，整块往下压一段，让标题落在视觉的黄金位置，
-   上下都留出呼吸——这是留白，不是把内容甩到屏幕边上剩一片空。 */
 .ai-chat__intro {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 10dvh 0 0;
-}
-
-/* 跟在引用块后面时不用再压，上面已经有内容了。 */
-.ai-chat__source + .ai-chat__intro {
-  padding-top: 2px;
+  padding: 6px 0 0;
 }
 
 .ai-chat__intro strong {
@@ -2184,17 +2148,23 @@ button:disabled {
   background: var(--paper-deep);
 }
 
-.ai-chat__setup {
-  display: inline-flex;
-  align-self: flex-start;
-  align-items: center;
-  gap: 7px;
-  padding: 11px 18px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 15px;
-  font-weight: 500;
+.ai-chat__unset {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.ai-chat__unset svg {
+  flex-shrink: 0;
+  margin-top: 3px;
 }
 
 .ai-chat__error {
@@ -2225,22 +2195,32 @@ html[data-keyboard-open] .ai-chat__composer {
   padding-bottom: 8px;
 }
 
+/* 单行输入条：文字和发送键并排。模型配置搬到主页设置之后，这里不再有第二行，
+   收起状态的高度从 100 出头降到 52 上下。 */
 .ai-chat__input {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px 12px 10px 18px;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 6px 6px 18px;
   border: 1px solid var(--line-soft);
-  border-radius: 26px;
+  border-radius: 24px;
   background: var(--surface);
   box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 6%, transparent);
 }
 
+/* 没有发送键时右边补回等量内缩，不然一侧空一块。 */
+.ai-chat__input.is-bare {
+  padding-right: 18px;
+}
+
+/* flex 行里必须走 flex+min-width:0。用 width:100% 的话它按整个容器宽度算，
+   发送键那一格被算进去，自动增高读到的 scrollHeight 直接虚高两行。 */
 .ai-chat__input textarea {
-  width: 100%;
+  min-width: 0;
+  flex: 1;
   min-height: 26px;
   max-height: 140px;
-  padding: 0 2px;
+  padding: 8px 0;
   border: 0;
   outline: 0;
   background: transparent;
@@ -2255,42 +2235,10 @@ html[data-keyboard-open] .ai-chat__composer {
   color: color-mix(in srgb, var(--muted) 85%, transparent);
 }
 
-.ai-chat__input-footer {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-/* 配置项，压成一行灰字。之前那枚琥珀实心胶囊是全屏视觉最重的东西，喧宾夺主。 */
-.ai-chat__model-pill {
-  display: inline-flex;
-  align-self: center;
-  align-items: center;
-  gap: 6px;
-  max-width: calc(100% - 60px);
-  padding: 6px 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.ai-chat__model-pill span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ai-chat__model-pill:active {
-  opacity: 0.55;
-}
-
 .ai-chat__send {
   display: inline-flex;
-  width: 42px;
-  height: 42px;
+  width: 38px;
+  height: 38px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
@@ -2584,11 +2532,11 @@ html[data-keyboard-open] .ai-chat__composer {
 
 /* --- 模型配置（装在底部 sheet 里） ----------------------------------- */
 
+/* 装在主页设置的「AI 助手」分组里，外面已经有分组标题和底色，自己不再套卡片。 */
 .ai-setup {
   display: flex;
   flex-direction: column;
-  gap: 22px;
-  padding-bottom: 4px;
+  gap: 18px;
 }
 
 .ai-setup__group {
@@ -2712,7 +2660,7 @@ html[data-keyboard-open] .ai-chat__composer {
 
 .ai-setup__models {
   overflow-y: auto;
-  max-height: 46dvh;
+  max-height: min(36dvh, 288px);
   border: 1px solid var(--line-soft);
   border-radius: 14px;
   background: var(--surface);

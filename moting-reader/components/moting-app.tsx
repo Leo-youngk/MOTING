@@ -1913,6 +1913,17 @@ function SettingsPanel({
 
       <section className="settings-group">
         <div className="settings-group__title">
+          <Sparkles size={18} />
+          <h2>AI 助手</h2>
+        </div>
+        <p className="settings-hint">
+          划词问 AI 和整本书的对话都用这里配的模型。
+        </p>
+        <AiModelPicker settings={settings} onChange={onChange} />
+      </section>
+
+      <section className="settings-group">
+        <div className="settings-group__title">
           <Download size={18} />
           <h2>本地书库</h2>
         </div>
@@ -2251,7 +2262,6 @@ function AiAskPanel({
   book,
   chapter,
   settings,
-  onSettingsChange,
   onClose,
 }: {
   text: string;
@@ -2260,11 +2270,9 @@ function AiAskPanel({
   book: Book;
   chapter: Chapter | undefined;
   settings: ReaderSettings;
-  onSettingsChange: (settings: ReaderSettings) => void;
   onClose: () => void;
 }) {
   const configured = Boolean(settings.aiBaseUrl && settings.aiModel);
-  const [showPicker, setShowPicker] = useState(false);
   const [turns, setTurns] = useState<AiChatTurn[]>(initialTurns);
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2368,17 +2376,16 @@ function AiAskPanel({
       aria-modal="true"
       aria-label="问 AI"
     >
-      <header className="ai-chat__bar">
-        <span className="ai-chat__title">{book.title}</span>
-        <button
-          type="button"
-          className="ai-chat__bar-btn"
-          aria-label="关闭"
-          onClick={onClose}
-        >
-          <X size={22} />
-        </button>
-      </header>
+      {/* 没有标题栏：内容一路铺到屏幕最顶，只留一枚浮在角上的关闭当退路，
+          往下滚时连它也收掉。 */}
+      <button
+        type="button"
+        className="ai-chat__close"
+        aria-label="关闭"
+        onClick={onClose}
+      >
+        <X size={20} />
+      </button>
 
       <div
         className="ai-chat__scroll"
@@ -2409,11 +2416,10 @@ function AiAskPanel({
               {isFreshQuote ? null : (
                 <>
                   <strong>聊聊这本书</strong>
-                  <p>
-                    {configured
-                      ? `《${book.title}》里的观点、人物、细节，想到哪问到哪。`
-                      : "先选一个模型，然后就可以开始聊这本书。"}
-                  </p>
+                  {/* 没配模型时下面那张提示卡已经把话说完了，别再来一句同义的。 */}
+                  {configured ? (
+                    <p>《{book.title}》里的观点、人物、细节，想到哪问到哪。</p>
+                  ) : null}
                 </>
               )}
               {configured ? (
@@ -2430,14 +2436,10 @@ function AiAskPanel({
                   ))}
                 </div>
               ) : (
-                <button
-                  type="button"
-                  className="ai-chat__setup"
-                  onClick={() => setShowPicker(true)}
-                >
-                  <Layers size={16} />
-                  选择模型
-                </button>
+                <p className="ai-chat__unset">
+                  <Layers size={15} />
+                  还没配模型。去主页右上角的设置里，「AI 助手」那一栏填一次就好。
+                </p>
               )}
             </div>
           ) : null}
@@ -2513,7 +2515,11 @@ function AiAskPanel({
       {error ? <p className="ai-chat__error">{error}</p> : null}
 
       <div className="ai-chat__composer">
-        <div className="ai-chat__input">
+        {/* 单行输入条：文字和发送键并排。模型配置搬去主页设置之后，这里不再
+            需要第二行，输入区高度直接砍掉一半。 */}
+        <div
+          className={`ai-chat__input${busy || canSend ? "" : " is-bare"}`}
+        >
           <textarea
             ref={inputRef}
             rows={1}
@@ -2535,39 +2541,22 @@ function AiAskPanel({
               }
             }}
           />
-          <div className="ai-chat__input-footer">
-            {/* 模型是配置项不是内容，压成一枚灰字按钮，别跟发送键抢注意力。 */}
+          {/* 没东西可发就整个不渲染发送键，右侧的内缩由 is-bare 补齐。 */}
+          {busy || canSend ? (
             <button
               type="button"
-              className="ai-chat__model-pill"
-              onClick={() => setShowPicker(true)}
+              className="ai-chat__send"
+              onClick={() => {
+                if (busy) controllerRef.current?.abort();
+                else void ask();
+              }}
+              aria-label={busy ? "停止回答" : "发送"}
             >
-              <Layers size={14} />
-              <span>{settings.aiModel || "选择模型"}</span>
+              {busy ? <Square size={14} fill="currentColor" /> : <ArrowUp size={20} />}
             </button>
-            {/* 没东西可发就整个不渲染发送键，跟截图一样右侧留空。 */}
-            {busy || canSend ? (
-              <button
-                type="button"
-                className="ai-chat__send"
-                onClick={() => {
-                  if (busy) controllerRef.current?.abort();
-                  else void ask();
-                }}
-                aria-label={busy ? "停止回答" : "发送"}
-              >
-                {busy ? <Square size={14} fill="currentColor" /> : <ArrowUp size={21} />}
-              </button>
-            ) : null}
-          </div>
+          ) : null}
         </div>
       </div>
-
-      {showPicker ? (
-        <Modal title="模型" onClose={() => setShowPicker(false)}>
-          <AiModelPicker settings={settings} onChange={onSettingsChange} />
-        </Modal>
-      ) : null}
     </div>
   );
 }
@@ -2685,7 +2674,9 @@ function AiInlineAsk({
 
       {answer === null ? (
         !configured ? (
-          <p className="ai-inline__hint">还没选模型，去对话里配置一次就能用。</p>
+          <p className="ai-inline__hint">
+            还没配模型。去主页右上角的设置里，「AI 助手」那一栏填一次就好。
+          </p>
         ) : (
           <>
             <div className="ai-inline__compose">
@@ -3723,7 +3714,6 @@ function ReaderScreen({
           book={book}
           chapter={chapter}
           settings={settings}
-          onSettingsChange={applySettings}
           onClose={() => setAskAiText(null)}
         />
       ) : null}
@@ -5125,7 +5115,6 @@ export default function MotingApp() {
           book={chatBook}
           chapter={undefined}
           settings={settings}
-          onSettingsChange={changeSettings}
           onClose={() => setChatBook(null)}
         />
       ) : null}
