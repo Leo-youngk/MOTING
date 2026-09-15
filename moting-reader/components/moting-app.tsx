@@ -57,6 +57,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useAppNavigation } from "../hooks/use-app-navigation";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
@@ -107,6 +108,7 @@ import {
   type BookPosition,
   type Chapter,
   type HighlightColor,
+  type HighlightStyle,
   type ImportProgress,
   type MainView,
   type PlayerVoice,
@@ -202,6 +204,7 @@ const NAV_ITEMS: Array<{
 }> = [
   { id: "home", label: "主页", icon: Home },
   { id: "library", label: "书库", icon: Library },
+  { id: "listen", label: "听书", icon: Headphones },
   { id: "notes", label: "笔记", icon: Highlighter },
 ];
 
@@ -1488,7 +1491,7 @@ function NotesScreen({
                           className={
                             listening
                               ? "ink-note__mark ink-note__mark--plain"
-                              : `ink-note__mark ink-note__mark--${note.color ?? "yellow"}`
+                              : `ink-note__mark ink-note__mark--${note.color ?? "yellow"} ink-note__mark--${note.highlightStyle ?? "underline"}`
                           }
                         >
                           {note.excerpt}
@@ -2078,7 +2081,7 @@ function renderSentence(text: string, marks: BookNote[]): ReactNode {
       <mark
         key={item.note.id}
         data-note-id={item.note.id}
-        className={`reader-mark reader-mark--${item.note.color ?? "yellow"} ${
+        className={`reader-mark reader-mark--${item.note.color ?? "yellow"} reader-mark--${item.note.highlightStyle ?? "underline"} ${
           item.note.thought ? "has-thought" : ""
         }`}
       >
@@ -2360,7 +2363,7 @@ function ReaderPopover({
 }: {
   popup: ReaderPopupState;
   insets: SafeInsets;
-  onHighlight: (color: HighlightColor) => void;
+  onHighlight: (color: HighlightColor, style?: HighlightStyle) => void;
   onCopy: () => void;
   onThought: () => void;
   onListen: () => void;
@@ -2369,6 +2372,7 @@ function ReaderPopover({
 }) {
   const nodeRef = useRef<HTMLDivElement>(null);
   const [more, setMore] = useState(false);
+  const [choosingStyle, setChoosingStyle] = useState(false);
   const [placement, setPlacement] = useState<Placement | null>(null);
 
   const { top, bottom, left, right } = popup.anchor;
@@ -2392,6 +2396,7 @@ function ReaderPopover({
   if (identity !== lastIdentity) {
     setLastIdentity(identity);
     setMore(false);
+    setChoosingStyle(false);
   }
 
   // 翻到「更多」会换一批按钮、宽度跟着变，所以 more 也得进依赖重新量。
@@ -2419,7 +2424,7 @@ function ReaderPopover({
       observer.disconnect();
       window.removeEventListener("resize", update);
     };
-  }, [top, bottom, left, right, rects, insets, more, popup.kind]);
+  }, [top, bottom, left, right, rects, insets, more, choosingStyle, popup.kind]);
 
   const style: CSSProperties = placement
     ? {
@@ -2442,18 +2447,38 @@ function ReaderPopover({
       }}
     >
       {popup.kind === "mark" ? (
-        <div className="reader-popover__colors">
-          {HIGHLIGHT_COLORS.map((color) => (
+        <div className="reader-popover__appearance">
+          <div className="reader-popover__styles" aria-label="划线样式">
             <button
               type="button"
-              key={color.id}
-              className={`swatch swatch--${color.id} ${
-                (popup.note.color ?? "yellow") === color.id ? "is-active" : ""
-              }`}
-              aria-label={color.label}
-              onClick={() => onHighlight(color.id)}
-            />
-          ))}
+              className={(popup.note.highlightStyle ?? "underline") === "underline" ? "is-active" : ""}
+              aria-pressed={(popup.note.highlightStyle ?? "underline") === "underline"}
+              onClick={() => onHighlight(popup.note.color ?? "yellow", "underline")}
+            >
+              下划线
+            </button>
+            <button
+              type="button"
+              className={popup.note.highlightStyle === "marker" ? "is-active" : ""}
+              aria-pressed={popup.note.highlightStyle === "marker"}
+              onClick={() => onHighlight(popup.note.color ?? "yellow", "marker")}
+            >
+              马克笔
+            </button>
+          </div>
+          <div className="reader-popover__colors">
+            {HIGHLIGHT_COLORS.map((color) => (
+              <button
+                type="button"
+                key={color.id}
+                className={`swatch swatch--${color.id} ${
+                  (popup.note.color ?? "yellow") === color.id ? "is-active" : ""
+                }`}
+                aria-label={color.label}
+                onClick={() => onHighlight(color.id)}
+              />
+            ))}
+          </div>
         </div>
       ) : null}
 
@@ -2471,6 +2496,25 @@ function ReaderPopover({
             <button type="button" onClick={onDelete}>
               <Trash2 size={16} />
               删除
+            </button>
+          </>
+        ) : choosingStyle ? (
+          <>
+            <button
+              type="button"
+              className="reader-popover__back"
+              aria-label="返回划线操作"
+              onClick={() => setChoosingStyle(false)}
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <button type="button" onClick={() => onHighlight("yellow", "underline")}>
+              <span className="highlight-style-icon is-underline" aria-hidden="true">字</span>
+              下划线
+            </button>
+            <button type="button" onClick={() => onHighlight("yellow", "marker")}>
+              <span className="highlight-style-icon is-marker" aria-hidden="true">字</span>
+              马克笔
             </button>
           </>
         ) : more ? (
@@ -2494,7 +2538,7 @@ function ReaderPopover({
           </>
         ) : (
           <>
-            <button type="button" onClick={() => onHighlight("yellow")}>
+            <button type="button" onClick={() => setChoosingStyle(true)}>
               <Highlighter size={16} />
               划线
             </button>
@@ -3147,7 +3191,8 @@ function ReaderScreen({
   onStartListening: (position: BookPosition) => void;
   onHighlight: (
     parts: HighlightPart[],
-    color: HighlightColor
+    color: HighlightColor,
+    style?: HighlightStyle
   ) => Promise<BookNote | null>;
   onUpdateNote: (note: BookNote) => Promise<boolean>;
   onDeleteNote: (note: BookNote) => Promise<boolean>;
@@ -3649,14 +3694,29 @@ function ReaderScreen({
     mergeNoteGroup(notes.filter((item) => groupKey(item) === groupKey(note)))
       .excerpt;
 
-  const applyHighlight = async (color: HighlightColor) => {
+  const applyHighlight = async (
+    color: HighlightColor,
+    highlightStyle?: HighlightStyle
+  ) => {
     if (activePopup?.kind === "mark") {
-      if (await onUpdateNote({ ...activePopup.note, color })) setPopup(null);
+      if (
+        await onUpdateNote({
+          ...activePopup.note,
+          color,
+          highlightStyle: highlightStyle ?? activePopup.note.highlightStyle ?? "underline",
+        })
+      ) {
+        setPopup(null);
+      }
       return;
     }
     if (activePopup?.kind !== "selection") return;
     const anchor = activePopup.anchor;
-    const created = await onHighlight(activePopup.parts, color);
+    const created = await onHighlight(
+      activePopup.parts,
+      color,
+      highlightStyle ?? "underline"
+    );
     if (!created) {
       // 存不下就别把选区收掉，用户原地再点一次「划线」就是重试。
       onToast("划线没保存上，再点一次试试");
@@ -5284,7 +5344,8 @@ export default function MotingApp() {
   const createHighlights = async (
     book: Book,
     parts: HighlightPart[],
-    color: HighlightColor
+    color: HighlightColor,
+    highlightStyle: HighlightStyle = "underline"
   ): Promise<BookNote | null> => {
     const groupId = makeId("mark");
     const base = Date.now();
@@ -5306,6 +5367,7 @@ export default function MotingApp() {
         start: part.start,
         end: part.end,
         color,
+        highlightStyle,
         groupId,
       } satisfies BookNote;
     });
@@ -5328,6 +5390,7 @@ export default function MotingApp() {
     const patch = (item: BookNote): BookNote => ({
       ...item,
       color: note.color,
+      highlightStyle: note.highlightStyle ?? "underline",
       thought: note.thought,
     });
     try {
@@ -5514,8 +5577,8 @@ export default function MotingApp() {
             player.start(selectedBook.id, position);
             setView({ name: "player", bookId: selectedBook.id });
           }}
-          onHighlight={(parts, color) =>
-            createHighlights(selectedBook, parts, color)
+          onHighlight={(parts, color, style) =>
+            createHighlights(selectedBook, parts, color, style)
           }
           onUpdateNote={updateNote}
           onDeleteNote={deleteBookNote}

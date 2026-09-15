@@ -211,13 +211,32 @@ with sync_playwright() as p:
         menu_inside(page)
         page.screenshot(path=str(OUT / f"cross-paragraph-{width}.png"))
         page.get_by_role("button", name="划线", exact=True).click()
+        expect(page.get_by_role("button", name="下划线", exact=True)).to_be_visible()
+        expect(page.get_by_role("button", name="马克笔", exact=True)).to_be_visible()
+        menu_inside(page)
+        page.screenshot(path=str(OUT / f"style-picker-{width}.png"))
+        page.get_by_role("button", name="马克笔", exact=True).click()
         expect(page.locator(".reader-mark").first).to_be_visible()
+        expect(page.locator(".reader-mark").first).to_have_class(__import__('re').compile("reader-mark--marker"))
+        page.screenshot(path=str(OUT / f"marker-{width}.png"))
         page.get_by_role("button", name="蓝色", exact=True).click()
         page.wait_for_timeout(100)
         notes = snapshot_notes(page)
         assert len(notes) >= 2, notes
         assert all(note["color"] == "blue" for note in notes), notes
+        assert all(note["highlightStyle"] == "marker" for note in notes), notes
         assert len({note["groupId"] for note in notes}) == 1, notes
+        # 刷新后仍恢复马克笔；已有跨段划线切换样式时必须整组同步。
+        open_reader(page)
+        expect(page.locator(".reader-mark").first).to_have_class(__import__('re').compile("reader-mark--marker"))
+        page.locator(".reader-mark").first.click()
+        page.get_by_role("button", name="下划线", exact=True).click()
+        expect(page.locator(".reader-mark").first).to_have_class(__import__('re').compile("reader-mark--underline"))
+        assert all(note["highlightStyle"] == "underline" for note in snapshot_notes(page))
+        page.locator(".reader-mark").first.click()
+        page.get_by_role("button", name="马克笔", exact=True).click()
+        expect(page.locator(".reader-mark").first).to_have_class(__import__('re').compile("reader-mark--marker"))
+        assert all(note["highlightStyle"] == "marker" for note in snapshot_notes(page))
         page.locator(".reader-mark").first.click()
         page.get_by_role("button", name="想法", exact=True).click()
         page.get_by_placeholder("写点什么…").fill("跨段划线回归测试")

@@ -93,6 +93,9 @@ export type NoteKind = "highlight" | "listening-mark";
 /** 划线颜色，取值对应 CSS 里 --mark-* 那组变量。 */
 export type HighlightColor = "yellow" | "green" | "blue" | "pink";
 
+/** 旧划线没有这个字段，读取时按 underline 兼容。 */
+export type HighlightStyle = "underline" | "marker";
+
 export interface BookNote {
   id: string;
   bookId: string;
@@ -105,6 +108,7 @@ export interface BookNote {
   start?: number;
   end?: number;
   color?: HighlightColor;
+  highlightStyle?: HighlightStyle;
   /** 用户为这条划线写的想法。 */
   thought?: string;
   /**
