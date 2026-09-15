@@ -137,6 +137,17 @@ export function useAppNavigation(): AppNavigation {
     [replace]
   );
 
+  // 滚动位置由应用自己管：阅读器要按「读到哪一句」定位，浏览器那套自动还原
+  // 会在我们定位完之后再把旧的 scrollY 盖回来，刷新后就落在别处。
+  useEffect(() => {
+    if (!("scrollRestoration" in window.history)) return;
+    const previous = window.history.scrollRestoration;
+    window.history.scrollRestoration = "manual";
+    return () => {
+      window.history.scrollRestoration = previous;
+    };
+  }, []);
+
   useEffect(() => {
     const onPop = (event: PopStateEvent) => {
       remember();

@@ -3257,6 +3257,48 @@ function AiInlineAsk({
   );
 }
 
+/**
+ * 阅读进度的锚点高度：距视口顶多少像素的那一句算「你正读到这里」。
+ *
+ * 存和取必须共用这一个数。之前存的是「距顶 150px 那句」，恢复却用
+ * scrollIntoView({block:"center"}) 把它放到屏幕正中，两边差了约四分之一屏，
+ * 每次重新进书都被往回推五六行，看起来就是「进度有偏移」。
+ * 改这个值要同时确认它落在下面 IntersectionObserver 的 rootMargin 观察带里。
+ */
+const READING_ANCHOR_TOP = 150;
+
+/**
+ * 阅读位置的同步兜底。
+ *
+ * 正式的落盘走 IndexedDB，但那是攒 2.5 秒一批、而且是异步的：手机上把应用划掉、
+ * 或者系统回收 PWA 时，pagehide 里那次补写根本来不及完成，最近几秒读的就丢了，
+ * 下次进来退回更早的位置——这正是「有时候进度有偏移」。localStorage 是同步写，
+ * 拿它兜住最后一下；两边谁新用谁。
+ */
+const POSITION_KEY = "moting:pos:";
+
+function rememberPosition(bookId: string, position: BookPosition) {
+  try {
+    window.localStorage.setItem(POSITION_KEY + bookId, JSON.stringify(position));
+  } catch {
+    // 隐私模式下写不了，那就只剩 IndexedDB 那条路，不影响正常使用。
+  }
+}
+
+/** 取 IndexedDB 和同步兜底里较新的那个位置。 */
+function latestPosition(book: Book): BookPosition | undefined {
+  const stored = book.readingPosition;
+  try {
+    const raw = window.localStorage.getItem(POSITION_KEY + book.id);
+    if (!raw) return stored;
+    const backup = JSON.parse(raw) as BookPosition;
+    if (!backup?.sentenceId) return stored;
+    return !stored || backup.updatedAt > stored.updatedAt ? backup : stored;
+  } catch {
+    return stored;
+  }
+}
+
 function ReaderScreen({
   book,
   notes,
@@ -3294,7 +3336,8 @@ function ReaderScreen({
   onSettingsChange: (settings: ReaderSettings) => void;
   onToast: (message: string) => void;
 }) {
-  const initial = book.readingPosition ?? initialPosition(book);
+  const restorePosition = latestPosition(book);
+  const initial = restorePosition ?? initialPosition(book);
   const [chapterIndex, setChapterIndex] = useState(initial.chapterIndex);
   const [showChapters, setShowChapters] = useState(false);
   const tocListRef = useRevealActiveChapter(showChapters);
@@ -3331,6 +3374,8 @@ function ReaderScreen({
     insetsRef.current = insets;
   }, [customSelect, insets]);
   const savedSentenceRef = useRef(initial.sentenceId);
+  /** 上次存下来的「锚点线落在这句第几像素」，用来判断同一段里是否已经读过了一行以上。 */
+  const savedOffsetRef = useRef(initial.anchorOffset ?? 0);
   // onProgress 每次渲染都是新的箭头函数，book 也随每一次进度回写换引用。把它们直接
   // 写进观察器的依赖，就等于每渲染一次都把盯着上千个句子元素的观察器拆了重建。
   const progressRef = useRef(onProgress);
@@ -3447,14 +3492,95 @@ function ReaderScreen({
 
   useEffect(() => {
     if (paged) return;
-    const targetId = book.readingPosition?.sentenceId;
+    const targetId = restorePosition?.sentenceId;
     if (!targetId) return;
-    const timer = setTimeout(() => {
-      articleRef.current
-        ?.querySelector<HTMLElement>(`[data-sentence-id="${targetId}"]`)
-        ?.scrollIntoView({ block: "center" });
-    }, 80);
-    return () => clearTimeout(timer);
+    // 刚打开一本没读过的书时，openReader 会写一条「第一章第一句」的起始位置。
+    // 那种情况不该去定位：把第一句对到锚点线等于把章节标题顶出屏幕，
+    // 而书本来就该从头显示。真读到过第一句也一样——那时页面本来就在顶上。
+    if (
+      restorePosition.chapterIndex === 0 &&
+      restorePosition.sentenceIndex === 0 &&
+      !restorePosition.anchorOffset
+    ) {
+      return;
+    }
+
+    // 用户一上手就不再纠正位置，否则会在他手底下把页面拽走。
+    let settled = false;
+    let frame = 0;
+    const startedAt = Date.now();
+    const stop = () => {
+      settled = true;
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+    };
+
+    /**
+     * 把这句话放回保存时的那个高度。返回「是不是已经到位」。
+     *
+     * 不能把「找到元素」当成成功：正文刚挂上时文档高度还没撑开（实测那一刻
+     * scrollHeight 只有一屏、maxScroll 为 0），scrollBy 会被整个夹掉，滚了等于没滚。
+     * 所以这里要实际复查一次位置，没到位就交给下面的循环继续盯。
+     */
+    const place = () => {
+      const element = articleRef.current?.querySelector<HTMLElement>(
+        `[data-sentence-id="${targetId}"]`
+      );
+      if (!element) return false;
+      // 目标高度 = 锚点线往上退回「当初读到这句第几像素」，这样长段落读到一半
+      // 也能回到原处，而不是退回整段开头。
+      const targetTop =
+        READING_ANCHOR_TOP - (restorePosition?.anchorOffset ?? 0);
+      const driftNow = () => element.getBoundingClientRect().top - targetTop;
+
+      const drift = driftNow();
+      if (Math.abs(drift) <= 2) return true;
+      window.scrollBy(0, drift);
+
+      // 到不了位就交给下面的循环继续盯。
+      //
+      // 这里不能用「已经滚到底了就算到位」来提前收工：正文刚挂上的那几帧
+      // scrollHeight 只有一屏、maxScroll 恰好是 0，那个判断会在第一帧就为真，
+      // 等于什么都没做就宣告成功。真正在书末尾的句子由超时兜底，代价只是
+      // 多空转几帧，位置本来就已经贴着底了。
+      return Math.abs(driftNow()) <= 2;
+    };
+
+    // 一直盯到真的落位为止：目标句可能还没渲染，也可能渲染了但版面还在长高。
+    // 原来是 80ms 到点查一次，查不到就静默放弃，整本书都不恢复。
+    // 冷启动时正文是一段段长出来的：定位完还会再长高，落点就被顶走。
+    // 所以不能只给一个固定超时，得跟着版面变化反复校，直到这个硬上限为止。
+    const hardStop = startedAt + 8000;
+    const settle = (deadline: number) => {
+      if (settled) return;
+      if (place() || Date.now() > Math.min(deadline, hardStop)) return;
+      frame = requestAnimationFrame(() => settle(deadline));
+    };
+    settle(startedAt + 3000);
+
+    // 版面一变（接章、图片占位、正文长高）就重新校一次。
+    const resize = new ResizeObserver(() => {
+      if (settled || Date.now() > hardStop) return;
+      settle(Date.now() + 600);
+    });
+    if (articleRef.current) resize.observe(articleRef.current);
+
+    // 正文字体是 font-display: swap，换上之后整页重排，落点会整体飘掉；
+    // 排完再校一次。手机上这一下尤其明显，冷启动时字体往往还没到。
+    void document.fonts?.ready.then(() => {
+      if (!settled) settle(Date.now() + 1200);
+    });
+
+    window.addEventListener("wheel", stop, { passive: true, once: true });
+    window.addEventListener("touchstart", stop, { passive: true, once: true });
+    window.addEventListener("keydown", stop, { once: true });
+    return () => {
+      stop();
+      resize.disconnect();
+      window.removeEventListener("wheel", stop);
+      window.removeEventListener("touchstart", stop);
+      window.removeEventListener("keydown", stop);
+    };
     // 只在进入这本书／切换阅读模式时回到上次的位置。连续滚动里 chapterIndex 会随滑动
     // 一直变，把它放进依赖会让页面自己跳回去。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3485,41 +3611,126 @@ function ReaderScreen({
     if (!articleRef.current || !("IntersectionObserver" in window)) return;
     let pendingTimer: ReturnType<typeof setTimeout> | null = null;
     let pendingSave: (() => void) | null = null;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const candidates = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort(
-            (a, b) =>
-              Math.abs(a.boundingClientRect.top - 150) -
-              Math.abs(b.boundingClientRect.top - 150)
-          );
-        const element = candidates[0]?.target as HTMLElement | undefined;
-        const index = Number(element?.dataset.sentenceIndex);
-        // 连续滚动里视口内可能横跨两章，章节号只能从元素上读，不能用闭包里的。
-        const chIndex = Number(element?.dataset.chapterIndex);
-        const id = element?.dataset.sentenceId;
-        if (!id || Number.isNaN(index) || Number.isNaN(chIndex)) return;
-        setChapterIndex(chIndex);
-        if (savedSentenceRef.current === id) return;
-        if (pendingTimer) clearTimeout(pendingTimer);
-        pendingSave = () => {
-          savedSentenceRef.current = id;
-          progressRef.current(positionFor(bookRef.current, chIndex, index));
-        };
-        pendingTimer = setTimeout(() => {
-          pendingTimer = null;
-          pendingSave?.();
-          pendingSave = null;
-        }, 500);
-      },
-      { rootMargin: "-90px 0px -58% 0px", threshold: 0.15 }
-    );
+    /**
+     * 正读到哪一句 —— 就看锚点线穿过的是谁。
+     *
+     * 不能拿 observer 给的 entries 去挑：它每次只报告「刚跨过观察带边缘」的那一两个
+     * 元素，挑来挑去永远挑不中真正压在锚点线上的那句。真机日志里 candidates 恒为 1、
+     * 选中句的 top 稳定落在 320~338px（观察带下沿），而不是锚点的 150px——
+     * 存的位置比你实际读到的地方晚了小半屏，回来自然就对不上。
+     *
+     * 锚点线正好落在段间留白时探几个邻近的 y，免得这一下白存。
+     */
+    /** 这一段里哪一句的某一行压着 y。行内元素的整体矩形不可靠，得看逐行矩形。 */
+    const sentenceCrossing = (block: Element, y: number): HTMLElement | null => {
+      for (const sentence of block.querySelectorAll<HTMLElement>(
+        "[data-sentence-id]"
+      )) {
+        for (const rect of sentence.getClientRects()) {
+          if (rect.top <= y && rect.bottom > y) return sentence;
+        }
+      }
+      return null;
+    };
+
+    const sentenceAtAnchor = (): HTMLElement | null => {
+      const article = articleRef.current;
+      if (!article) return null;
+      const box = article.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      for (const dy of [0, 10, -10, 24, -24]) {
+        const y = READING_ANCHOR_TOP + dy;
+        for (const hit of document.elementsFromPoint(x, y)) {
+          if (!article.contains(hit)) continue;
+          const inside = hit.closest<HTMLElement>("[data-sentence-id]");
+          if (inside) return inside;
+          // 句子是行内 span，锚点线经常落在行与行之间的空隙里，命中测试只能
+          // 打到外层段落。这时就在这一段里按「逐行矩形」找真正压着线的那一句，
+          // 不然这次滚动会被整个丢掉——进度停在上一次，回来就差一大截。
+          const byLine = sentenceCrossing(hit, y);
+          if (byLine) return byLine;
+        }
+      }
+      return null;
+    };
+
+    /**
+     * 把「此刻锚点线压着的那一句」记成阅读进度。
+     *
+     * 一定要在滚动停下来之后再量：之前是在 observer 回调里当场把位置算好、再延迟
+     * 500ms 落盘，中间手指还在滑，存下来的是几百像素之前的位置。
+     */
+    const measureAnchor = () => {
+      const element = sentenceAtAnchor();
+      if (!element) return null;
+      const index = Number(element.dataset.sentenceIndex);
+      // 连续滚动里视口内可能横跨两章，章节号只能从元素上读，不能用闭包里的。
+      const chIndex = Number(element.dataset.chapterIndex);
+      const id = element.dataset.sentenceId;
+      if (!id || Number.isNaN(index) || Number.isNaN(chIndex)) return null;
+      // 不能钳到 >=0：锚点线落在段间留白时探到的是下面那句，它的顶边在线下方，
+      // 偏移本来就是负的。钳成 0 等于把它硬拉到线上，恢复时整页抬高几十像素。
+      const anchorOffset = Math.round(
+        READING_ANCHOR_TOP - element.getBoundingClientRect().top
+      );
+      return { id, index, chIndex, anchorOffset };
+    };
+
+    type Anchor = NonNullable<ReturnType<typeof measureAnchor>>;
+
+    const commitAnchor = (anchor: Anchor) => {
+      setChapterIndex(anchor.chIndex);
+      // 一整段可能有好几屏高：同一段里往下读时 id 不变但句内偏移在变，
+      // 只按 id 去重会把这段时间读的都丢掉。差过一行就重存。
+      if (
+        savedSentenceRef.current === anchor.id &&
+        Math.abs(anchor.anchorOffset - savedOffsetRef.current) < 24
+      ) {
+        return;
+      }
+      savedSentenceRef.current = anchor.id;
+      savedOffsetRef.current = anchor.anchorOffset;
+      const position: BookPosition = {
+        ...positionFor(bookRef.current, anchor.chIndex, anchor.index),
+        anchorOffset: anchor.anchorOffset,
+      };
+      rememberPosition(bookRef.current.id, position);
+      progressRef.current(position);
+    };
+
+    const saveAnchor = () => {
+      const anchor = measureAnchor();
+      if (anchor) commitAnchor(anchor);
+    };
+
+    const schedule = () => {
+      // 当场先量一份快照：卸载时（退出阅读器、切书）effect 清理跑在 DOM 拆掉之后，
+      // 那时再量是量不到的，只能靠这份快照把最后这一下补写进去。
+      const snapshot = measureAnchor();
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingSave = snapshot ? () => commitAnchor(snapshot) : null;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        pendingSave = null;
+        // 正常路径按停下来那一刻重新量一次，比快照更准。
+        saveAnchor();
+      }, 400);
+    };
+
+    // observer 只当「跨章了」的触发器；真正决定存什么的是停下来那一刻的锚点线。
+    const observer = new IntersectionObserver(schedule, {
+      rootMargin: "-90px 0px -58% 0px",
+      threshold: 0.15,
+    });
+    // 手指停住时未必有元素跨过观察带，那样 observer 不会再响，进度就停在半路。
+    // 滚动本身才是「位置变了」最可靠的信号。
+    window.addEventListener("scroll", schedule, { passive: true });
     articleRef.current
       .querySelectorAll("[data-sentence-id]")
       .forEach((element) => observer.observe(element));
     return () => {
-      // 卸载或重挂前如果还有没落盘的最新位置（500ms 防抖还没到），立即存掉，
+      window.removeEventListener("scroll", schedule);
+      // 卸载前如果还有没落盘的最新位置（防抖还没到），立即量一次存掉，
       // 不能让 clearTimeout 把用户刚读到的地方悄悄扔了。
       if (pendingTimer) {
         clearTimeout(pendingTimer);

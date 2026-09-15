@@ -41,11 +41,16 @@ def snapshot_settings(page):
 
 def open_reader(page):
     page.goto(BASE)
-    # 现在刷新会回到上次待的地方：已经落在阅读器里就不必再从书架进一次。
-    page.wait_for_timeout(600)
-    if page.locator(".reader-article").count():
-        return
+    # 阅读位置和所在板块现在都会被记住并恢复。这些用例假设每次都从书的开头、
+    # 从书架点进去，所以先把记住的东西清掉，保证每次起点一致。
+    page.evaluate(
+        "() => { for (const k of Object.keys(localStorage)) "
+        "if (k.startsWith('moting:')) localStorage.removeItem(k); }"
+    )
+    page.reload()
     page.get_by_role("button", name="书库", exact=True).wait_for(timeout=60000)
+    # 明确切到书库再点书：首页那张「继续」卡片上还有播放按钮，落到哪个按钮上不稳定。
+    page.get_by_role("button", name="书库", exact=True).click()
     page.locator("article button").first.click()
     page.locator(".reader-article").wait_for()
     print(page.locator("body").aria_snapshot()[:250], flush=True)

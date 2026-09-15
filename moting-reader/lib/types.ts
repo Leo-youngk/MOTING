@@ -64,6 +64,13 @@ export interface BookPosition {
   sentenceIndex: number;
   percent: number;
   updatedAt: number;
+  /**
+   * 锚点线落在这句话内部第几像素（从这句顶部往下算）。
+   *
+   * 只记句子不够：一整段可能有好几屏高，读到段中间时只按「把这段顶部对到锚点线」
+   * 恢复，会整整往回退一段。老记录没有这个字段，按 0 处理即可。
+   */
+  anchorOffset?: number;
 }
 
 export interface Book {
