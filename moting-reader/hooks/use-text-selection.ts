@@ -8,7 +8,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { Rect } from "../lib/popover-placement";
+import { fillLineBoxes, type Rect } from "../lib/popover-placement";
 import {
   comparePlaces,
   expandToWord,
@@ -375,14 +375,20 @@ export function useTextSelection(
       return;
     }
 
-    const rects = Array.from(range.getClientRects())
+    const raw = Array.from(range.getClientRects())
       .filter((rect) => rect.width > 0 || rect.height > 0)
       .map(toRect);
-    if (!rects.length) {
+    if (!raw.length) {
       geometryRef.current = EMPTY_GEOMETRY;
       setGeometry(EMPTY_GEOMETRY);
       return;
     }
+    // 只有一行时没有邻行可参照，拿正文自己的行高兜底。
+    const sample = article.querySelector<HTMLElement>("[data-sentence-id]");
+    const lineHeight = sample
+      ? Number.parseFloat(getComputedStyle(sample).lineHeight) || 0
+      : 0;
+    const rects = fillLineBoxes(raw, lineHeight);
 
     // 选中的文字也在这里一并算出来：它跟屏幕位置一样，是从「句子 + 偏移」
     // 翻译出来的结果，放同一处算才不会两边对不上。

@@ -18,6 +18,8 @@ export interface PlacementInput {
   margin?: number;
   /** 菜单和选区之间的空隙，默认 10。 */
   gap?: number;
+  /** 优先摆哪一侧。那一侧放得下就用它，放不下仍按下面的通用规则来。 */
+  prefer?: "above" | "below";
 }
 
 export interface Placement {
@@ -47,14 +49,20 @@ export function placePopover(input: PlacementInput): Placement {
 
   const roomAbove = input.anchor.top - gap - safeTop;
   const roomBelow = safeBottom - (input.anchor.bottom + gap);
+  const fitsAbove = roomAbove >= input.menu.height;
+  const fitsBelow = roomBelow >= input.menu.height;
   const side: Placement["side"] =
-    roomAbove >= input.menu.height
-      ? "above"
-      : roomBelow >= input.menu.height
-        ? "below"
-        : roomAbove >= roomBelow
+    input.prefer === "below" && fitsBelow
+      ? "below"
+      : input.prefer === "above" && fitsAbove
+        ? "above"
+        : fitsAbove
           ? "above"
-          : "below";
+          : fitsBelow
+            ? "below"
+            : roomAbove >= roomBelow
+              ? "above"
+              : "below";
 
   const rawTop =
     side === "above"
@@ -95,4 +103,78 @@ export function anchorFromRects(
     (rect) => rect.bottom > safeTop && rect.top < safeBottom
   );
   return visible ?? union;
+}
+
+/**
+ * 给一整片选区摆菜单。
+ *
+ * 不能只拿选区顶端当锚点：顶端上方放不下时会翻到下方，而「下方」是相对顶端那一行说的，
+ * 菜单正好压在选中的第二、三行正文上。所以翻到下方时改用选区底端重新摆一次。
+ */
+export function placeForSelection(input: {
+  rects: Rect[];
+  /** 整片选区的并集，一行都不可见时拿它兜底。 */
+  union: Rect;
+  menu: { width: number; height: number };
+  viewport: { width: number; height: number };
+  insets: { top: number; bottom: number };
+}): Placement {
+  const shared = {
+    menu: input.menu,
+    viewport: input.viewport,
+    insets: input.insets,
+  };
+
+  const top = anchorFromRects(input.rects, input.union, input.viewport, input.insets);
+  const above = placePopover({ anchor: top, ...shared });
+  if (above.side === "above") return above;
+
+  const bottom = anchorFromRects(
+    [...input.rects].reverse(),
+    input.union,
+    input.viewport,
+    input.insets
+  );
+  return placePopover({ anchor: bottom, prefer: "below", ...shared });
+}
+
+/**
+ * 把选区矩形补成整行，并把同一行的碎片合成一条。
+ *
+ * getClientRects() 给的是字形盒：行高 1.9 时字形只占约 21px，而一行占 36px。
+ * 直接照着画出来是一条条横杠、行与行之间留着黑缝，真机上一眼就能看出不对，
+ * 跟系统选区那种连续色块完全不是一回事。
+ *
+ * 行距按相邻行的实际间隔算，这样正文和标题各自不同的行高都能补对；
+ * 只有一行时没有邻居可参照，才退回传进来的行高。
+ */
+export function fillLineBoxes(rects: Rect[], fallbackLineHeight: number): Rect[] {
+  if (!rects.length) return [];
+
+  const rows: Rect[][] = [];
+  for (const rect of [...rects].sort((a, b) => a.top - b.top || a.left - b.left)) {
+    const row = rows[rows.length - 1];
+    // 同一行的碎片 top 几乎相同，跨行才另起一组。
+    if (row && Math.abs(row[0].top - rect.top) <= 2) row.push(rect);
+    else rows.push([rect]);
+  }
+
+  const merged = rows.map((row) => ({
+    top: Math.min(...row.map((item) => item.top)),
+    bottom: Math.max(...row.map((item) => item.bottom)),
+    left: Math.min(...row.map((item) => item.left)),
+    right: Math.max(...row.map((item) => item.right)),
+  }));
+
+  return merged.map((row, index) => {
+    const next = merged[index + 1];
+    const previous = merged[index - 1];
+    const spacing = next
+      ? next.top - row.top
+      : previous
+        ? row.top - previous.top
+        : fallbackLineHeight;
+    const pad = Math.max(0, (spacing - (row.bottom - row.top)) / 2);
+    return { ...row, top: row.top - pad, bottom: row.bottom + pad };
+  });
 }

@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   anchorFromRects,
+  fillLineBoxes,
+  placeForSelection,
   placePopover,
   type Rect,
 } from "../lib/popover-placement.ts";
@@ -201,4 +203,99 @@ test("整段选区都不可见时退回并集，交给夹取兜底", () => {
     insets: INSETS,
   });
   assertInsideScreen(placement, MENU, IPHONE, INSETS);
+});
+
+/** 行高 1.9、字号 19：字形盒约 21px，整行 36px。真机上量到的就是这个比例。 */
+const GLYPH = 21;
+const LINE = 36;
+
+function lineRect(index: number, left: number, right: number): Rect {
+  const top = 200 + index * LINE;
+  return { top, bottom: top + GLYPH, left, right };
+}
+
+test("选区矩形补成整行，行与行之间不留缝", () => {
+  const filled = fillLineBoxes(
+    [lineRect(0, 40, 340), lineRect(1, 20, 350), lineRect(2, 20, 180)],
+    LINE
+  );
+
+  assert.equal(filled.length, 3);
+  for (let i = 1; i < filled.length; i++) {
+    assert.ok(
+      filled[i].top <= filled[i - 1].bottom + 0.01,
+      `第 ${i} 行和上一行之间还有 ${filled[i].top - filled[i - 1].bottom}px 的缝`
+    );
+  }
+  // 补完之后每行应该接近整行高，而不是只有字形那一条。
+  for (const row of filled) {
+    assert.ok(row.bottom - row.top >= LINE - 0.01, "行高没补满");
+  }
+});
+
+test("同一行的碎片合并成一条，消掉亚像素缝", () => {
+  const sameLine: Rect[] = [
+    { top: 200, bottom: 221, left: 20, right: 140 },
+    { top: 200.4, bottom: 221.4, left: 140.2, right: 300 },
+  ];
+  const filled = fillLineBoxes(sameLine, LINE);
+
+  assert.equal(filled.length, 1, "同一行应该只剩一条");
+  assert.equal(filled[0].left, 20);
+  assert.equal(filled[0].right, 300);
+});
+
+test("单行选区没有邻行可参照，用传进来的行高补", () => {
+  const filled = fillLineBoxes([lineRect(0, 40, 200)], LINE);
+  assert.equal(filled.length, 1);
+  assert.ok(Math.abs(filled[0].bottom - filled[0].top - LINE) < 0.01);
+});
+
+test("行高取不到时不补，也不该崩", () => {
+  const raw = [lineRect(0, 40, 200)];
+  const filled = fillLineBoxes(raw, 0);
+  assert.equal(filled.length, 1);
+  assert.equal(filled[0].bottom - filled[0].top, GLYPH);
+  assert.deepEqual(fillLineBoxes([], LINE), []);
+});
+
+test("长选区翻到下方时，菜单摆在选区末尾之后，不压正文", () => {
+  // 选区从屏幕很靠上开始、一直拉到中段：上方放不下菜单。
+  const rects = Array.from({ length: 8 }, (_, i) => ({
+    top: 70 + i * LINE,
+    bottom: 70 + i * LINE + GLYPH,
+    left: 20,
+    right: 360,
+  }));
+  const union = { top: rects[0].top, bottom: rects[7].bottom, left: 20, right: 360 };
+
+  const placement = placeForSelection({
+    rects,
+    union,
+    menu: MENU,
+    viewport: IPHONE,
+    insets: INSETS,
+  });
+
+  assert.equal(placement.side, "below");
+  assert.ok(
+    placement.top >= rects[7].bottom,
+    `菜单顶边 ${placement.top} 压在选区里了（选区末行底边 ${rects[7].bottom}）`
+  );
+});
+
+test("上方放得下就照旧摆在选区上端", () => {
+  const rects = [lineRect(0, 40, 340), lineRect(1, 20, 350)];
+  const union = { top: rects[0].top, bottom: rects[1].bottom, left: 20, right: 350 };
+
+  const placement = placeForSelection({
+    rects,
+    union,
+    menu: MENU,
+    viewport: IPHONE,
+    insets: INSETS,
+  });
+
+  assert.equal(placement.side, "above");
+  assert.ok(placement.top + MENU.height <= rects[0].top);
 });

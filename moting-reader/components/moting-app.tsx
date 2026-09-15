@@ -125,8 +125,7 @@ import { useSafeInsets, type SafeInsets } from "../hooks/use-safe-insets";
 import { useTextSelection } from "../hooks/use-text-selection";
 import { SelectionLayer } from "./selection-layer";
 import {
-  anchorFromRects,
-  placePopover,
+  placeForSelection,
   type Placement,
   type Rect,
 } from "../lib/popover-placement";
@@ -2136,7 +2135,14 @@ function ReaderImage({
 }
 
 type ReaderPopupState =
-  | { kind: "selection"; anchor: Rect; parts: HighlightPart[]; text: string }
+  | {
+      kind: "selection";
+      anchor: Rect;
+      /** 选区逐行的矩形。菜单要靠它决定摆在选区上端还是下端，不然会压住正文。 */
+      rects: Rect[];
+      parts: HighlightPart[];
+      text: string;
+    }
   | { kind: "mark"; anchor: Rect; note: BookNote };
 
 /**
@@ -2173,6 +2179,12 @@ function ReaderPopover({
   const [placement, setPlacement] = useState<Placement | null>(null);
 
   const { top, bottom, left, right } = popup.anchor;
+  // 已有划线只有一块锚点矩形，选区则是逐行的一串。
+  // 走 useMemo 是为了给下面的量位 effect 一个稳定依赖，否则每渲染一次都要重量。
+  const rects = useMemo(
+    () => (popup.kind === "selection" ? popup.rects : [popup.anchor]),
+    [popup]
+  );
 
   // 换了一处选区就回到第一层，否则上次翻开的「更多」会粘在下一次。
   // 这里按「选中的是哪几个字」比，不按像素位置——滚动时菜单会重新量位置，
@@ -2195,14 +2207,15 @@ function ReaderPopover({
     if (!node) return;
     const box = node.getBoundingClientRect();
     setPlacement(
-      placePopover({
-        anchor: { top, bottom, left, right },
+      placeForSelection({
+        rects,
+        union: { top, bottom, left, right },
         menu: { width: box.width, height: box.height },
         viewport: { width: window.innerWidth, height: window.innerHeight },
         insets,
       })
     );
-  }, [top, bottom, left, right, insets, more, popup.kind]);
+  }, [top, bottom, left, right, rects, insets, more, popup.kind]);
 
   const style: CSSProperties = placement
     ? {
@@ -3377,12 +3390,8 @@ function ReaderScreen({
 
     setPopup({
       kind: "selection",
-      anchor: anchorFromRects(
-        Array.from(range.getClientRects()),
-        range.getBoundingClientRect(),
-        { height: window.innerHeight },
-        insetsRef.current
-      ),
+      anchor: range.getBoundingClientRect(),
+      rects: Array.from(range.getClientRects()),
       parts,
       text: parts.map((part) => part.text).join(""),
     });
@@ -3405,12 +3414,8 @@ function ReaderScreen({
       textSelection.anchor && textSelection.parts.length
       ? {
           kind: "selection",
-          anchor: anchorFromRects(
-            textSelection.rects,
-            textSelection.anchor,
-            { height: typeof window === "undefined" ? 0 : window.innerHeight },
-            insets
-          ),
+          anchor: textSelection.anchor,
+          rects: textSelection.rects,
           parts: textSelection.parts,
           text: textSelection.text,
         }
