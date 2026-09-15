@@ -3505,15 +3505,36 @@ function ReaderScreen({
       return;
     }
 
-    // 用户一上手就不再纠正位置，否则会在他手底下把页面拽走。
+    // 定位只在进书后的这一小段窗口里做，而且一旦成功、或者发现用户已经在滚，
+    // 就立刻把所有钩子摘干净。之前放到 8 秒、成功后还留着 ResizeObserver，
+    // iPhone 上冷启动版面稳得慢（读库、渲染、图片占位、地址栏收起导致视口变高），
+    // 会被一次次重新唤醒，表现就是刚进书滑动发滞、过一会才正常。
+    const SETTLE_WINDOW_MS = 1500;
     let settled = false;
     let frame = 0;
-    const startedAt = Date.now();
+    let resize: ResizeObserver | null = null;
+    const deadline = Date.now() + SETTLE_WINDOW_MS;
+    /** 我们自己滚到的位置，用来把「用户在滚」和「我们在滚」区分开。 */
+    let appliedY = window.scrollY;
+
     const stop = () => {
+      if (settled) return;
       settled = true;
       if (frame) cancelAnimationFrame(frame);
       frame = 0;
+      resize?.disconnect();
+      resize = null;
+      window.removeEventListener("scroll", onUserScroll);
+      window.removeEventListener("wheel", stop);
+      window.removeEventListener("touchstart", stop);
+      window.removeEventListener("keydown", stop);
     };
+
+    function onUserScroll() {
+      // 这一下要是我们自己滚出来的就不算；否则说明用户已经在读了，立刻收手。
+      if (Math.abs(window.scrollY - appliedY) <= 1) return;
+      stop();
+    }
 
     /**
      * 把这句话放回保存时的那个高度。返回「是不是已经到位」。
@@ -3536,51 +3557,43 @@ function ReaderScreen({
       const drift = driftNow();
       if (Math.abs(drift) <= 2) return true;
       window.scrollBy(0, drift);
+      appliedY = window.scrollY;
 
-      // 到不了位就交给下面的循环继续盯。
-      //
       // 这里不能用「已经滚到底了就算到位」来提前收工：正文刚挂上的那几帧
       // scrollHeight 只有一屏、maxScroll 恰好是 0，那个判断会在第一帧就为真，
-      // 等于什么都没做就宣告成功。真正在书末尾的句子由超时兜底，代价只是
-      // 多空转几帧，位置本来就已经贴着底了。
+      // 等于什么都没做就宣告成功。到不了位就交给循环继续盯，超时兜底。
       return Math.abs(driftNow()) <= 2;
     };
 
-    // 一直盯到真的落位为止：目标句可能还没渲染，也可能渲染了但版面还在长高。
-    // 原来是 80ms 到点查一次，查不到就静默放弃，整本书都不恢复。
-    // 冷启动时正文是一段段长出来的：定位完还会再长高，落点就被顶走。
-    // 所以不能只给一个固定超时，得跟着版面变化反复校，直到这个硬上限为止。
-    const hardStop = startedAt + 8000;
-    const settle = (deadline: number) => {
+    const settle = () => {
       if (settled) return;
-      if (place() || Date.now() > Math.min(deadline, hardStop)) return;
-      frame = requestAnimationFrame(() => settle(deadline));
+      // 一次落位就收手，不再留着钩子等下一次版面变化。
+      if (place() || Date.now() > deadline) {
+        stop();
+        return;
+      }
+      frame = requestAnimationFrame(settle);
     };
-    settle(startedAt + 3000);
+    settle();
 
-    // 版面一变（接章、图片占位、正文长高）就重新校一次。
-    const resize = new ResizeObserver(() => {
-      if (settled || Date.now() > hardStop) return;
-      settle(Date.now() + 600);
+    // 窗口内版面还在长高（接章、图片占位、视口变化）时补一次；一旦落位，
+    // stop() 会把这个观察器一起摘掉。
+    resize = new ResizeObserver(() => {
+      if (settled || Date.now() > deadline) return;
+      settle();
     });
     if (articleRef.current) resize.observe(articleRef.current);
 
-    // 正文字体是 font-display: swap，换上之后整页重排，落点会整体飘掉；
-    // 排完再校一次。手机上这一下尤其明显，冷启动时字体往往还没到。
     void document.fonts?.ready.then(() => {
-      if (!settled) settle(Date.now() + 1200);
+      if (settled || Date.now() > deadline) return;
+      settle();
     });
 
+    window.addEventListener("scroll", onUserScroll, { passive: true });
     window.addEventListener("wheel", stop, { passive: true, once: true });
     window.addEventListener("touchstart", stop, { passive: true, once: true });
     window.addEventListener("keydown", stop, { once: true });
-    return () => {
-      stop();
-      resize.disconnect();
-      window.removeEventListener("wheel", stop);
-      window.removeEventListener("touchstart", stop);
-      window.removeEventListener("keydown", stop);
-    };
+    return stop;
     // 只在进入这本书／切换阅读模式时回到上次的位置。连续滚动里 chapterIndex 会随滑动
     // 一直变，把它放进依赖会让页面自己跳回去。
     // eslint-disable-next-line react-hooks/exhaustive-deps
