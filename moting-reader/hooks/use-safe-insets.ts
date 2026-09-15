@@ -5,9 +5,11 @@ import { useEffect, useState } from "react";
 export interface SafeInsets {
   top: number;
   bottom: number;
+  left: number;
+  right: number;
 }
 
-const ZERO: SafeInsets = { top: 0, bottom: 0 };
+const ZERO: SafeInsets = { top: 0, bottom: 0, left: 0, right: 0 };
 
 /**
  * 量出刘海和底部被占掉的像素数。
@@ -30,18 +32,28 @@ function measure(): SafeInsets {
     "pointer-events:none",
     "padding-top:env(safe-area-inset-top,0px)",
     "padding-bottom:env(safe-area-inset-bottom,0px)",
+    "padding-left:env(safe-area-inset-left,0px)",
+    "padding-right:env(safe-area-inset-right,0px)",
   ].join(";");
   document.body.appendChild(probe);
   const style = getComputedStyle(probe);
   const top = Number.parseFloat(style.paddingTop) || 0;
   const safeBottom = Number.parseFloat(style.paddingBottom) || 0;
+  const safeLeft = Number.parseFloat(style.paddingLeft) || 0;
+  const safeRight = Number.parseFloat(style.paddingRight) || 0;
   probe.remove();
 
   const keyboard =
     Number.parseFloat(
       document.documentElement.style.getPropertyValue("--keyboard-inset")
     ) || 0;
-  return { top, bottom: Math.max(safeBottom, keyboard) };
+  const viewport = window.visualViewport;
+  return {
+    top: Math.max(top, viewport?.offsetTop ?? 0),
+    bottom: Math.max(safeBottom, keyboard, viewport ? window.innerHeight - viewport.height - viewport.offsetTop : 0),
+    left: Math.max(safeLeft, viewport?.offsetLeft ?? 0),
+    right: Math.max(safeRight, viewport ? window.innerWidth - viewport.width - viewport.offsetLeft : 0),
+  };
 }
 
 export function useSafeInsets(): SafeInsets {
@@ -53,7 +65,7 @@ export function useSafeInsets(): SafeInsets {
       frame = 0;
       const next = measure();
       setInsets((current) =>
-        current.top === next.top && current.bottom === next.bottom
+        current.top === next.top && current.bottom === next.bottom && current.left === next.left && current.right === next.right
           ? current
           : next
       );
@@ -68,11 +80,13 @@ export function useSafeInsets(): SafeInsets {
     window.addEventListener("orientationchange", schedule);
     // 键盘只改视觉视口，window 的 resize 未必会来。
     window.visualViewport?.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("scroll", schedule);
     return () => {
       if (frame) cancelAnimationFrame(frame);
       window.removeEventListener("resize", schedule);
       window.removeEventListener("orientationchange", schedule);
       window.visualViewport?.removeEventListener("resize", schedule);
+      window.visualViewport?.removeEventListener("scroll", schedule);
     };
   }, []);
 

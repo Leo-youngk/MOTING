@@ -13,7 +13,7 @@ export interface PlacementInput {
   menu: { width: number; height: number };
   viewport: { width: number; height: number };
   /** 刘海、Home 指示条、键盘占掉的高度。 */
-  insets: { top: number; bottom: number };
+  insets: { top: number; bottom: number; left?: number; right?: number };
   /** 左右和上下都至少留这么多，默认 12。 */
   margin?: number;
   /** 菜单和选区之间的空隙，默认 10。 */
@@ -73,8 +73,9 @@ export function placePopover(input: PlacementInput): Placement {
   const top = Math.min(Math.max(rawTop, safeTop), maxTop);
 
   const anchorCenter = (input.anchor.left + input.anchor.right) / 2;
-  const maxLeft = Math.max(margin, input.viewport.width - margin - input.menu.width);
-  const left = Math.min(Math.max(anchorCenter - input.menu.width / 2, margin), maxLeft);
+  const safeLeft = margin + (input.insets.left ?? 0);
+  const maxLeft = Math.max(safeLeft, input.viewport.width - (input.insets.right ?? 0) - margin - input.menu.width);
+  const left = Math.min(Math.max(anchorCenter - input.menu.width / 2, safeLeft), maxLeft);
 
   const arrowLeft = Math.min(
     Math.max(anchorCenter - left, ARROW_EDGE_PADDING),
@@ -117,7 +118,7 @@ export function placeForSelection(input: {
   union: Rect;
   menu: { width: number; height: number };
   viewport: { width: number; height: number };
-  insets: { top: number; bottom: number };
+  insets: PlacementInput["insets"];
 }): Placement {
   const shared = {
     menu: input.menu,
@@ -174,7 +175,11 @@ export function fillLineBoxes(rects: Rect[], fallbackLineHeight: number): Rect[]
       : previous
         ? row.top - previous.top
         : fallbackLineHeight;
-    const pad = Math.max(0, (spacing - (row.bottom - row.top)) / 2);
+    // 段间距和章标题间距不能算作行高，否则两行之间的大片留白也会被涂满。
+    const lineHeight = fallbackLineHeight > 0
+      ? Math.min(spacing, Math.max(fallbackLineHeight, row.bottom - row.top))
+      : Math.min(spacing, (row.bottom - row.top) * 1.8);
+    const pad = Math.max(0, (lineHeight - (row.bottom - row.top)) / 2);
     return { ...row, top: row.top - pad, bottom: row.bottom + pad };
   });
 }

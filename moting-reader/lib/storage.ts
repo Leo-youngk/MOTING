@@ -246,10 +246,24 @@ export async function getAllNotes(): Promise<BookNote[]> {
 }
 
 export async function saveNote(note: BookNote): Promise<void> {
+  await writeNotes([note]);
+}
+
+/** 一次划线跨多句时，正文标记、改色和删除必须整组提交或整组回滚。 */
+export async function writeNotes(notes: BookNote[], removedIds: string[] = []): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(NOTE_STORE, "readwrite");
-  transaction.objectStore(NOTE_STORE).put(note);
-  await transactionDone(transaction);
+  const done = transactionDone(transaction);
+  try {
+    const store = transaction.objectStore(NOTE_STORE);
+    for (const note of notes) store.put(note);
+    for (const id of removedIds) store.delete(id);
+  } catch (error) {
+    transaction.abort();
+    await done.catch(() => undefined);
+    throw error;
+  }
+  await done;
 }
 
 export async function removeNote(noteId: string): Promise<void> {

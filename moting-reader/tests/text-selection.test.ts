@@ -19,6 +19,16 @@ const sentences: SelectionSentence[] = [
   { chapterIndex: 1, sentenceIndex: 0, sentenceId: "s3", text: "第二章开始了。" },
 ];
 
+test("长按表情和组合字符不会只选中半个字符", () => {
+  for (const glyph of ["😀", "👨‍👩‍👧‍👦", "e\u0301", "🇨🇳"]) {
+    const text = `前${glyph}后`;
+    for (let offset = 1; offset < 1 + glyph.length; offset++) {
+      const word = expandToWord(text, offset);
+      assert.equal(text.slice(word.start, word.end), glyph);
+    }
+  }
+});
+
 const place = (sentenceIndex: number, offset: number, chapterIndex = 0) => ({
   chapterIndex,
   sentenceIndex,

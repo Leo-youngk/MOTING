@@ -63,6 +63,29 @@ const CJK = /[㐀-鿿豈-﫿぀-ヿ]/;
 const WORDISH = /[0-9A-Za-zÀ-ɏ'’]/;
 
 let segmenter: Intl.Segmenter | null | undefined;
+let graphemes: Intl.Segmenter | undefined;
+
+/** DOM 偏移是 UTF-16；保存和拖动的边界必须落在完整可见字符上。 */
+export function snapSelectionOffset(text: string, offset: number, edge: "start" | "end"): number {
+  const at = Math.max(0, Math.min(offset, text.length));
+  if (at === 0 || at === text.length) return at;
+  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    graphemes ??= new Intl.Segmenter("zh", { granularity: "grapheme" });
+    for (const part of graphemes.segment(text)) {
+      const end = part.index + part.segment.length;
+      if (at === part.index || at === end) return at;
+      if (at < end) return edge === "start" ? part.index : end;
+    }
+  } else {
+    let start = 0;
+    for (const char of text) {
+      const end = start + char.length;
+      if (at > start && at < end) return edge === "start" ? start : end;
+      start = end;
+    }
+  }
+  return at;
+}
 
 function wordSegmenter(): Intl.Segmenter | null {
   if (segmenter !== undefined) return segmenter;
@@ -87,7 +110,7 @@ function expandByCharClass(
     while (end < text.length && WORDISH.test(text[end])) end += 1;
     return { start, end };
   }
-  return { start: offset, end: Math.min(text.length, offset + 1) };
+  return { start: snapSelectionOffset(text, offset, "start"), end: snapSelectionOffset(text, offset + 1, "end") };
 }
 
 /**
@@ -108,7 +131,6 @@ export function expandToWord(
     const start = piece.index;
     const end = start + piece.segment.length;
     if (at < start || at >= end) continue;
-    if (!piece.isWordLike) break;
     return { start, end };
   }
   return { start: at, end: Math.min(text.length, at + 1) };
@@ -159,9 +181,9 @@ export function selectionParts(
       here.chapterIndex === end.chapterIndex &&
       here.sentenceIndex === end.sentenceIndex;
 
-    const from = isStart ? Math.max(0, Math.min(start.offset, sentence.text.length)) : 0;
+    const from = isStart ? snapSelectionOffset(sentence.text, start.offset, "start") : 0;
     const to = isEnd
-      ? Math.max(0, Math.min(end.offset, sentence.text.length))
+      ? snapSelectionOffset(sentence.text, end.offset, "end")
       : sentence.text.length;
     if (to <= from) continue;
 

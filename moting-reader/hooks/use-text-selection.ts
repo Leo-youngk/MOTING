@@ -16,6 +16,7 @@ import {
   orderedSelection,
   selectionParts,
   selectionText,
+  snapSelectionOffset,
   type SelectionPart,
   type SelectionPlace,
   type SelectionSentence,
@@ -24,8 +25,12 @@ import {
 
 /** 长按多久算「要选字」。比 iOS 自己的略长一点，免得快速点句子也被当成长按。 */
 const LONG_PRESS_MS = 460;
-/** 长按期间手指动过这么多像素就判定是在滚动，撤销这次长按。 */
-const MOVE_TOLERANCE = 10;
+/**
+ * 长按期间手指抖动超过这么多像素就撤销这次长按。
+ * 真正的滚动由浏览器发的 pointercancel 兜住（onPointerCancel 会取消长按），
+ * 这个阈值只管静止按住时的自然抖动，所以放宽到 14，免得手指微动就把长按掐了。
+ */
+const MOVE_TOLERANCE = 14;
 /** 拖手柄到离边缘这么近就开始自动滚动。 */
 const EDGE_SCROLL_ZONE = 72;
 const EDGE_SCROLL_SPEED = 12;
@@ -137,6 +142,8 @@ function caretInArticle(
 
   const previousWebkit = article.style.getPropertyValue("-webkit-user-select");
   const previousStandard = article.style.getPropertyValue("user-select");
+  const webkitPriority = article.style.getPropertyPriority("-webkit-user-select");
+  const standardPriority = article.style.getPropertyPriority("user-select");
   article.style.setProperty("-webkit-user-select", "text", "important");
   article.style.setProperty("user-select", "text", "important");
   try {
@@ -146,16 +153,75 @@ function caretInArticle(
     return sentenceElementOf(retry?.node ?? null) ? retry : direct;
   } finally {
     if (previousWebkit) {
-      article.style.setProperty("-webkit-user-select", previousWebkit);
+      article.style.setProperty("-webkit-user-select", previousWebkit, webkitPriority);
     } else {
       article.style.removeProperty("-webkit-user-select");
     }
     if (previousStandard) {
-      article.style.setProperty("user-select", previousStandard);
+      article.style.setProperty("user-select", previousStandard, standardPriority);
     } else {
       article.style.removeProperty("user-select");
     }
   }
+}
+
+/**
+ * 拖动期间临时把正文放开成可选，caretRangeFromPoint 就能直接命中，
+ * 不必每帧走 caretInArticle 的「切 user-select + 强制回流」兜底。返回复原函数。
+ */
+function makeArticleSelectable(article: HTMLElement): () => void {
+  const prevWebkit = article.style.getPropertyValue("-webkit-user-select");
+  const prevStandard = article.style.getPropertyValue("user-select");
+  const prevTouchAction = article.style.getPropertyValue("touch-action");
+  const prevWebkitPriority = article.style.getPropertyPriority("-webkit-user-select");
+  const prevStandardPriority = article.style.getPropertyPriority("user-select");
+  const prevTouchActionPriority = article.style.getPropertyPriority("touch-action");
+  article.style.setProperty("-webkit-user-select", "text", "important");
+  article.style.setProperty("user-select", "text", "important");
+  // 长按选完词接力拖动时，手指从始至终没离开过正文——正文平时不设 touch-action，
+  // 拖动期不锁住，继续下滑会被 iOS 当成翻页/滚动抢走，选区就跟丢了。
+  article.style.setProperty("touch-action", "none", "important");
+  return () => {
+    if (prevWebkit) {
+      article.style.setProperty("-webkit-user-select", prevWebkit, prevWebkitPriority);
+    } else {
+      article.style.removeProperty("-webkit-user-select");
+    }
+    if (prevStandard) {
+      article.style.setProperty("user-select", prevStandard, prevStandardPriority);
+    } else {
+      article.style.removeProperty("user-select");
+    }
+    if (prevTouchAction) {
+      article.style.setProperty("touch-action", prevTouchAction, prevTouchActionPriority);
+    } else {
+      article.style.removeProperty("touch-action");
+    }
+  };
+}
+
+/**
+ * 长按落点取 caret。直接命中最好；按到行距、段间留白时 caretRangeFromPoint 会落空，
+ * 用户就觉得「长按没反应」。这里按行高上下各探半行、一行，吸附到最近的文字行再取词。
+ */
+function caretNearby(
+  article: HTMLElement,
+  x: number,
+  y: number
+): CaretPoint | null {
+  const direct = caretInArticle(article, x, y);
+  if (sentenceElementOf(direct?.node ?? null)) return direct;
+
+  const sample = article.querySelector<HTMLElement>("[data-sentence-id]");
+  const lineHeight = sample
+    ? Number.parseFloat(getComputedStyle(sample).lineHeight) || 0
+    : 0;
+  if (!lineHeight) return null;
+  for (const dy of [-lineHeight / 2, lineHeight / 2, -lineHeight, lineHeight]) {
+    const probe = caretInArticle(article, x, y + dy);
+    if (sentenceElementOf(probe?.node ?? null)) return probe;
+  }
+  return null;
 }
 
 function sentenceElementOf(node: Node | null): HTMLElement | null {
@@ -316,6 +382,15 @@ export function useTextSelection(
   const measureFrameRef = useRef(0);
   const scrollFrameRef = useRef(0);
   const scrollSpeedRef = useRef(0);
+  const dragPointerRef = useRef<number | null>(null);
+  const dragPointRef = useRef<{ x: number; y: number } | null>(null);
+  const moveHandleRef = useRef<((x: number, y: number) => void) | null>(null);
+  /** 正文句子快照缓存 + 失效标记。拖动时正文不动，缓存一直命中，measure 就不必每帧
+   *  querySelectorAll 全部句子 + 逐个读 textContent（章节多时是 O(n) 的大头）。 */
+  const sentencesCacheRef = useRef<SelectionSentence[] | null>(null);
+  const cacheDirtyRef = useRef(true);
+  /** 拖动期临时放开 user-select 的复原函数。 */
+  const restoreSelectableRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     // 触摸设备 + 能按坐标找到字符，两个都满足才接管选择。
@@ -351,7 +426,12 @@ export function useTextSelection(
   const clear = useCallback(() => {
     cancelPress();
     stopEdgeScroll();
+    restoreSelectableRef.current?.();
+    restoreSelectableRef.current = null;
     draggingRef.current = null;
+    dragPointerRef.current = null;
+    dragPointRef.current = null;
+    justSelectedRef.current = false;
     selectionRef.current = null;
     setSelection(null);
     setDragging(false);
@@ -383,7 +463,14 @@ export function useTextSelection(
       setGeometry(EMPTY_GEOMETRY);
       return;
     }
-    // 只有一行时没有邻行可参照，拿正文自己的行高兜底。
+    // 句子快照走缓存：拖动时正文不动，命中缓存，省掉每帧 querySelectorAll + 读 textContent。
+    let sentences = sentencesCacheRef.current;
+    if (cacheDirtyRef.current || !sentences) {
+      sentences = sentencesIn(article);
+      sentencesCacheRef.current = sentences;
+      cacheDirtyRef.current = false;
+    }
+    // 只有一行时没有邻行可参照，拿正文自己的行高兜底（O(1)，随字号实时读）。
     const sample = article.querySelector<HTMLElement>("[data-sentence-id]");
     const lineHeight = sample
       ? Number.parseFloat(getComputedStyle(sample).lineHeight) || 0
@@ -392,7 +479,7 @@ export function useTextSelection(
 
     // 选中的文字也在这里一并算出来：它跟屏幕位置一样，是从「句子 + 偏移」
     // 翻译出来的结果，放同一处算才不会两边对不上。
-    const parts = selectionParts(current, sentencesIn(article));
+    const parts = selectionParts(current, sentences);
     const first = rects[0];
     const last = rects[rects.length - 1];
     const next: SelectionGeometry = {
@@ -421,10 +508,10 @@ export function useTextSelection(
     (next: TextSelection | null) => {
       selectionRef.current = next;
       setSelection(next);
-      // 量尺寸要等这一帧的 DOM 稳定，直接量会拿到上一次的排版。
-      scheduleMeasure();
+      // 首次选中不再排 rAF：下面的 useLayoutEffect 会在 paint 前同步量一次，
+      // 高亮和手柄就在长按触发的那一帧立即出现，省掉同帧的第二次测量。
     },
-    [scheduleMeasure]
+    []
   );
 
   // 滚动、转屏、改排版都会让像素位置变，但选中的字没变，重量一次就行。
@@ -439,12 +526,19 @@ export function useTextSelection(
     window.addEventListener("scroll", onChange, { capture: true, passive: true });
     window.addEventListener("resize", onChange);
     window.addEventListener("orientationchange", onChange);
+    window.visualViewport?.addEventListener("resize", onChange);
+    window.visualViewport?.addEventListener("scroll", onChange);
+    const observer = new ResizeObserver(onChange);
+    if (articleRef.current) observer.observe(articleRef.current);
     return () => {
+      observer.disconnect();
       window.removeEventListener("scroll", onChange, { capture: true });
       window.removeEventListener("resize", onChange);
       window.removeEventListener("orientationchange", onChange);
+      window.visualViewport?.removeEventListener("resize", onChange);
+      window.visualViewport?.removeEventListener("scroll", onChange);
     };
-  }, [selection, scheduleMeasure]);
+  }, [selection, scheduleMeasure, articleRef]);
 
   useEffect(
     () => () => {
@@ -455,14 +549,25 @@ export function useTextSelection(
     []
   );
 
-  /**
-   * 拦住原生选择的「启动」，而不是把正文设成不可选。
-   *
-   * 为什么不用 `user-select: none`：WebKit 下正文一旦不可选，`caretRangeFromPoint`
-   * 就不再下探到文本节点，长按取词会整个失效——那是"划线完全没反应"，最坏的坏法。
-   * 拦 selectstart 的最坏情况只是没拦住、多出一层系统菜单，功能本身还在。
-   * 两害相权，选可降级的那个。
-   */
+  // 正文结构变化（接章、加减划线）时让句子快照缓存失效；拖动期间正文不动，
+  // 缓存一直命中。只观察 childList/characterData：改字号是 CSS 变量、朗读高亮是改
+  // 文本节点的 class，都不改 textContent，不该让缓存白白失效。
+  useEffect(() => {
+    const article = articleRef.current;
+    if (!article) return;
+    cacheDirtyRef.current = true;
+    const observer = new MutationObserver(() => {
+      cacheDirtyRef.current = true;
+    });
+    observer.observe(article, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    return () => observer.disconnect();
+  }, [articleRef, enabled]);
+
+  /** CSS 禁用原生选择为主，事件拦截用于清理可能残留的正文原生选区。 */
   useEffect(() => {
     if (!enabled) return;
     const onSelectStart = (event: Event) => {
@@ -495,11 +600,61 @@ export function useTextSelection(
     clear();
   }, [enabled, clear]);
 
+  /**
+   * 拖动的公共起点：把某根手指接管成「正在拖某一端」，长按选词接力和抓手柄
+   * 两条路都走这里，状态只维护一份。
+   *
+   * grab 由调用方给：抓手柄要保「捏住的那一点」不能跳，按手柄位置和落点的差值算；
+   * 长按接力没有手柄可捏，末尾就该贴着手指走，调用方传 {dx:0, dy:0}。
+   */
+  const startDrag = useCallback(
+    (
+      which: "start" | "end",
+      pointerId: number,
+      clientX: number,
+      clientY: number,
+      grab: GrabOffset,
+      captureTarget: Element | null
+    ) => {
+      const current = selectionRef.current;
+      if (!current || draggingRef.current) return;
+      cancelPress();
+
+      // 把 anchor 固定成不动的那一端，之后一路只改 focus。
+      const { start, end } = orderedSelection(current);
+      const next: TextSelection =
+        which === "start" ? { anchor: end, focus: start } : { anchor: start, focus: end };
+      selectionRef.current = next;
+      setSelection(next);
+
+      grabOffsetRef.current = grab;
+      draggingRef.current = which;
+      dragPointerRef.current = pointerId;
+      dragPointRef.current = { x: clientX, y: clientY };
+      justSelectedRef.current = true;
+      setDragging(true);
+      // 整段拖动只放开一次 user-select、锁一次 touch-action：caretRangeFromPoint
+      // 直接命中，继续滑动也不会被 iOS 当成翻页/滚动抢走。
+      const article = articleRef.current;
+      if (article) {
+        restoreSelectableRef.current?.();
+        restoreSelectableRef.current = makeArticleSelectable(article);
+      }
+      try {
+        captureTarget?.setPointerCapture?.(pointerId);
+      } catch {
+        // 指针已经不在了就算了：拖动本来就靠 document 上的监听兜着，抓不到也能跟。
+      }
+    },
+    [cancelPress, articleRef]
+  );
+
   const beginSelectionAt = useCallback(
-    (x: number, y: number) => {
+    (x: number, y: number, pointerId: number, captureTarget: Element | null) => {
       const article = articleRef.current;
       if (!article) return;
-      const caret = caretInArticle(article, x, y);
+      // 用 caretNearby：按到行距/留白也能吸附到最近的文字行，减少「长按没反应」。
+      const caret = caretNearby(article, x, y);
       const element = sentenceElementOf(caret?.node ?? null);
       if (!caret || !element || !article.contains(element)) return;
 
@@ -512,19 +667,22 @@ export function useTextSelection(
         anchor: placeOf(element, word.start),
         focus: placeOf(element, word.end),
       });
-      // 手指还按着，抬手后浏览器必然再补一个 click。那一下属于这次长按，
-      // 必须让正文的点击处理跳过——否则刚选出来的东西立刻被当成「点空白取消」清掉。
-      justSelectedRef.current = true;
+      // 手指多半还按着：不等抬手，直接把这根手指接管成对末尾的拖动，长按选完词
+      // 一路下滑就能连着扩大选区，不用先松手、再去精确按住那颗手柄球。
+      startDrag("end", pointerId, x, y, { dx: 0, dy: 0 }, captureTarget);
     },
-    [applySelection, articleRef]
+    [applySelection, articleRef, startDrag]
   );
 
   /** 手指拖到屏幕上下边缘时把页面顶一顶，否则跨屏选不动。 */
   const updateEdgeScroll = useCallback(
     (y: number) => {
-      const bottom = window.innerHeight - EDGE_SCROLL_ZONE;
+      if (articleRef.current?.closest(".is-paged")) return;
+      const viewport = window.visualViewport;
+      const top = viewport?.offsetTop ?? 0;
+      const bottom = top + (viewport?.height ?? window.innerHeight) - EDGE_SCROLL_ZONE;
       const speed =
-        y < EDGE_SCROLL_ZONE
+        y < top + EDGE_SCROLL_ZONE
           ? -EDGE_SCROLL_SPEED
           : y > bottom
             ? EDGE_SCROLL_SPEED
@@ -541,13 +699,21 @@ export function useTextSelection(
           scrollFrameRef.current = 0;
           return;
         }
+        const previous = window.scrollY;
         window.scrollBy(0, scrollSpeedRef.current);
+        // 手指停在边缘时不会再触发 pointermove，仍需每帧重新定位移动端点。
+        const point = dragPointRef.current;
+        if (point) moveHandleRef.current?.(point.x, point.y);
         scheduleMeasure();
+        if (window.scrollY === previous) {
+          scrollFrameRef.current = 0;
+          return;
+        }
         scrollFrameRef.current = requestAnimationFrame(step);
       }
       scrollFrameRef.current = requestAnimationFrame(step);
     },
-    [scheduleMeasure, stopEdgeScroll]
+    [articleRef, scheduleMeasure, stopEdgeScroll]
   );
 
   const moveHandleTo = useCallback(
@@ -557,36 +723,41 @@ export function useTextSelection(
       if (!article || !current || !draggingRef.current) return;
 
       const grab = grabOffsetRef.current;
-      const place = placeFromPoint(article, x + grab.dx, y + grab.dy);
+      const box = article.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      const viewTop = viewport?.offsetTop ?? 0;
+      const viewLeft = viewport?.offsetLeft ?? 0;
+      const place = placeFromPoint(article,
+        Math.max(Math.max(box.left, viewLeft) + 1, Math.min(x + grab.dx, Math.min(box.right, viewLeft + (viewport?.width ?? window.innerWidth)) - 1)),
+        Math.max(viewTop + 1, Math.min(y + grab.dy, viewTop + (viewport?.height ?? window.innerHeight) - 1)));
       if (!place) return;
+      const element = sentenceElement(article, place.sentenceId);
+      place.offset = snapSelectionOffset(element?.textContent ?? "", place.offset,
+        comparePlaces(place, current.anchor) < 0 ? "start" : "end");
 
       // beginHandleDrag 已经把不动的那一端规整成 anchor，这里一路只改 focus。
       // 拖过头会让两端重合、选区变空，那一下直接不认。
       if (comparePlaces(place, current.anchor) === 0) return;
 
       const next: TextSelection = { anchor: current.anchor, focus: place };
+      // 拖动期只更新 ref，不同步 setSelection：那会让每个 pointermove 都触发一次整屏渲染。
+      // 几何由 rAF 里的 measure 统一提交（每帧最多一次 setState），正文又被 ArticleBody
+      // 的 memo 挡在渲染之外。抬手时再把最终选区同步回 state。
       selectionRef.current = next;
-      setSelection(next);
       scheduleMeasure();
     },
     [articleRef, scheduleMeasure]
   );
 
+  useEffect(() => {
+    moveHandleRef.current = moveHandleTo;
+  }, [moveHandleTo]);
+
   const beginHandleDrag = useCallback(
     (which: "start" | "end", event: ReactPointerEvent) => {
-      const current = selectionRef.current;
-      if (!current) return;
+      if (!selectionRef.current || draggingRef.current) return;
       event.preventDefault();
       event.stopPropagation();
-
-      // 把 anchor 固定成不动的那一端，之后一路只改 focus。
-      const { start, end } = orderedSelection(current);
-      const next: TextSelection =
-        which === "start"
-          ? { anchor: end, focus: start }
-          : { anchor: start, focus: end };
-      selectionRef.current = next;
-      setSelection(next);
 
       // 手柄锚点是它所在那一行的竖直中点。记下它和手指的差值，
       // 整段拖动都按这个差值换算判定点，选中的字就跟手柄严丝合缝。
@@ -594,34 +765,37 @@ export function useTextSelection(
         which === "start"
           ? geometryRef.current.handles?.start
           : geometryRef.current.handles?.end;
-      grabOffsetRef.current = handle
+      const grab: GrabOffset = handle
         ? {
             dx: handle.x - event.clientX,
             dy: handle.top + handle.height / 2 - event.clientY,
           }
         : { dx: 0, dy: 0 };
 
-      draggingRef.current = which;
-      setDragging(true);
-      try {
-        event.currentTarget.setPointerCapture?.(event.pointerId);
-      } catch {
-        // 指针已经不在了就算了：拖动本来就靠 document 上的监听兜着，抓不到也能跟。
-      }
+      startDrag(which, event.pointerId, event.clientX, event.clientY, grab, event.currentTarget);
     },
-    []
+    [startDrag]
   );
 
   useEffect(() => {
     if (!dragging) return;
     const onMove = (event: PointerEvent) => {
+      if (event.pointerId !== dragPointerRef.current) return;
       event.preventDefault();
+      dragPointRef.current = { x: event.clientX, y: event.clientY };
       moveHandleTo(event.clientX, event.clientY);
       updateEdgeScroll(event.clientY);
     };
-    const onUp = () => {
+    const onUp = (event: PointerEvent) => {
+      if (event.pointerId !== dragPointerRef.current) return;
       draggingRef.current = null;
+      dragPointerRef.current = null;
+      dragPointRef.current = null;
+      restoreSelectableRef.current?.();
+      restoreSelectableRef.current = null;
       setDragging(false);
+      // 拖动期只动了 ref，这里把最终选区一次性提交回 state，菜单据此弹出。
+      setSelection(selectionRef.current);
       stopEdgeScroll();
       scheduleMeasure();
     };
@@ -639,6 +813,10 @@ export function useTextSelection(
   const onPointerDown = useCallback(
     (event: ReactPointerEvent) => {
       if (!enabled || draggingRef.current) return;
+      if (!event.isPrimary || event.button !== 0) {
+        cancelPress();
+        return;
+      }
       // 点在手柄或菜单上不算「点正文」。
       const target = event.target;
       if (
@@ -650,11 +828,11 @@ export function useTextSelection(
 
       // 新手势开始，上一次长按留下的吞点击标记作废（比如那一下压根没跟 click）。
       justSelectedRef.current = false;
-      const { clientX: x, clientY: y } = event;
+      const { clientX: x, clientY: y, pointerId, currentTarget } = event;
       cancelPress();
       const timer = setTimeout(() => {
         pressRef.current = null;
-        beginSelectionAt(x, y);
+        beginSelectionAt(x, y, pointerId, currentTarget);
       }, LONG_PRESS_MS);
       pressRef.current = { x, y, timer };
     },

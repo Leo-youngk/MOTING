@@ -15,6 +15,27 @@ const INSETS = { top: 59, bottom: 34 };
 /** 收敛成「划线 / 想法 / 复制 / 更多」之后量到的宽度量级。 */
 const MENU = { width: 288, height: 48 };
 
+test("横屏刘海和视觉视口左右偏移都计入菜单安全区", () => {
+  const placement = placePopover({
+    anchor: { top: 200, bottom: 221, left: 1, right: 20 },
+    menu: MENU,
+    viewport: { width: 844, height: 390 },
+    insets: { top: 0, bottom: 21, left: 59, right: 59 },
+  });
+  assert.ok(placement.left >= 71);
+  assert.ok(placement.left + MENU.width <= 844 - 71);
+});
+
+test("跨段选区不把段落空白当作行高涂满", () => {
+  const rows = fillLineBoxes([
+    { top: 200, bottom: 221, left: 20, right: 300 },
+    { top: 330, bottom: 351, left: 20, right: 300 },
+  ], 36);
+  assert.equal(rows[0].bottom - rows[0].top, 36);
+  assert.equal(rows[1].bottom - rows[1].top, 36);
+  assert.ok(rows[1].top - rows[0].bottom > 90);
+});
+
 function rect(left: number, top: number, width: number, height: number): Rect {
   return { left, top, right: left + width, bottom: top + height };
 }

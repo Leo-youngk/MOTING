@@ -3161,12 +3161,22 @@ html[data-keyboard-open] .bottom-bar {
   justify-content: space-between;
   gap: 10px;
   pointer-events: none;
+  /* chrome 浮在正文之上，里面的「已读 46%」「本章还剩 N 页」是纯展示文字。
+     它挂在 .reader-article 外面，选区 hook 的 selectstart 拦截够不着这里，
+     iOS 长按就会用原生选择把进度数字抓走、弹系统菜单——用户看到的是
+     「划不到正文、反倒划到了进度」。整条 chrome 一律不可选中、禁系统 callout。 */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
   transition:
     opacity 240ms ease,
     transform 240ms ease;
 }
 
-.reader-chrome > * {
+/* 只有真正的控件才接触摸；进度、剩余页这类展示性 span 保持 pointer-events: none，
+   让长按穿透到它下面的正文，而不是被浮层截走。 */
+.reader-chrome button,
+.reader-chrome a {
   pointer-events: auto;
 }
 
@@ -3361,6 +3371,11 @@ html[data-keyboard-open] .bottom-bar {
   /* 手指落在手柄上就归拖动，别让页面跟着滚。 */
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* 抓住后由 pointer capture 跟踪手指，字符命中测试需要穿过手柄看到正文。 */
+.selection-layer.is-dragging .selection-handle {
+  pointer-events: none;
 }
 
 /* 压在选区端点上的竖线。 */
@@ -3654,6 +3669,12 @@ html[data-keyboard-open] .bottom-bar {
   z-index: 30;
   display: flex;
   max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
   flex-direction: column;
   padding: 4px;
   border: 0.5px solid rgb(255 255 255 / 12%);

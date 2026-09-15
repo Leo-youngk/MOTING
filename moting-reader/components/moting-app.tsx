@@ -41,12 +41,14 @@ import {
 import {
   Fragment,
   lazy,
+  memo,
   Suspense,
   type ChangeEvent,
   type CSSProperties,
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type RefObject,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -85,7 +87,7 @@ import {
   getStats,
   saveSession,
   removeBook,
-  removeNote,
+  writeNotes,
   saveBook,
   saveImportedBook,
   saveReadingPositions,
@@ -2089,7 +2091,7 @@ function renderSentence(text: string, marks: BookNote[]): ReactNode {
   return parts;
 }
 
-function ReaderImage({
+const ReaderImage = memo(function ReaderImage({
   imageId,
   alt,
   width,
@@ -2132,7 +2134,198 @@ function ReaderImage({
       />
     </figure>
   );
+});
+
+interface ArticleBodyProps {
+  paged: boolean;
+  book: Book;
+  chapter: Chapter;
+  settings: ReaderSettings;
+  visibleChapters: { chapter: Chapter; index: number }[];
+  sentenceIndexByChapter: Map<number, Map<string, number>>;
+  marksBySentence: Map<string, BookNote[]>;
+  currentSentenceId: string;
+  askingIds: Set<string>;
+  inlineAsk: { text: string; sentenceIds: string[]; anchorId: string } | null;
+  chatTurns: AiChatTurn[];
+  onChatChange: (turns: AiChatTurn[]) => void;
+  onInlineExpand: () => void;
+  onInlineClose: () => void;
+  showEnd: boolean;
+  startSentinelRef: RefObject<HTMLDivElement | null>;
+  endSentinelRef: RefObject<HTMLDivElement | null>;
 }
+
+/**
+ * 正文主体。单独抽出来 memo 是这次划线顺滑的关键。
+ *
+ * 选区状态（selection/geometry）挂在 ReaderScreen 上，拖手柄时每个 pointermove 都会
+ * setState；若正文还内联在 ReaderScreen 里，就会跟着每帧重建上千个句子 span +
+ * renderSentence，iPhone 上直接掉帧。正文只依赖下面这批数据 props，选区怎么变都不重渲染。
+ */
+const ArticleBody = memo(function ArticleBody({
+  paged,
+  book,
+  chapter,
+  settings,
+  visibleChapters,
+  sentenceIndexByChapter,
+  marksBySentence,
+  currentSentenceId,
+  askingIds,
+  inlineAsk,
+  chatTurns,
+  onChatChange,
+  onInlineExpand,
+  onInlineClose,
+  showEnd,
+  startSentinelRef,
+  endSentinelRef,
+}: ArticleBodyProps) {
+  // 渲染探针：memo 命中（只有选区在变）时 ArticleBody 不会 commit，这个 effect 不跑，
+  // 计数不增；正文真的重渲染才 +1 并写到哨兵上。浏览器回归测试读它，
+  // 用来确认拖手柄期间正文子树没被反复重建。
+  const bodyRenders = useRef(0);
+  useEffect(() => {
+    bodyRenders.current += 1;
+    if (startSentinelRef.current) {
+      startSentinelRef.current.dataset.bodyRenders = String(bodyRenders.current);
+    }
+  });
+
+  return (
+    <>
+      {paged ? null : (
+        <div ref={startSentinelRef} className="reader-sentinel" aria-hidden />
+      )}
+
+      {visibleChapters.map(({ chapter: item, index }) => {
+        const indexById = sentenceIndexByChapter.get(index);
+        return (
+          <section
+            key={item.id}
+            className="reader-chapter"
+            data-chapter-section={index}
+          >
+            <div className="reader-title">
+              <span>
+                {String(index + 1).padStart(2, "0")} /{" "}
+                {String(book.chapters.length).padStart(2, "0")}
+              </span>
+              <h1>{item.title}</h1>
+              {index === 0 ? <p>{book.title}</p> : null}
+            </div>
+
+            {item.paragraphs.map((paragraph) => {
+              if (paragraph.kind === "image") {
+                return (
+                  <ReaderImage
+                    key={paragraph.id}
+                    imageId={paragraph.imageId ?? ""}
+                    alt={paragraph.alt ?? ""}
+                    width={paragraph.imageWidth}
+                    height={paragraph.imageHeight}
+                  />
+                );
+              }
+
+              const sentenceSpans = paragraph.sentences.map((sentence) => (
+                <span
+                  key={sentence.id}
+                  data-sentence-id={sentence.id}
+                  data-sentence-index={indexById?.get(sentence.id)}
+                  data-chapter-index={index}
+                  className={[
+                    sentence.id === currentSentenceId ? "is-speaking" : "",
+                    askingIds.has(sentence.id) ? "is-asking" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {renderSentence(
+                    sentence.text,
+                    marksBySentence.get(sentence.id) ?? []
+                  )}
+                </span>
+              ));
+
+              // 批注挂在选区最后一句所在的段落后面：往下长不会推动正在读的这段。
+              const inlineCard =
+                inlineAsk &&
+                paragraph.sentences.some((s) => s.id === inlineAsk.anchorId) ? (
+                  <AiInlineAsk
+                    text={inlineAsk.text}
+                    book={book}
+                    chapter={chapter}
+                    settings={settings}
+                    turns={chatTurns}
+                    onTurnsChange={onChatChange}
+                    onExpand={onInlineExpand}
+                    onClose={onInlineClose}
+                  />
+                ) : null;
+
+              const withCard = (block: ReactNode) =>
+                inlineCard ? (
+                  <Fragment key={paragraph.id}>
+                    {block}
+                    {inlineCard}
+                  </Fragment>
+                ) : (
+                  block
+                );
+
+              if (paragraph.kind === "heading") {
+                // 章节名已经占了 h1，章内小标题从 h2 起排。
+                const Heading =
+                  HEADING_TAGS[(paragraph.level ?? 3) - 1] ?? "h3";
+                return withCard(
+                  <Heading
+                    key={paragraph.id}
+                    className="reader-block is-heading"
+                  >
+                    {sentenceSpans}
+                  </Heading>
+                );
+              }
+              if (paragraph.kind === "quote") {
+                return withCard(
+                  <blockquote
+                    key={paragraph.id}
+                    className="reader-block is-quote"
+                  >
+                    {sentenceSpans}
+                  </blockquote>
+                );
+              }
+              return withCard(
+                <p
+                  key={paragraph.id}
+                  className={`reader-block ${
+                    paragraph.kind === "list" ? "is-list" : ""
+                  }`}
+                >
+                  {sentenceSpans}
+                </p>
+              );
+            })}
+          </section>
+        );
+      })}
+
+      {showEnd ? (
+        <div className="reader-end">
+          <span>全书完</span>
+          <p>{book.title}</p>
+        </div>
+      ) : null}
+
+      {paged ? null : (
+        <div ref={endSentinelRef} className="reader-sentinel" aria-hidden />
+      )}
+    </>
+  );
+});
 
 type ReaderPopupState =
   | {
@@ -2205,16 +2398,27 @@ function ReaderPopover({
   useLayoutEffect(() => {
     const node = nodeRef.current;
     if (!node) return;
-    const box = node.getBoundingClientRect();
-    setPlacement(
-      placeForSelection({
+    const update = () => {
+      node.style.maxWidth = `${Math.max(1, window.innerWidth - insets.left - insets.right - 24)}px`;
+      node.style.maxHeight = `${Math.max(1, window.innerHeight - insets.top - insets.bottom - 24)}px`;
+      const box = node.getBoundingClientRect();
+      const next = placeForSelection({
         rects,
         union: { top, bottom, left, right },
         menu: { width: box.width, height: box.height },
         viewport: { width: window.innerWidth, height: window.innerHeight },
         insets,
-      })
-    );
+      });
+      setPlacement((current) => current && current.left === next.left && current.top === next.top && current.side === next.side && current.arrowLeft === next.arrowLeft ? current : next);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    window.addEventListener("resize", update);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", update);
+    };
   }, [top, bottom, left, right, rects, insets, more, popup.kind]);
 
   const style: CSSProperties = placement
@@ -2232,6 +2436,10 @@ function ReaderPopover({
       style={style}
       role="dialog"
       aria-label="划线操作"
+      onPointerDown={(event) => {
+        // 桌面按按钮时保留原生选区，避免 selectionchange 把菜单先卸载。
+        if (event.pointerType === "mouse") event.preventDefault();
+      }}
     >
       {popup.kind === "mark" ? (
         <div className="reader-popover__colors">
@@ -2941,8 +3149,8 @@ function ReaderScreen({
     parts: HighlightPart[],
     color: HighlightColor
   ) => Promise<BookNote | null>;
-  onUpdateNote: (note: BookNote) => void;
-  onDeleteNote: (note: BookNote) => void;
+  onUpdateNote: (note: BookNote) => Promise<boolean>;
+  onDeleteNote: (note: BookNote) => Promise<boolean>;
   onSettingsChange: (settings: ReaderSettings) => void;
   onToast: (message: string) => void;
 }) {
@@ -2969,6 +3177,11 @@ function ReaderScreen({
   const insets = useSafeInsets();
   // iPhone 上由应用接管正文选择，桌面和拿不到 caret 定位的浏览器退回系统选择。
   const textSelection = useTextSelection(articleRef, { enabled: true });
+  const clearTextSelection = textSelection.clear;
+  const selectionActiveRef = useRef(false);
+  useEffect(() => {
+    selectionActiveRef.current = textSelection.active;
+  }, [textSelection.active]);
   const customSelect = textSelection.supported;
   // 下面几个监听挂在空依赖的 effect 上，只能靠 ref 读到最新值。
   const customSelectRef = useRef(customSelect);
@@ -3319,6 +3532,8 @@ function ReaderScreen({
 
     const observer = new IntersectionObserver(
       (entries) => {
+        // 拖选期间保留当前章节 DOM，避免窗口裁剪删掉仍在选区里的起点。
+        if (selectionActiveRef.current) return;
         if (justJumpedRef.current) {
           justJumpedRef.current = false;
           return;
@@ -3347,7 +3562,7 @@ function ReaderScreen({
     observer.observe(startEl);
     observer.observe(endEl);
     return () => observer.disconnect();
-  }, [paged, book.chapters.length, range]);
+  }, [paged, book.chapters.length, range, textSelection.active]);
 
   // 换书或切换阅读模式时重新以当前章开窗，别把旧窗口带过去。
   useEffect(() => {
@@ -3425,9 +3640,9 @@ function ReaderScreen({
   /** 收掉菜单和选区。两条选择路径都要清，不然会留下画在屏幕上的幽灵选区。 */
   const dismissSelection = useCallback(() => {
     setPopup(null);
-    textSelection.clear();
+    clearTextSelection();
     window.getSelection()?.removeAllRanges();
-  }, [textSelection]);
+  }, [clearTextSelection]);
 
   /** 同一次划线拆成的几条记录，拼回用户当时选中的那整段文字。 */
   const groupText = (note: BookNote) =>
@@ -3436,8 +3651,7 @@ function ReaderScreen({
 
   const applyHighlight = async (color: HighlightColor) => {
     if (activePopup?.kind === "mark") {
-      onUpdateNote({ ...activePopup.note, color });
-      setPopup(null);
+      if (await onUpdateNote({ ...activePopup.note, color })) setPopup(null);
       return;
     }
     if (activePopup?.kind !== "selection") return;
@@ -3489,6 +3703,7 @@ function ReaderScreen({
   };
 
   const changeChapter = useCallback((nextIndex: number, landing: "first" | "last" = "first") => {
+    clearTextSelection();
     const currentBook = bookRef.current;
     const safe = Math.max(0, Math.min(currentBook.chapters.length - 1, nextIndex));
     setChapterIndex(safe);
@@ -3513,7 +3728,7 @@ function ReaderScreen({
       // 还原到开浮层前——但这里已经跳到新章节了，不能被那次还原覆盖回旧位置。
       if (scrollLockCount > 0) suppressScrollRestore();
     }
-  }, [goToPage, onProgress, paged]);
+  }, [clearTextSelection, goToPage, onProgress, paged]);
 
   const turnPage = useCallback((delta: number) => {
     const next = pageIndexRef.current + delta;
@@ -3639,6 +3854,13 @@ function ReaderScreen({
     [inlineAsk]
   );
 
+  // 正文里那张批注卡的展开/关闭。做成稳定引用，ArticleBody 才能靠 memo 在选区变化时 bail out。
+  const handleInlineExpand = useCallback(() => {
+    setInlineAsk(null);
+    setAskAiText("");
+  }, []);
+  const handleInlineClose = useCallback(() => setInlineAsk(null), []);
+
   const readerStyle = {
     "--reader-font-size": `${settings.fontSize}px`,
     "--reader-line-height": String(settings.lineHeight),
@@ -3698,137 +3920,25 @@ function ReaderScreen({
           }
           onClick={handleArticleClick}
         >
-        {paged ? null : (
-          <div ref={startSentinelRef} className="reader-sentinel" aria-hidden />
-        )}
-
-        {visibleChapters.map(({ chapter: item, index }) => {
-          const indexById = sentenceIndexByChapter.get(index);
-          return (
-            <section
-              key={item.id}
-              className="reader-chapter"
-              data-chapter-section={index}
-            >
-              <div className="reader-title">
-                <span>
-                  {String(index + 1).padStart(2, "0")} /{" "}
-                  {String(book.chapters.length).padStart(2, "0")}
-                </span>
-                <h1>{item.title}</h1>
-                {index === 0 ? <p>{book.title}</p> : null}
-              </div>
-
-              {item.paragraphs.map((paragraph) => {
-                if (paragraph.kind === "image") {
-                  return (
-                    <ReaderImage
-                      key={paragraph.id}
-                      imageId={paragraph.imageId ?? ""}
-                      alt={paragraph.alt ?? ""}
-                      width={paragraph.imageWidth}
-                      height={paragraph.imageHeight}
-                    />
-                  );
-                }
-
-                const sentenceSpans = paragraph.sentences.map((sentence) => (
-                  <span
-                    key={sentence.id}
-                    data-sentence-id={sentence.id}
-                    data-sentence-index={indexById?.get(sentence.id)}
-                    data-chapter-index={index}
-                    className={[
-                      sentence.id === currentSentenceId ? "is-speaking" : "",
-                      askingIds.has(sentence.id) ? "is-asking" : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                  >
-                    {renderSentence(
-                      sentence.text,
-                      marksBySentence.get(sentence.id) ?? []
-                    )}
-                  </span>
-                ));
-
-                // 批注挂在选区最后一句所在的段落后面：往下长不会推动正在读的这段。
-                const inlineCard =
-                  inlineAsk &&
-                  paragraph.sentences.some((s) => s.id === inlineAsk.anchorId) ? (
-                    <AiInlineAsk
-                      text={inlineAsk.text}
-                      book={book}
-                      chapter={chapter}
-                      settings={settings}
-                      turns={chatTurns}
-                      onTurnsChange={onChatChange}
-                      onExpand={() => {
-                        setInlineAsk(null);
-                        setAskAiText("");
-                      }}
-                      onClose={() => setInlineAsk(null)}
-                    />
-                  ) : null;
-
-                const withCard = (block: ReactNode) =>
-                  inlineCard ? (
-                    <Fragment key={paragraph.id}>
-                      {block}
-                      {inlineCard}
-                    </Fragment>
-                  ) : (
-                    block
-                  );
-
-                if (paragraph.kind === "heading") {
-                  // 章节名已经占了 h1，章内小标题从 h2 起排。
-                  const Heading =
-                    HEADING_TAGS[(paragraph.level ?? 3) - 1] ?? "h3";
-                  return withCard(
-                    <Heading
-                      key={paragraph.id}
-                      className="reader-block is-heading"
-                    >
-                      {sentenceSpans}
-                    </Heading>
-                  );
-                }
-                if (paragraph.kind === "quote") {
-                  return withCard(
-                    <blockquote
-                      key={paragraph.id}
-                      className="reader-block is-quote"
-                    >
-                      {sentenceSpans}
-                    </blockquote>
-                  );
-                }
-                return withCard(
-                  <p
-                    key={paragraph.id}
-                    className={`reader-block ${
-                      paragraph.kind === "list" ? "is-list" : ""
-                    }`}
-                  >
-                    {sentenceSpans}
-                  </p>
-                );
-              })}
-            </section>
-          );
-        })}
-
-        {!paged && range.end >= book.chapters.length - 1 ? (
-          <div className="reader-end">
-            <span>全书完</span>
-            <p>{book.title}</p>
-          </div>
-        ) : null}
-
-        {paged ? null : (
-          <div ref={endSentinelRef} className="reader-sentinel" aria-hidden />
-        )}
+        <ArticleBody
+          paged={paged}
+          book={book}
+          chapter={chapter}
+          settings={settings}
+          visibleChapters={visibleChapters}
+          sentenceIndexByChapter={sentenceIndexByChapter}
+          marksBySentence={marksBySentence}
+          currentSentenceId={currentSentenceId}
+          askingIds={askingIds}
+          inlineAsk={inlineAsk}
+          chatTurns={chatTurns}
+          onChatChange={onChatChange}
+          onInlineExpand={handleInlineExpand}
+          onInlineClose={handleInlineClose}
+          showEnd={!paged && range.end >= book.chapters.length - 1}
+          startSentinelRef={startSentinelRef}
+          endSentinelRef={endSentinelRef}
+        />
         </article>
       </div>
 
@@ -3873,6 +3983,7 @@ function ReaderScreen({
         rects={textSelection.rects}
         handles={textSelection.handles}
         onHandleDown={textSelection.beginHandleDrag}
+        dragging={textSelection.dragging}
       />
 
       {activePopup ? (
@@ -3885,13 +3996,14 @@ function ReaderScreen({
               activePopup.kind === "selection"
                 ? activePopup.text
                 : groupText(activePopup.note);
-            dismissSelection();
             try {
-              await navigator.clipboard?.writeText(text);
+              if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+              await navigator.clipboard.writeText(text);
+              dismissSelection();
               onToast("已复制");
             } catch {
               // 非 HTTPS 或用户拒了剪贴板权限时会走到这儿，不能装作复制成功。
-              onToast("复制失败，请长按手动复制");
+              onToast("复制失败，选区已保留，请重试");
             }
           }}
           onListen={() => {
@@ -3917,9 +4029,8 @@ function ReaderScreen({
             dismissSelection();
             setThoughtDraft({ note, value: note.thought ?? "" });
           }}
-          onDelete={() => {
-            if (activePopup.kind === "mark") onDeleteNote(activePopup.note);
-            setPopup(null);
+          onDelete={async () => {
+            if (activePopup.kind === "mark" && await onDeleteNote(activePopup.note)) setPopup(null);
           }}
           onAskAi={() => {
             const isSelection = activePopup.kind === "selection";
@@ -3979,12 +4090,12 @@ function ReaderScreen({
             <button
               type="button"
               className="primary-button"
-              onClick={() => {
-                onUpdateNote({
+              onClick={async () => {
+                const saved = await onUpdateNote({
                   ...thoughtDraft.note,
                   thought: thoughtDraft.value.trim() || undefined,
                 });
-                setThoughtDraft(null);
+                if (saved) setThoughtDraft(null);
               }}
             >
               保存想法
@@ -5200,17 +5311,10 @@ export default function MotingApp() {
     });
     if (!created.length) return null;
 
-    // 一次跨句划线会写好几条记录。中途失败就把已经写进去的撤掉：
-    // 留半条线在库里，重进阅读器会看到一段莫名其妙的高亮，比干脆失败更糟。
-    const results = await Promise.allSettled(created.map((note) => saveNote(note)));
-    const failed = results.find((result) => result.status === "rejected");
-    if (failed) {
-      await Promise.allSettled(
-        created
-          .filter((_, index) => results[index].status === "fulfilled")
-          .map((note) => removeNote(note.id))
-      );
-      reportStorageError("note", failed.reason);
+    try {
+      await writeNotes(created);
+    } catch (error) {
+      reportStorageError("note", error);
       return null;
     }
 
@@ -5219,21 +5323,23 @@ export default function MotingApp() {
   };
 
   /** 改色、写想法都要落到整组上，否则跨句划线会变成半蓝半黄。 */
-  const updateNote = (note: BookNote) => {
+  const updateNote = async (note: BookNote): Promise<boolean> => {
     const group = groupKey(note);
     const patch = (item: BookNote): BookNote => ({
       ...item,
       color: note.color,
       thought: note.thought,
     });
-    notes
-      .filter((item) => groupKey(item) === group)
-      .forEach((item) =>
-        void saveNote(patch(item)).catch((error) => reportStorageError("note", error))
-      );
+    try {
+      await writeNotes(notes.filter((item) => groupKey(item) === group).map(patch));
+    } catch (error) {
+      reportStorageError("note", error);
+      return false;
+    }
     setNotes((current) =>
       current.map((item) => (groupKey(item) === group ? patch(item) : item))
     );
+    return true;
   };
 
   const handleReadProgress = useCallback(
@@ -5292,18 +5398,19 @@ export default function MotingApp() {
     showToast("书籍及相关标记已删除");
   };
 
-  const deleteBookNote = async (note: BookNote) => {
+  const deleteBookNote = async (note: BookNote): Promise<boolean> => {
     const group = groupKey(note);
     const doomed = notes.filter((item) => groupKey(item) === group);
     try {
-      await Promise.all(doomed.map((item) => removeNote(item.id)));
+      await writeNotes([], doomed.map((item) => item.id));
     } catch (error) {
       reportStorageError("delete-note", error);
-      return;
+      return false;
     }
     setNotes((current) =>
       current.filter((item) => groupKey(item) !== group)
     );
+    return true;
   };
 
   const openNote = (note: BookNote) => {
@@ -5385,6 +5492,7 @@ export default function MotingApp() {
     <main className="app-shell">
       {view.name === "reader" && selectedBook ? (
         <ReaderScreen
+          key={selectedBook.id}
           book={selectedBook}
           notes={selectedBookNotes}
           settings={settings}

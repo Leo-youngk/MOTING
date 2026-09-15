@@ -59,15 +59,17 @@ export function SelectionLayer({
   rects,
   handles,
   onHandleDown,
+  dragging,
 }: {
   rects: Rect[];
   handles: { start: SelectionHandle; end: SelectionHandle } | null;
   onHandleDown: (which: "start" | "end", event: ReactPointerEvent) => void;
+  dragging: boolean;
 }) {
   if (!rects.length) return null;
 
   return (
-    <div className="selection-layer">
+    <div className={`selection-layer ${dragging ? "is-dragging" : ""}`}>
       <div className="selection-layer__fill" aria-hidden>
         {rects.map((rect, index) => (
           <span
