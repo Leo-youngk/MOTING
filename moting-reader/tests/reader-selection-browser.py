@@ -85,6 +85,50 @@ def nudge_handle(page, cdp):
     touch(cdp, "touchEnd")
 
 
+def ordinary_scroll_still_works(page, cdp):
+    """未进入选区时仍让浏览器原生滚动，不能为了划线把整页锁死。"""
+    start = point_on_text(page, paragraph=1, offset=5)
+    touch(cdp, "touchStart", start)
+    for step in range(1, 7):
+        touch(cdp, "touchMove", {"x": start["x"], "y": start["y"] - step * 20})
+    touch(cdp, "touchEnd")
+    page.wait_for_timeout(120)
+    assert page.evaluate("scrollY") > 20, "普通阅读滑动被划线手势锁住了"
+    page.evaluate("scrollTo(0, 0)")
+    page.wait_for_timeout(100)
+
+
+def continuous_upward_selection(page, cdp):
+    """长按下段后不松手直接往上拖：正文不滚，初选词保留，并连续跨到上段。"""
+    page.evaluate("Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{writeText:async text => {window.upwardSelection=text}}})")
+    start = point_on_text(page, paragraph=1, offset=5)
+    target = point_on_text(page, paragraph=0, offset=2)
+    expected_tail = page.locator(".reader-block:not(.is-heading)").nth(1).evaluate("""(el, offset) => {
+      const text = el.textContent || '';
+      const segmenter = new Intl.Segmenter('zh', {granularity:'word'});
+      const part = [...segmenter.segment(text)].find(item => offset >= item.index && offset < item.index + item.segment.length);
+      return text.slice(0, part ? part.index + part.segment.length : offset + 1);
+    }""", 5)
+    initial_scroll = page.evaluate("scrollY")
+    touch(cdp, "touchStart", start)
+    page.wait_for_timeout(550)
+    expect(page.locator(".selection-layer.is-dragging")).to_be_visible()
+    for step in range(1, 11):
+        touch(cdp, "touchMove", {
+            "x": start["x"] + (target["x"] - start["x"]) * step / 10,
+            "y": start["y"] + (target["y"] - start["y"]) * step / 10,
+        })
+        page.wait_for_timeout(24)
+    touch(cdp, "touchEnd")
+    expect(page.get_by_role("dialog", name="划线操作")).to_be_visible()
+    assert abs(page.evaluate("scrollY") - initial_scroll) <= 1, "向上扩选时正文跟着滚了"
+    assert page.locator(".selection-layer__rect").count() > 1, "向上扩选没有跨过段落"
+    page.get_by_role("button", name="复制", exact=True).click()
+    selected = page.evaluate("window.upwardSelection")
+    assert selected.startswith("要求我们"), selected
+    assert selected.endswith(expected_tail), {"selected": selected, "expected_tail": expected_tail}
+
+
 def progress_pill_checks(page, cdp):
     """改动一回归：底部进度胶囊既不拦截长按，也不能被系统原生选中。"""
     info = page.evaluate("""() => {
@@ -132,6 +176,7 @@ with sync_playwright() as p:
         open_reader(page)
         expect(page.locator(".reader-article")).to_have_class(__import__('re').compile("is-custom-select"))
         progress_pill_checks(page, cdp)
+        continuous_upward_selection(page, cdp)
         renders_baseline = body_renders(page)
         select_word(page, cdp)
         menu_inside(page)
@@ -190,6 +235,7 @@ with sync_playwright() as p:
         page.get_by_role("button", name="删除", exact=True).click()
         expect(page.locator(".reader-mark")).to_have_count(0)
         assert snapshot_notes(page) == []
+        ordinary_scroll_still_works(page, cdp)
         assert not errors, errors
         reports.append({"width":width,"cross_paragraph_parts":len(notes),"errors":errors})
         context.close()
