@@ -3398,8 +3398,11 @@ function ReaderScreen({
    * 自定义选区活着时，菜单由它推出来；否则用 setPopup 存的那份（系统选区 / 点已有划线）。
    * 两条路产出的是同一种结构，下面的操作不必各写一遍。
    */
-  const activePopup: ReaderPopupState | null =
-    textSelection.active && textSelection.anchor && textSelection.parts.length
+  const activePopup: ReaderPopupState | null = textSelection.active
+    ? // 自定义选区活着时只认它自己：拖手柄期间 anchor 是 null，那就什么都不显示，
+      // 让菜单从正在选的那几行上让开。这里不能回退到 popup——上一次划线留下的
+      // 颜色菜单会在拖动途中翻出来，挡着正文还牛头不对马嘴。
+      textSelection.anchor && textSelection.parts.length
       ? {
           kind: "selection",
           anchor: anchorFromRects(
@@ -3411,7 +3414,8 @@ function ReaderScreen({
           parts: textSelection.parts,
           text: textSelection.text,
         }
-      : popup;
+      : null
+    : popup;
 
   /** 收掉菜单和选区。两条选择路径都要清，不然会留下画在屏幕上的幽灵选区。 */
   const dismissSelection = useCallback(() => {

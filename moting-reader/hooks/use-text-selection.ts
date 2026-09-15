@@ -29,8 +29,16 @@ const MOVE_TOLERANCE = 10;
 /** 拖手柄到离边缘这么近就开始自动滚动。 */
 const EDGE_SCROLL_ZONE = 72;
 const EDGE_SCROLL_SPEED = 12;
-/** 手指盖住手柄，判定点要往上抬一点，否则选区总比手感慢半行。 */
-const HANDLE_TOUCH_LIFT = 14;
+/**
+ * 手指和手柄锚点之间的偏移，在按下那一刻量一次，整段拖动沿用。
+ *
+ * 不能用一个固定的「往上抬 N 像素」：起点手柄的圆球在行上方、终点手柄的在行下方，
+ * 同一个补偿对其中一个方向正好是反的，会整整偏掉一行。记住实际抓取位置才两边都准。
+ */
+interface GrabOffset {
+  dx: number;
+  dy: number;
+}
 
 export interface SelectionHandle {
   x: number;
@@ -257,6 +265,9 @@ export function useTextSelection(
   } | null>(null);
   /** 这次长按已经选出东西了，紧跟着的那个 click 要吞掉。 */
   const justSelectedRef = useRef(false);
+  /** beginHandleDrag 要读当前手柄位置来算抓取偏移，渲染期不能读 state。 */
+  const geometryRef = useRef<SelectionGeometry>(EMPTY_GEOMETRY);
+  const grabOffsetRef = useRef<GrabOffset>({ dx: 0, dy: 0 });
   const measureFrameRef = useRef(0);
   const scrollFrameRef = useRef(0);
   const scrollSpeedRef = useRef(0);
@@ -299,6 +310,7 @@ export function useTextSelection(
     selectionRef.current = null;
     setSelection(null);
     setDragging(false);
+    geometryRef.current = EMPTY_GEOMETRY;
     setGeometry(EMPTY_GEOMETRY);
   }, [cancelPress, stopEdgeScroll]);
 
@@ -307,11 +319,13 @@ export function useTextSelection(
     const article = articleRef.current;
     const current = selectionRef.current;
     if (!article || !current || isEmptySelection(current)) {
+      geometryRef.current = EMPTY_GEOMETRY;
       setGeometry(EMPTY_GEOMETRY);
       return;
     }
     const range = rangeFor(article, current);
     if (!range) {
+      geometryRef.current = EMPTY_GEOMETRY;
       setGeometry(EMPTY_GEOMETRY);
       return;
     }
@@ -320,6 +334,7 @@ export function useTextSelection(
       .filter((rect) => rect.width > 0 || rect.height > 0)
       .map(toRect);
     if (!rects.length) {
+      geometryRef.current = EMPTY_GEOMETRY;
       setGeometry(EMPTY_GEOMETRY);
       return;
     }
@@ -329,7 +344,7 @@ export function useTextSelection(
     const parts = selectionParts(current, sentencesIn(article));
     const first = rects[0];
     const last = rects[rects.length - 1];
-    setGeometry({
+    const next: SelectionGeometry = {
       rects,
       handles: {
         start: { x: first.left, top: first.top, height: first.bottom - first.top },
@@ -338,7 +353,9 @@ export function useTextSelection(
       anchor: toRect(range.getBoundingClientRect()),
       parts,
       text: selectionText(parts),
-    });
+    };
+    geometryRef.current = next;
+    setGeometry(next);
   }, [articleRef]);
 
   const scheduleMeasure = useCallback(() => {
@@ -488,7 +505,8 @@ export function useTextSelection(
       const current = selectionRef.current;
       if (!article || !current || !draggingRef.current) return;
 
-      const place = placeFromPoint(article, x, y - HANDLE_TOUCH_LIFT);
+      const grab = grabOffsetRef.current;
+      const place = placeFromPoint(article, x + grab.dx, y + grab.dy);
       if (!place) return;
 
       // beginHandleDrag 已经把不动的那一端规整成 anchor，这里一路只改 focus。
@@ -519,10 +537,23 @@ export function useTextSelection(
       selectionRef.current = next;
       setSelection(next);
 
+      // 手柄锚点是它所在那一行的竖直中点。记下它和手指的差值，
+      // 整段拖动都按这个差值换算判定点，选中的字就跟手柄严丝合缝。
+      const handle =
+        which === "start"
+          ? geometryRef.current.handles?.start
+          : geometryRef.current.handles?.end;
+      grabOffsetRef.current = handle
+        ? {
+            dx: handle.x - event.clientX,
+            dy: handle.top + handle.height / 2 - event.clientY,
+          }
+        : { dx: 0, dy: 0 };
+
       draggingRef.current = which;
       setDragging(true);
       try {
-        (event.target as HTMLElement).setPointerCapture?.(event.pointerId);
+        event.currentTarget.setPointerCapture?.(event.pointerId);
       } catch {
         // 指针已经不在了就算了：拖动本来就靠 document 上的监听兜着，抓不到也能跟。
       }

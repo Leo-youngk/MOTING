@@ -3348,41 +3348,51 @@ html[data-keyboard-open] .bottom-bar {
   background: color-mix(in srgb, var(--mark-blue) 34%, transparent);
 }
 
-/* 手柄：一条压在选区端点上的竖线，加一颗好捏的圆球。
-   触控区用透明 border 撑开，视觉上仍然是细的。 */
+/* 手柄：可点区域是一块 44 点见方的透明盒子，视觉上只露一条细线和一颗球。
+   之前把盒子做成 2px 竖线 + 透明边框（30×21），圆球还用负 top 画在盒子外面，
+   结果是用户瞄着球按、按在触控区之外——「手柄拖不动」就是这么来的。 */
 .selection-handle {
   position: fixed;
-  width: 2px;
   padding: 0;
   border: 0;
-  border-right: 14px solid transparent;
-  border-left: 14px solid transparent;
-  margin-left: -15px;
-  background: var(--mark-blue);
-  background-clip: padding-box;
+  background: transparent;
   pointer-events: auto;
+  /* 手指落在手柄上就归拖动，别让页面跟着滚。 */
   touch-action: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.selection-handle::after {
+/* 压在选区端点上的竖线。 */
+.selection-handle::before {
   position: absolute;
-  left: 50%;
-  width: var(--knob, 11px);
-  height: var(--knob, 11px);
-  border-radius: 50%;
+  top: var(--pad);
+  left: var(--anchor-x);
+  width: 2px;
+  height: var(--line-h);
+  margin-left: -1px;
   background: var(--mark-blue);
   content: "";
 }
 
-/* 起点的球在上、终点的球在下，跟 iOS 的方向一致，捏哪一端一眼能看出来。 */
+.selection-handle::after {
+  position: absolute;
+  left: var(--anchor-x);
+  width: var(--knob);
+  height: var(--knob);
+  border-radius: 50%;
+  margin-left: calc(var(--knob) / -2);
+  background: var(--mark-blue);
+  content: "";
+}
+
+/* 起点的球在竖线上端、终点的在下端，跟 iOS 一致，捏哪头一眼能看出来。
+   两颗球都落在触控盒子里面，不再探到外面去。 */
 .selection-handle--start::after {
-  top: calc(var(--knob, 11px) / -2);
-  transform: translateX(-50%);
+  top: calc(var(--pad) - var(--knob));
 }
 
 .selection-handle--end::after {
-  bottom: calc(var(--knob, 11px) / -2);
-  transform: translateX(-50%);
+  top: calc(var(--pad) + var(--line-h));
 }
 
 /* 左右翻页：正文用多栏排出来，一栏正好一页，横向平移切页。
