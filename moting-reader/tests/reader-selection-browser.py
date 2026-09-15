@@ -26,6 +26,19 @@ def snapshot_notes(page):
     })""")
 
 
+def snapshot_settings(page):
+    return page.evaluate("""() => new Promise((resolve, reject) => {
+      const req = indexedDB.open('moting-reader');
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result, tx = db.transaction('settings');
+        const read = tx.objectStore('settings').get('reader');
+        read.onsuccess = () => resolve(read.result);
+        tx.oncomplete = () => db.close();
+      };
+    })""")
+
+
 def open_reader(page):
     page.goto(BASE)
     # 现在刷新会回到上次待的地方：已经落在阅读器里就不必再从书架进一次。
@@ -51,8 +64,8 @@ def touch(cdp, kind, point=None):
     cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": [] if point is None else [{**point, "id": 1}]})
 
 
-def select_word(page, cdp):
-    point = point_on_text(page)
+def select_word(page, cdp, paragraph=0, offset=2):
+    point = point_on_text(page, paragraph=paragraph, offset=offset)
     touch(cdp, "touchStart", point)
     page.wait_for_timeout(550)
     touch(cdp, "touchEnd")
@@ -214,7 +227,10 @@ with sync_playwright() as p:
         expect(page.get_by_role("dialog", name="划线操作")).to_be_visible()
         menu_inside(page)
         page.screenshot(path=str(OUT / f"cross-paragraph-{width}.png"))
+        mark_count_before = page.locator(".reader-mark").count()
         page.get_by_role("button", name="划线", exact=True).click()
+        # 主按钮必须一次完成创建，不再先打开样式选择层。
+        expect(page.locator(".reader-mark")).to_have_count(mark_count_before + 4)
         expect(page.get_by_role("button", name="下划线", exact=True)).to_be_visible()
         expect(page.get_by_role("button", name="马克笔", exact=True)).to_be_visible()
         menu_inside(page)
@@ -223,6 +239,7 @@ with sync_playwright() as p:
         expect(page.locator(".reader-mark").first).to_be_visible()
         expect(page.locator(".reader-mark").first).to_have_class(__import__('re').compile("reader-mark--marker"))
         page.screenshot(path=str(OUT / f"marker-{width}.png"))
+        page.locator(".reader-mark").first.click()
         page.get_by_role("button", name="蓝色", exact=True).click()
         page.wait_for_timeout(100)
         notes = snapshot_notes(page)
@@ -230,9 +247,22 @@ with sync_playwright() as p:
         assert all(note["color"] == "blue" for note in notes), notes
         assert all(note["highlightStyle"] == "marker" for note in notes), notes
         assert len({note["groupId"] for note in notes}) == 1, notes
-        # 刷新后仍恢复马克笔；已有跨段划线切换样式时必须整组同步。
+        saved_settings = snapshot_settings(page)
+        assert saved_settings["highlightColor"] == "blue", saved_settings
+        assert saved_settings["highlightStyle"] == "marker", saved_settings
+        # 刷新后仍记住上次外观；下一次点「划线」直接用蓝色马克笔创建。
         open_reader(page)
         expect(page.locator(".reader-mark").first).to_have_class(__import__('re').compile("reader-mark--marker"))
+        select_word(page, cdp, paragraph=2, offset=2)
+        previous_note_count = len(snapshot_notes(page))
+        page.get_by_role("button", name="划线", exact=True).click()
+        remembered_notes = snapshot_notes(page)
+        assert len(remembered_notes) > previous_note_count, remembered_notes
+        assert all(note["color"] == "blue" for note in remembered_notes), remembered_notes
+        assert all(note["highlightStyle"] == "marker" for note in remembered_notes), remembered_notes
+        # 当前弹层属于刚创建的第二组，删掉后继续验证原来的跨段划线。
+        page.get_by_role("button", name="删除", exact=True).click()
+        assert len(snapshot_notes(page)) == previous_note_count
         page.locator(".reader-mark").first.click()
         page.get_by_role("button", name="下划线", exact=True).click()
         expect(page.locator(".reader-mark").first).to_have_class(__import__('re').compile("reader-mark--underline"))

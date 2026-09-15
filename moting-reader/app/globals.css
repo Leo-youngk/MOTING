@@ -3764,27 +3764,6 @@ html[data-keyboard-open] .bottom-bar {
   padding: 7px 10px 8px;
 }
 
-.highlight-style-icon {
-  position: relative;
-  display: inline-grid;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  color: #fff;
-  font-family: var(--font-serif);
-  font-size: 12px;
-  line-height: 1;
-}
-
-.highlight-style-icon.is-underline {
-  border-bottom: 2px solid var(--mark-yellow);
-}
-
-.highlight-style-icon.is-marker {
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--mark-yellow) 55%, transparent);
-}
-
 .swatch {
   width: 22px;
   height: 22px;

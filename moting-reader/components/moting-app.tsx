@@ -2463,6 +2463,8 @@ type ReaderPopupState =
 function ReaderPopover({
   popup,
   insets,
+  defaultColor,
+  defaultStyle,
   onHighlight,
   onCopy,
   onThought,
@@ -2472,6 +2474,8 @@ function ReaderPopover({
 }: {
   popup: ReaderPopupState;
   insets: SafeInsets;
+  defaultColor: HighlightColor;
+  defaultStyle: HighlightStyle;
   onHighlight: (color: HighlightColor, style?: HighlightStyle) => void;
   onCopy: () => void;
   onThought: () => void;
@@ -2481,7 +2485,6 @@ function ReaderPopover({
 }) {
   const nodeRef = useRef<HTMLDivElement>(null);
   const [more, setMore] = useState(false);
-  const [choosingStyle, setChoosingStyle] = useState(false);
   const [placement, setPlacement] = useState<Placement | null>(null);
 
   const { top, bottom, left, right } = popup.anchor;
@@ -2505,7 +2508,6 @@ function ReaderPopover({
   if (identity !== lastIdentity) {
     setLastIdentity(identity);
     setMore(false);
-    setChoosingStyle(false);
   }
 
   // 翻到「更多」会换一批按钮、宽度跟着变，所以 more 也得进依赖重新量。
@@ -2533,7 +2535,7 @@ function ReaderPopover({
       observer.disconnect();
       window.removeEventListener("resize", update);
     };
-  }, [top, bottom, left, right, rects, insets, more, choosingStyle, popup.kind]);
+  }, [top, bottom, left, right, rects, insets, more, popup.kind]);
 
   const style: CSSProperties = placement
     ? {
@@ -2607,25 +2609,6 @@ function ReaderPopover({
               删除
             </button>
           </>
-        ) : choosingStyle ? (
-          <>
-            <button
-              type="button"
-              className="reader-popover__back"
-              aria-label="返回划线操作"
-              onClick={() => setChoosingStyle(false)}
-            >
-              <ChevronLeft size={16} />
-            </button>
-            <button type="button" onClick={() => onHighlight("yellow", "underline")}>
-              <span className="highlight-style-icon is-underline" aria-hidden="true">字</span>
-              下划线
-            </button>
-            <button type="button" onClick={() => onHighlight("yellow", "marker")}>
-              <span className="highlight-style-icon is-marker" aria-hidden="true">字</span>
-              马克笔
-            </button>
-          </>
         ) : more ? (
           <>
             <button
@@ -2647,7 +2630,10 @@ function ReaderPopover({
           </>
         ) : (
           <>
-            <button type="button" onClick={() => setChoosingStyle(true)}>
+            <button
+              type="button"
+              onClick={() => onHighlight(defaultColor, defaultStyle)}
+            >
               <Highlighter size={16} />
               划线
             </button>
@@ -3808,13 +3794,25 @@ function ReaderScreen({
     highlightStyle?: HighlightStyle
   ) => {
     if (activePopup?.kind === "mark") {
+      const resolvedStyle =
+        highlightStyle ?? activePopup.note.highlightStyle ?? "underline";
       if (
         await onUpdateNote({
           ...activePopup.note,
           color,
-          highlightStyle: highlightStyle ?? activePopup.note.highlightStyle ?? "underline",
+          highlightStyle: resolvedStyle,
         })
       ) {
+        if (
+          settings.highlightColor !== color ||
+          settings.highlightStyle !== resolvedStyle
+        ) {
+          onSettingsChange({
+            ...settings,
+            highlightColor: color,
+            highlightStyle: resolvedStyle,
+          });
+        }
         setPopup(null);
       }
       return;
@@ -4159,6 +4157,8 @@ function ReaderScreen({
         <ReaderPopover
           popup={activePopup}
           insets={insets}
+          defaultColor={settings.highlightColor}
+          defaultStyle={settings.highlightStyle}
           onHighlight={applyHighlight}
           onCopy={async () => {
             const text =
@@ -4190,7 +4190,11 @@ function ReaderScreen({
             const note =
               activePopup.kind === "mark"
                 ? activePopup.note
-                : await onHighlight(activePopup.parts, "yellow");
+                : await onHighlight(
+                    activePopup.parts,
+                    settings.highlightColor,
+                    settings.highlightStyle
+                  );
             if (!note) {
               onToast("划线没保存上，再点一次试试");
               return;

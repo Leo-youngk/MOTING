@@ -137,6 +137,9 @@ export interface ReaderSettings {
   theme: ReaderTheme;
   shellTheme: ShellTheme;
   readingMode: ReadingMode;
+  /** 新建划线直接沿用最近一次选择；旧设置由 DEFAULT_SETTINGS 补齐。 */
+  highlightColor: HighlightColor;
+  highlightStyle: HighlightStyle;
   speechRate: number;
   voiceURI: string;
   /** 用户自带的 OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1。 */
@@ -209,6 +212,8 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   theme: "paper",
   shellTheme: "white",
   readingMode: "scroll",
+  highlightColor: "yellow",
+  highlightStyle: "underline",
   speechRate: 1,
   voiceURI: "",
   aiBaseUrl: "",
