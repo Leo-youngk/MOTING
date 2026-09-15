@@ -51,7 +51,6 @@ import {
   type RefObject,
   useCallback,
   useEffect,
-  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -391,63 +390,9 @@ function Modal({
   useScrollLock();
   useEscapeToClose(onClose);
   const drag = useSheetDrag(onClose);
-  const dialogRef = useRef<HTMLElement>(null);
-  const titleId = useId();
   // 按下就关会误伤：手指落在面板边缘想滑动、稍微移出去一点就把面板关掉了。
   // 记住这一下是不是从遮罩上按下的，抬手仍在遮罩上才算「点空白关闭」。
   const fromBackdrop = useRef(false);
-
-  useLayoutEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-
-    const previousFocus =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusableSelector =
-      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-    const getFocusable = () =>
-      Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector)).filter(
-        (element) => element.getClientRects().length > 0
-      );
-
-    // 保留编辑框等控件自己的 autoFocus；其他弹窗把焦点放到第一个可操作控件。
-    if (!dialog.contains(document.activeElement)) {
-      const autoFocus = dialog.querySelector<HTMLElement>("[autofocus]");
-      (autoFocus ?? getFocusable()[0] ?? dialog).focus();
-    }
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Tab") return;
-      const focusable = getFocusable();
-      if (!focusable.length) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const current = document.activeElement;
-      if (event.shiftKey && current === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && current === last) {
-        event.preventDefault();
-        first.focus();
-      } else if (!dialog.contains(current)) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      if (previousFocus?.isConnected && previousFocus !== document.body) {
-        previousFocus.focus();
-      }
-    };
-  }, []);
 
   return createPortal(
     <div
@@ -464,15 +409,13 @@ function Modal({
       }}
     >
       <section
-        ref={dialogRef}
         className={`modal-sheet ${wide ? "modal-sheet--wide" : ""} ${
           drag.dragging ? "is-dragging" : ""
         } ${className}`}
         style={drag.offset ? { transform: `translateY(${drag.offset}px)` } : undefined}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={titleId}
-        tabIndex={-1}
+        aria-label={title}
       >
         {/* 把手不再是装饰：真能拖下去关掉。touch-action 写在 CSS 里，
             必须在手指落下之前就生效，事后再改浏览器不认。 */}
@@ -482,7 +425,7 @@ function Modal({
           onPointerDown={drag.onPointerDown}
         />
         <header onPointerDown={drag.onPointerDown}>
-          <h2 id={titleId}>{title}</h2>
+          <h2>{title}</h2>
           <button
             type="button"
             className="icon-button"
@@ -1711,8 +1654,6 @@ function BookNotesScreen({
     "all"
   );
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
-  const [calendarOpen, setCalendarOpen] = useState(false);
-  const calendarId = useId();
   const countsByDay = useMemo(() => {
     const counts = new Map<string, number>();
     notes.forEach((note) => {
@@ -1757,49 +1698,21 @@ function BookNotesScreen({
         ))}
       </div>
 
-      <div className="notes-calendar-bar">
+      <NotesCalendar
+        countsByDay={countsByDay}
+        selected={selectedDay}
+        onSelect={setSelectedDay}
+      />
+
+      {selectedDay ? (
         <button
           type="button"
-          className="notes-calendar-toggle"
-          aria-expanded={calendarOpen}
-          aria-controls={calendarId}
-          onClick={() => setCalendarOpen((open) => !open)}
+          className="notes-day-chip"
+          onClick={() => setSelectedDay(null)}
         >
-          <span className="notes-calendar-toggle__copy">
-            <strong>日期筛选</strong>
-            <small>
-              {selectedDay
-                ? `正在查看 ${selectedDay.replace(/-/g, ".")}`
-                : "按日期查看笔记"}
-            </small>
-          </span>
-          <ChevronDown
-            size={17}
-            aria-hidden="true"
-            className="notes-calendar-toggle__icon"
-          />
+          只看 {selectedDay.replace(/-/g, ".")}
+          <X size={13} />
         </button>
-
-        {selectedDay ? (
-          <button
-            type="button"
-            className="notes-day-chip"
-            onClick={() => setSelectedDay(null)}
-          >
-            清除日期
-            <X size={13} aria-hidden="true" />
-          </button>
-        ) : null}
-      </div>
-
-      {calendarOpen ? (
-        <div id={calendarId}>
-          <NotesCalendar
-            countsByDay={countsByDay}
-            selected={selectedDay}
-            onSelect={setSelectedDay}
-          />
-        </div>
       ) : null}
 
       {!visible.length ? (
@@ -6345,7 +6258,7 @@ export default function MotingApp() {
       ) : null}
 
       {toast ? (
-        <div className="toast" role="status" aria-live="polite" aria-atomic="true">
+        <div className="toast">
           <span>{toast.message}</span>
           {toast.undo ? (
             <button
