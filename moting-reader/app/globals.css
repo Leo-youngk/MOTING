@@ -1641,6 +1641,65 @@ button:disabled {
   font-weight: 500;
 }
 
+.notes-calendar-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.notes-calendar-toggle {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--paper-deep);
+  color: var(--ink);
+  text-align: left;
+}
+
+.notes-calendar-toggle__copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.notes-calendar-toggle__copy strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.notes-calendar-toggle__copy small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-calendar-toggle__icon {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 180ms ease;
+}
+
+.notes-calendar-toggle[aria-expanded="true"] .notes-calendar-toggle__icon {
+  transform: rotate(180deg);
+}
+
+.notes-calendar-bar .notes-day-chip {
+  flex-shrink: 0;
+  align-self: center;
+  margin: 0;
+  white-space: nowrap;
+}
+
 .ink-summary {
   margin: 2px 0 14px;
   color: var(--muted);
