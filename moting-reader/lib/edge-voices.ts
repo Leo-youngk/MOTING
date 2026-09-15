@@ -25,3 +25,11 @@ export function edgeVoiceName(voiceURI: string): string {
     ? voiceURI.slice(EDGE_VOICE_PREFIX.length)
     : DEFAULT_EDGE_VOICE;
 }
+
+/**
+ * 「自动选择」和显式选中晓晓其实是同一个音色。要显示「正在播放的是谁」时得先
+ * 折算成具体音色，否则自动模式下这一栏永远是空的。
+ */
+export function resolvedEdgeVoiceURI(voiceURI: string): string {
+  return `${EDGE_VOICE_PREFIX}${edgeVoiceName(voiceURI)}`;
+}

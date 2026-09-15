@@ -3322,6 +3322,66 @@ html[data-keyboard-open] .bottom-bar {
   -webkit-touch-callout: none;
 }
 
+/* 由应用接管选择时必须把系统选择彻底关掉：只要 WebKit 还认为正文可选，
+   长按就会弹出「拷贝 / 查询 / 翻译」，跟墨听自己的浮条叠成两套菜单。
+   选区底色和手柄改由 .selection-layer 自己画。 */
+.reader-article.is-custom-select {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 自定义选区层。全部按视口坐标 fixed 摆放，位置每帧由脚本重新量。 */
+.selection-layer {
+  position: fixed;
+  z-index: 25;
+  inset: 0;
+  pointer-events: none;
+}
+
+.selection-layer__rect {
+  position: fixed;
+  border-radius: 2px;
+  /* 比朗读高亮（13%）重一档，两者同时出现时分得开。 */
+  background: color-mix(in srgb, var(--mark-blue) 34%, transparent);
+}
+
+/* 手柄：一条压在选区端点上的竖线，加一颗好捏的圆球。
+   触控区用透明 border 撑开，视觉上仍然是细的。 */
+.selection-handle {
+  position: fixed;
+  width: 2px;
+  padding: 0;
+  border: 0;
+  border-right: 14px solid transparent;
+  border-left: 14px solid transparent;
+  margin-left: -15px;
+  background: var(--mark-blue);
+  background-clip: padding-box;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.selection-handle::after {
+  position: absolute;
+  left: 50%;
+  width: var(--knob, 11px);
+  height: var(--knob, 11px);
+  border-radius: 50%;
+  background: var(--mark-blue);
+  content: "";
+}
+
+/* 起点的球在上、终点的球在下，跟 iOS 的方向一致，捏哪一端一眼能看出来。 */
+.selection-handle--start::after {
+  top: calc(var(--knob, 11px) / -2);
+  transform: translateX(-50%);
+}
+
+.selection-handle--end::after {
+  bottom: calc(var(--knob, 11px) / -2);
+  transform: translateX(-50%);
+}
+
 /* 左右翻页：正文用多栏排出来，一栏正好一页，横向平移切页。
    栏宽由脚本按实际宽度写进 column-width，纯 CSS 没法引用这个长度。 */
 .reader-shell.is-paged {
@@ -3570,12 +3630,16 @@ html[data-keyboard-open] .bottom-bar {
   box-decoration-break: clone;
 }
 
-/* 微信读书那条浮在选区上方的操作栏。 */
+/* 微信读书那条浮在选区上方的操作栏。
+   定位不再用 translate(-50%)：那等于假定菜单有个固定半宽，而它的宽度随内容变，
+   一靠边就整条挤出屏幕。现在由脚本量出实际尺寸算好左上角，这里只负责画。 */
 .reader-popover {
   --popover-fill: rgb(38 38 41 / 80%);
+  --arrow-left: 50%;
   position: fixed;
   z-index: 30;
   display: flex;
+  max-width: calc(100vw - 24px);
   flex-direction: column;
   padding: 4px;
   border: 0.5px solid rgb(255 255 255 / 12%);
@@ -3587,11 +3651,6 @@ html[data-keyboard-open] .bottom-bar {
     inset 0 0.5px 0 rgb(255 255 255 / 14%),
     0 1px 2px rgb(0 0 0 / 22%),
     0 12px 32px rgb(0 0 0 / 34%);
-  transform: translate(-50%, -100%);
-}
-
-.reader-popover.is-below {
-  transform: translate(-50%, 0);
 }
 
 /* 尖角用边框三角画，不用旋转方块：方块有一半压在浮条里，
@@ -3599,7 +3658,7 @@ html[data-keyboard-open] .bottom-bar {
 .reader-popover::after {
   position: absolute;
   bottom: -6px;
-  left: 50%;
+  left: var(--arrow-left);
   width: 0;
   height: 0;
   border-right: 7px solid transparent;
@@ -3654,11 +3713,13 @@ html[data-keyboard-open] .bottom-bar {
 
 .reader-popover__actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 .reader-popover__actions button {
   display: inline-flex;
-  min-height: 40px;
+  min-height: 44px;
   align-items: center;
   gap: 5px;
   padding: 0 12px;
@@ -3667,6 +3728,11 @@ html[data-keyboard-open] .bottom-bar {
   color: inherit;
   font-size: 13px;
   white-space: nowrap;
+}
+
+/* 「更多」里的返回箭头只有图标，按正方形收窄，别撑出一块空白。 */
+.reader-popover__back {
+  padding: 0 8px;
 }
 
 .reader-popover__actions button:active {
@@ -4428,6 +4494,52 @@ html[data-keyboard-open] .modal-sheet {
 .voice-list small {
   color: var(--muted);
   font-size: 10px;
+}
+
+/* 「选中」和「正在播放」是两回事：云端失败退回系统朗读时两者会对不上，
+   右侧这块状态标就是用来把这个差别说清楚的，不能只靠一个勾。 */
+.voice-state {
+  display: inline-flex;
+  align-items: center;
+  /* 固定最小宽度，「切换中 → 正在播放」换字时行不会左右抖。 */
+  min-width: 56px;
+  justify-content: flex-end;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.voice-state.is-playing {
+  color: var(--accent-deep);
+}
+
+.voice-list button.is-preparing strong {
+  color: var(--accent-deep);
+}
+
+/* 切换失败：原来的声音还在读，这里给出原因和一个重试入口。 */
+.voice-retry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: 12px;
+  margin-top: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 12px;
+  gap: 12px;
+}
+
+.voice-retry button {
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
 }
 
 .import-overlay {

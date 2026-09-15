@@ -54,6 +54,30 @@ export function charIndexAt(
   return timeline[match].charIndex;
 }
 
+/**
+ * charIndexAt 的反函数：这个字符是从第几秒开始被读到的。
+ *
+ * 取「最后一个起点不晚于目标字符的词」，而不是第一个不早于的：换音色交接时宁可
+ * 把当前这个词从头再读半个字，也不能跳过去——漏字用户立刻能听出来，重读听不出来。
+ */
+export function timeAt(timeline: SpeechBoundary[], charIndex: number): number {
+  if (!timeline.length) return 0;
+
+  let low = 0;
+  let high = timeline.length - 1;
+  let match = 0;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    if (timeline[middle].charIndex <= charIndex) {
+      match = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return timeline[match].time;
+}
+
 /** 找出字符下标落在哪个句子上。 */
 export function spanAt(spans: SpeechSpan[], charIndex: number): SpeechSpan {
   let match = spans[0];

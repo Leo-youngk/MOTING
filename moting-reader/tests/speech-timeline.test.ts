@@ -6,6 +6,7 @@ import {
   charIndexAt,
   spanAt,
   TICKS_PER_SECOND,
+  timeAt,
 } from "../lib/speech-timeline.ts";
 import type { SpeechSpan } from "../lib/types.ts";
 
@@ -86,4 +87,33 @@ test("字符下标能定位到所属句子", () => {
   assert.equal(spanAt(spans, 4).sentenceId, "a");
   assert.equal(spanAt(spans, 5).sentenceId, "b");
   assert.equal(spanAt(spans, 19).sentenceId, "c");
+});
+
+test("换音色交接时按字符下标反查起播秒数", () => {
+  const timeline = [
+    { time: 0, charIndex: 0 },
+    { time: 0.5, charIndex: 4 },
+    { time: 1.2, charIndex: 9 },
+    { time: 2, charIndex: 15 },
+  ];
+
+  assert.equal(timeAt(timeline, 0), 0);
+  assert.equal(timeAt(timeline, 4), 0.5);
+  assert.equal(timeAt(timeline, 9), 1.2);
+  // 落在词中间时退到这个词的开头：宁可重读半个字，也不能跳过去漏字。
+  assert.equal(timeAt(timeline, 6), 0.5);
+  assert.equal(timeAt(timeline, 999), 2);
+  assert.equal(timeAt([], 5), 0);
+});
+
+test("反查和正查在同一段时间轴上自洽", () => {
+  const timeline = [
+    { time: 0, charIndex: 0 },
+    { time: 0.5, charIndex: 4 },
+    { time: 1.2, charIndex: 9 },
+  ];
+
+  for (const entry of timeline) {
+    assert.equal(charIndexAt(timeline, timeAt(timeline, entry.charIndex)), entry.charIndex);
+  }
 });

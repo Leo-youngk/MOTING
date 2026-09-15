@@ -121,6 +121,16 @@ import {
   totalSeconds,
 } from "../lib/reading-stats";
 import { useReadingSession } from "../hooks/use-reading-session";
+import { useSafeInsets, type SafeInsets } from "../hooks/use-safe-insets";
+import { useTextSelection } from "../hooks/use-text-selection";
+import { SelectionLayer } from "./selection-layer";
+import {
+  anchorFromRects,
+  placePopover,
+  type Placement,
+  type Rect,
+} from "../lib/popover-placement";
+import { EDGE_VOICES } from "../lib/edge-voices";
 
 const OnlineLibrary = lazy(() =>
   import("./online-library").then(({ OnlineLibrary: Component }) => ({
@@ -2126,12 +2136,22 @@ function ReaderImage({
 }
 
 type ReaderPopupState =
-  | { kind: "selection"; anchor: DOMRect; parts: HighlightPart[]; text: string }
-  | { kind: "mark"; anchor: DOMRect; note: BookNote };
+  | { kind: "selection"; anchor: Rect; parts: HighlightPart[]; text: string }
+  | { kind: "mark"; anchor: Rect; note: BookNote };
 
-/** 划词后浮在选区上方的操作条，交互对齐微信读书。 */
+/**
+ * 划词后浮在选区上的操作条。
+ *
+ * 定位必须拿量出来的真实尺寸算，不能按估计的半宽夹——这条菜单在 390px 的屏上
+ * 曾经宽到接近 400px，靠边的选区会把它整个挤出屏幕，最边上那一项根本点不到。
+ * 所以先渲染、量、再摆，第一帧用 visibility 藏住，避免闪一下。
+ *
+ * 内容也跟着收敛：第一层只留划线、想法、复制，其余进「更多」，
+ * 这样常规宽度就压在 300px 上下，靠边时也还有夹取余量。
+ */
 function ReaderPopover({
   popup,
+  insets,
   onHighlight,
   onCopy,
   onThought,
@@ -2140,6 +2160,7 @@ function ReaderPopover({
   onAskAi,
 }: {
   popup: ReaderPopupState;
+  insets: SafeInsets;
   onHighlight: (color: HighlightColor) => void;
   onCopy: () => void;
   onThought: () => void;
@@ -2147,16 +2168,54 @@ function ReaderPopover({
   onDelete: () => void;
   onAskAi: () => void;
 }) {
-  const below = popup.anchor.top < 132;
-  const center = popup.anchor.left + popup.anchor.width / 2;
-  const style: CSSProperties = {
-    left: `${Math.min(Math.max(center, 104), window.innerWidth - 104)}px`,
-    top: below ? `${popup.anchor.bottom + 10}px` : `${popup.anchor.top - 10}px`,
-  };
+  const nodeRef = useRef<HTMLDivElement>(null);
+  const [more, setMore] = useState(false);
+  const [placement, setPlacement] = useState<Placement | null>(null);
+
+  const { top, bottom, left, right } = popup.anchor;
+
+  // 换了一处选区就回到第一层，否则上次翻开的「更多」会粘在下一次。
+  // 这里按「选中的是哪几个字」比，不按像素位置——滚动时菜单会重新量位置，
+  // 拿坐标当身份会让用户正看着的那一层被重置掉。
+  const identity =
+    popup.kind === "mark"
+      ? popup.note.id
+      : popup.parts
+          .map((part) => `${part.sentenceId}:${part.start}-${part.end}`)
+          .join("|");
+  const [lastIdentity, setLastIdentity] = useState(identity);
+  if (identity !== lastIdentity) {
+    setLastIdentity(identity);
+    setMore(false);
+  }
+
+  // 翻到「更多」会换一批按钮、宽度跟着变，所以 more 也得进依赖重新量。
+  useLayoutEffect(() => {
+    const node = nodeRef.current;
+    if (!node) return;
+    const box = node.getBoundingClientRect();
+    setPlacement(
+      placePopover({
+        anchor: { top, bottom, left, right },
+        menu: { width: box.width, height: box.height },
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        insets,
+      })
+    );
+  }, [top, bottom, left, right, insets, more, popup.kind]);
+
+  const style: CSSProperties = placement
+    ? {
+        left: `${placement.left}px`,
+        top: `${placement.top}px`,
+        ["--arrow-left" as string]: `${placement.arrowLeft}px`,
+      }
+    : { left: "0px", top: "0px", visibility: "hidden" };
 
   return (
     <div
-      className={`reader-popover ${below ? "is-below" : ""}`}
+      ref={nodeRef}
+      className={`reader-popover ${placement?.side === "below" ? "is-below" : ""}`}
       style={style}
       role="dialog"
       aria-label="划线操作"
@@ -2178,21 +2237,30 @@ function ReaderPopover({
       ) : null}
 
       <div className="reader-popover__actions">
-        {popup.kind === "selection" ? (
-          <button type="button" onClick={() => onHighlight("yellow")}>
-            <Highlighter size={16} />
-            划线
-          </button>
-        ) : null}
-        <button type="button" onClick={onThought}>
-          <PencilLine size={16} />
-          {popup.kind === "mark" && popup.note.thought ? "改想法" : "想法"}
-        </button>
-        {popup.kind === "selection" ? (
+        {popup.kind === "mark" ? (
           <>
+            <button type="button" onClick={onThought}>
+              <PencilLine size={16} />
+              {popup.note.thought ? "改想法" : "想法"}
+            </button>
             <button type="button" onClick={onCopy}>
               <Copy size={16} />
               复制
+            </button>
+            <button type="button" onClick={onDelete}>
+              <Trash2 size={16} />
+              删除
+            </button>
+          </>
+        ) : more ? (
+          <>
+            <button
+              type="button"
+              className="reader-popover__back"
+              aria-label="返回上一层"
+              onClick={() => setMore(false)}
+            >
+              <ChevronLeft size={16} />
             </button>
             <button type="button" onClick={onListen}>
               <Headphones size={16} />
@@ -2204,10 +2272,24 @@ function ReaderPopover({
             </button>
           </>
         ) : (
-          <button type="button" onClick={onDelete}>
-            <Trash2 size={16} />
-            删除
-          </button>
+          <>
+            <button type="button" onClick={() => onHighlight("yellow")}>
+              <Highlighter size={16} />
+              划线
+            </button>
+            <button type="button" onClick={onThought}>
+              <PencilLine size={16} />
+              想法
+            </button>
+            <button type="button" onClick={onCopy}>
+              <Copy size={16} />
+              复制
+            </button>
+            <button type="button" onClick={() => setMore(true)}>
+              <MoreHorizontal size={16} />
+              更多
+            </button>
+          </>
         )}
       </div>
     </div>
@@ -2830,6 +2912,7 @@ function ReaderScreen({
   onUpdateNote,
   onDeleteNote,
   onSettingsChange,
+  onToast,
 }: {
   book: Book;
   notes: BookNote[];
@@ -2848,6 +2931,7 @@ function ReaderScreen({
   onUpdateNote: (note: BookNote) => void;
   onDeleteNote: (note: BookNote) => void;
   onSettingsChange: (settings: ReaderSettings) => void;
+  onToast: (message: string) => void;
 }) {
   const initial = book.readingPosition ?? initialPosition(book);
   const [chapterIndex, setChapterIndex] = useState(initial.chapterIndex);
@@ -2869,6 +2953,17 @@ function ReaderScreen({
     anchorId: string;
   } | null>(null);
   const articleRef = useRef<HTMLElement>(null);
+  const insets = useSafeInsets();
+  // iPhone 上由应用接管正文选择，桌面和拿不到 caret 定位的浏览器退回系统选择。
+  const textSelection = useTextSelection(articleRef, { enabled: true });
+  const customSelect = textSelection.supported;
+  // 下面几个监听挂在空依赖的 effect 上，只能靠 ref 读到最新值。
+  const customSelectRef = useRef(customSelect);
+  const insetsRef = useRef(insets);
+  useEffect(() => {
+    customSelectRef.current = customSelect;
+    insetsRef.current = insets;
+  }, [customSelect, insets]);
   const savedSentenceRef = useRef(initial.sentenceId);
   // onProgress 每次渲染都是新的箭头函数，book 也随每一次进度回写换引用。把它们直接
   // 写进观察器的依赖，就等于每渲染一次都把盯着上千个句子元素的观察器拆了重建。
@@ -3255,6 +3350,8 @@ function ReaderScreen({
   const captureSelection = () => {
     const article = articleRef.current;
     const selection = window.getSelection();
+    // 接管了选择就没有系统选区可读，这条路只留给桌面和老浏览器。
+    if (customSelectRef.current) return false;
     if (!article || !selection || selection.isCollapsed || !selection.rangeCount) {
       return false;
     }
@@ -3280,7 +3377,12 @@ function ReaderScreen({
 
     setPopup({
       kind: "selection",
-      anchor: range.getBoundingClientRect(),
+      anchor: anchorFromRects(
+        Array.from(range.getClientRects()),
+        range.getBoundingClientRect(),
+        { height: window.innerHeight },
+        insetsRef.current
+      ),
       parts,
       text: parts.map((part) => part.text).join(""),
     });
@@ -3292,29 +3394,68 @@ function ReaderScreen({
     setPopup({ kind: "mark", anchor: element.getBoundingClientRect(), note });
   };
 
+  /**
+   * 自定义选区活着时，菜单由它推出来；否则用 setPopup 存的那份（系统选区 / 点已有划线）。
+   * 两条路产出的是同一种结构，下面的操作不必各写一遍。
+   */
+  const activePopup: ReaderPopupState | null =
+    textSelection.active && textSelection.anchor && textSelection.parts.length
+      ? {
+          kind: "selection",
+          anchor: anchorFromRects(
+            textSelection.rects,
+            textSelection.anchor,
+            { height: typeof window === "undefined" ? 0 : window.innerHeight },
+            insets
+          ),
+          parts: textSelection.parts,
+          text: textSelection.text,
+        }
+      : popup;
+
+  /** 收掉菜单和选区。两条选择路径都要清，不然会留下画在屏幕上的幽灵选区。 */
+  const dismissSelection = useCallback(() => {
+    setPopup(null);
+    textSelection.clear();
+    window.getSelection()?.removeAllRanges();
+  }, [textSelection]);
+
   /** 同一次划线拆成的几条记录，拼回用户当时选中的那整段文字。 */
   const groupText = (note: BookNote) =>
     mergeNoteGroup(notes.filter((item) => groupKey(item) === groupKey(note)))
       .excerpt;
 
   const applyHighlight = async (color: HighlightColor) => {
-    if (popup?.kind === "mark") {
-      onUpdateNote({ ...popup.note, color });
+    if (activePopup?.kind === "mark") {
+      onUpdateNote({ ...activePopup.note, color });
       setPopup(null);
       return;
     }
-    if (popup?.kind !== "selection") return;
-    const created = await onHighlight(popup.parts, color);
+    if (activePopup?.kind !== "selection") return;
+    const anchor = activePopup.anchor;
+    const created = await onHighlight(activePopup.parts, color);
+    if (!created) {
+      // 存不下就别把选区收掉，用户原地再点一次「划线」就是重试。
+      onToast("划线没保存上，再点一次试试");
+      return;
+    }
+    // 划完线选区就该退场，留着的话高亮会被选区底色盖住看不见颜色。
+    textSelection.clear();
     window.getSelection()?.removeAllRanges();
-    setPopup(
-      created ? { kind: "mark", anchor: popup.anchor, note: created } : null
-    );
+    setPopup({ kind: "mark", anchor, note: created });
   };
 
   const handleArticleClick = (event: MouseEvent<HTMLElement>) => {
     // 刚翻过页就别再顺手把那一下当成选句子。
     if (turnedRef.current) {
       turnedRef.current = false;
+      return;
+    }
+    // 正在划词时，点空白只表示「不选了」，不该顺手把顶栏也收掉。
+    if (textSelection.active) {
+      if (!(event.target as HTMLElement).closest(".selection-handle")) {
+        dismissSelection();
+      }
       return;
     }
     // 划词时不要改选句子，否则刚拉出来的选区会被重新渲染打断。
@@ -3400,9 +3541,9 @@ function ReaderScreen({
   // 选区可能是拖动系统选择手柄结束的，那一下不落在正文元素上，只能听 document。
   useEffect(() => {
     const onPointerUp = (event: PointerEvent) => {
-      if ((event.target as HTMLElement | null)?.closest(".reader-popover")) {
-        return;
-      }
+      // target 不一定是元素（document、文本节点都可能），直接 .closest 会抛。
+      const target = event.target;
+      if (target instanceof Element && target.closest(".reader-popover")) return;
       window.setTimeout(captureSelection, 10);
     };
     document.addEventListener("pointerup", onPointerUp);
@@ -3420,13 +3561,13 @@ function ReaderScreen({
       document.removeEventListener("selectionchange", onSelectionChange);
   }, []);
 
-  // 浮条是 fixed 定位、锚点是划线那一刻的视口坐标，一滚就会飘到别的句子上面去。
+  // 系统选区那条路的浮条锚点是划线那一刻的视口坐标，一滚就会飘到别的句子上面去，
+  // 只能收起来。自定义选区不走这里：它记的是句子和字符位置，滚动时自己重量一次。
   useEffect(() => {
     if (!popup) return;
     const onScroll = (event: Event) => {
-      if ((event.target as HTMLElement | null)?.closest?.(".reader-popover")) {
-        return;
-      }
+      const target = event.target;
+      if (target instanceof Element && target.closest(".reader-popover")) return;
       setPopup(null);
     };
     document.addEventListener("scroll", onScroll, {
@@ -3439,11 +3580,24 @@ function ReaderScreen({
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     swipeRef.current = { x: event.clientX, y: event.clientY };
+    textSelection.viewportHandlers.onPointerDown(event);
+  };
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    textSelection.viewportHandlers.onPointerMove(event);
+  };
+
+  const handlePointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    swipeRef.current = null;
+    textSelection.viewportHandlers.onPointerCancel(event);
   };
 
   const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     const start = swipeRef.current;
     swipeRef.current = null;
+    textSelection.viewportHandlers.onPointerUp(event);
+    // 进了选区状态就先把翻页让出去：同一次手势不该既调选区又翻页。
+    if (textSelection.active || textSelection.dragging) return;
     // 正在划词就别把这一下当成翻页手势。
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed) return;
@@ -3517,11 +3671,15 @@ function ReaderScreen({
       <div
         className="reader-viewport"
         onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
       >
         <article
           ref={articleRef}
-          className={`reader-article is-font-${settings.fontFamily}`}
+          className={`reader-article is-font-${settings.fontFamily} ${
+            customSelect ? "is-custom-select" : ""
+          }`}
           style={
             paged
               ? { transform: `translateX(${-pageIndex * pageStep}px)` }
@@ -3700,24 +3858,37 @@ function ReaderScreen({
         </button>
       ) : null}
 
-      {popup ? (
+      <SelectionLayer
+        rects={textSelection.rects}
+        handles={textSelection.handles}
+        onHandleDown={textSelection.beginHandleDrag}
+      />
+
+      {activePopup ? (
         <ReaderPopover
-          popup={popup}
+          popup={activePopup}
+          insets={insets}
           onHighlight={applyHighlight}
-          onCopy={() => {
+          onCopy={async () => {
             const text =
-              popup.kind === "selection" ? popup.text : groupText(popup.note);
-            navigator.clipboard?.writeText(text).catch(() => undefined);
-            window.getSelection()?.removeAllRanges();
-            setPopup(null);
+              activePopup.kind === "selection"
+                ? activePopup.text
+                : groupText(activePopup.note);
+            dismissSelection();
+            try {
+              await navigator.clipboard?.writeText(text);
+              onToast("已复制");
+            } catch {
+              // 非 HTTPS 或用户拒了剪贴板权限时会走到这儿，不能装作复制成功。
+              onToast("复制失败，请长按手动复制");
+            }
           }}
           onListen={() => {
             const place =
-              popup.kind === "selection"
-                ? popup.parts[0]
-                : findSentence(book, popup.note.sentenceId);
-            window.getSelection()?.removeAllRanges();
-            setPopup(null);
+              activePopup.kind === "selection"
+                ? activePopup.parts[0]
+                : findSentence(book, activePopup.note.sentenceId);
+            dismissSelection();
             if (!place) return;
             onStartListening(
               positionFor(book, place.chapterIndex, place.sentenceIndex)
@@ -3725,27 +3896,31 @@ function ReaderScreen({
           }}
           onThought={async () => {
             const note =
-              popup.kind === "mark"
-                ? popup.note
-                : await onHighlight(popup.parts, "yellow");
-            window.getSelection()?.removeAllRanges();
-            setPopup(null);
-            if (note) setThoughtDraft({ note, value: note.thought ?? "" });
+              activePopup.kind === "mark"
+                ? activePopup.note
+                : await onHighlight(activePopup.parts, "yellow");
+            if (!note) {
+              onToast("划线没保存上，再点一次试试");
+              return;
+            }
+            dismissSelection();
+            setThoughtDraft({ note, value: note.thought ?? "" });
           }}
           onDelete={() => {
-            if (popup.kind === "mark") onDeleteNote(popup.note);
+            if (activePopup.kind === "mark") onDeleteNote(activePopup.note);
             setPopup(null);
           }}
           onAskAi={() => {
-            const isSelection = popup.kind === "selection";
-            const text = isSelection ? popup.text : groupText(popup.note);
+            const isSelection = activePopup.kind === "selection";
+            const text = isSelection
+              ? activePopup.text
+              : groupText(activePopup.note);
             const ids = isSelection
-              ? popup.parts.map((part) => part.sentenceId)
+              ? activePopup.parts.map((part) => part.sentenceId)
               : notes
-                  .filter((item) => groupKey(item) === groupKey(popup.note))
+                  .filter((item) => groupKey(item) === groupKey(activePopup.note))
                   .map((item) => item.sentenceId);
-            window.getSelection()?.removeAllRanges();
-            setPopup(null);
+            dismissSelection();
             // 分页模式往正文里插内容会把分好的页算乱，那边照旧开全屏对话。
             if (paged || !ids.length) setAskAiText(text);
             else
@@ -3977,12 +4152,19 @@ interface PlayerControls {
   currentSentenceId: string;
   error: string;
   sleepMode: SleepMode;
+  activeVoiceURI: string;
+  pendingVoiceURI: string;
+  voiceError: string;
   start: (bookId: string, position?: BookPosition) => void;
   toggle: () => void;
   stop: () => void;
   skipSentences: (delta: number) => void;
   changeChapter: (delta: number) => void;
   setSleepMode: (mode: SleepMode) => void;
+  retryVoiceSwitch: () => void;
+  prefetchVoices: (voiceURIs: string[]) => void;
+  cancelVoicePrefetch: () => void;
+  recentVoiceURIs: string[];
 }
 
 function PlayerScreen({
@@ -4027,6 +4209,27 @@ function PlayerScreen({
   const toggle = () => {
     if (activeForBook && (player.isPlaying || player.isPaused)) player.toggle();
     else player.start(book.id, basePosition);
+  };
+
+  /**
+   * 打开音色面板就顺手把几个候选的短首段备上：用户开面板多半就是要换，
+   * 备好之后点下去能命中缓存、同步起播，这才是 1 秒内出声的来源。
+   * 最近用过的排前面，剩下的按云端音色本身的顺序补齐。
+   */
+  const openVoicePanel = () => {
+    setShowVoice(true);
+    if (!activeForBook) return;
+    const candidates = [
+      ...player.recentVoiceURIs,
+      ...EDGE_VOICES.map((voice) => voice.voiceURI),
+    ].filter((voiceURI) => voiceURI !== player.activeVoiceURI);
+    player.prefetchVoices(candidates);
+  };
+
+  const closeVoicePanel = () => {
+    setShowVoice(false);
+    // 面板一关，没人要的准备任务就该停，别再占着上游连接。
+    player.cancelVoicePrefetch();
   };
 
   return (
@@ -4105,11 +4308,11 @@ function PlayerScreen({
                   : `${player.sleepMode} 分钟`}
             </small>
           </button>
-          <button type="button" onClick={() => setShowVoice(true)}>
+          <button type="button" onClick={openVoicePanel}>
             <Volume2 size={20} />
-            <small>音色</small>
+            <small>{player.pendingVoiceURI && activeForBook ? "切换中" : "音色"}</small>
           </button>
-          <button type="button" onClick={() => setShowVoice(true)}>
+          <button type="button" onClick={openVoicePanel}>
             <Gauge size={20} />
             <small>{settings.speechRate.toFixed(1)}×</small>
           </button>
@@ -4257,7 +4460,7 @@ function PlayerScreen({
       ) : null}
 
       {showVoice ? (
-        <Modal title="倍速与声音" onClose={() => setShowVoice(false)}>
+        <Modal title="倍速与声音" onClose={closeVoicePanel}>
           <div className="voice-settings">
             <label>
               <span>
@@ -4278,6 +4481,16 @@ function PlayerScreen({
                 }
               />
             </label>
+
+            {player.voiceError && activeForBook ? (
+              <div className="voice-retry" role="status">
+                <span>{player.voiceError}</span>
+                <button type="button" onClick={player.retryVoiceSwitch}>
+                  重试
+                </button>
+              </div>
+            ) : null}
+
             <div className="voice-list">
               <button
                 type="button"
@@ -4292,29 +4505,46 @@ function PlayerScreen({
                 </span>
                 {!settings.voiceURI ? <Check size={18} /> : null}
               </button>
-              {player.voices.map((voice) => (
-                <button
-                  type="button"
-                  key={voice.voiceURI}
-                  className={
-                    settings.voiceURI === voice.voiceURI ? "is-active" : ""
-                  }
-                  onClick={() =>
-                    onSettingsChange({
-                      ...settings,
-                      voiceURI: voice.voiceURI,
-                    })
-                  }
-                >
-                  <span>
-                    <strong>{voice.name}</strong>
-                    <small>{voice.lang}</small>
-                  </span>
-                  {settings.voiceURI === voice.voiceURI ? (
-                    <Check size={18} />
-                  ) : null}
-                </button>
-              ))}
+              {player.voices.map((voice) => {
+                const chosen = settings.voiceURI === voice.voiceURI;
+                // 「选中」是用户的意愿，「正在播放」是事实。云端失败退回系统朗读时
+                // 这两者会不一致，必须分开显示，不能拿勾当成已经在用这个声音。
+                const playing =
+                  activeForBook && player.activeVoiceURI === voice.voiceURI;
+                const preparing =
+                  activeForBook && player.pendingVoiceURI === voice.voiceURI;
+                return (
+                  <button
+                    type="button"
+                    key={voice.voiceURI}
+                    className={`${chosen ? "is-active" : ""} ${
+                      preparing ? "is-preparing" : ""
+                    }`}
+                    aria-busy={preparing}
+                    onClick={() =>
+                      onSettingsChange({
+                        ...settings,
+                        voiceURI: voice.voiceURI,
+                      })
+                    }
+                  >
+                    <span>
+                      <strong>{voice.name}</strong>
+                      <small>{voice.lang}</small>
+                    </span>
+                    {preparing ? (
+                      <em className="voice-state">
+                        <LoaderCircle className="player-buffering-icon" size={14} />
+                        切换中
+                      </em>
+                    ) : playing ? (
+                      <em className="voice-state is-playing">正在播放</em>
+                    ) : chosen ? (
+                      <Check size={18} />
+                    ) : null}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </Modal>
@@ -4958,14 +5188,21 @@ export default function MotingApp() {
       } satisfies BookNote;
     });
     if (!created.length) return null;
-    await Promise.all(
-      created.map((note) =>
-        saveNote(note).catch((error) => {
-          reportStorageError("note", error);
-          throw error;
-        })
-      )
-    );
+
+    // 一次跨句划线会写好几条记录。中途失败就把已经写进去的撤掉：
+    // 留半条线在库里，重进阅读器会看到一段莫名其妙的高亮，比干脆失败更糟。
+    const results = await Promise.allSettled(created.map((note) => saveNote(note)));
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) {
+      await Promise.allSettled(
+        created
+          .filter((_, index) => results[index].status === "fulfilled")
+          .map((note) => removeNote(note.id))
+      );
+      reportStorageError("note", failed.reason);
+      return null;
+    }
+
     setNotes((current) => [...created, ...current]);
     return created[0];
   };
@@ -5164,6 +5401,7 @@ export default function MotingApp() {
           onUpdateNote={updateNote}
           onDeleteNote={deleteBookNote}
           onSettingsChange={changeSettings}
+          onToast={showToast}
         />
       ) : view.name === "player" && selectedBook ? (
         <PlayerScreen
