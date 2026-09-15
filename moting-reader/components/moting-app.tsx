@@ -3451,6 +3451,8 @@ function ReaderScreen({
       turnedRef.current = false;
       return;
     }
+    // 长按刚选出东西，抬手后浏览器补发的这一下属于那次长按，不是「点空白取消」。
+    if (textSelection.consumeTapAfterSelect()) return;
     // 正在划词时，点空白只表示「不选了」，不该顺手把顶栏也收掉。
     if (textSelection.active) {
       if (!(event.target as HTMLElement).closest(".selection-handle")) {

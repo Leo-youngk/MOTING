@@ -149,3 +149,61 @@ npm run deploy:dry-run  # 通过，产物校验无异常
   所有交互均改用 `javascript_tool` 派发真实 PointerEvent 并读取实际几何数据完成。
 - `requestAnimationFrame` 在隐藏页面不触发，因此测试脚本一律用 `setTimeout` 推进；
   产品代码中依赖 rAF 的只有滚动重量，不影响上述结论。
+
+---
+
+# 划线修复（第一阶段补丁）
+
+用户反馈真机上划线有问题。没有 iPhone 可驱动，改为重审手势时序并在模拟环境补齐上一轮漏掉的事件。
+
+## 找到的两个问题
+
+### 1. 抬手后浏览器补发的 click 把刚选出来的选区清掉了
+
+真机时序：`pointerdown` → 460 ms 长按触发、选区出现 → 抬手 `pointerup` →
+**浏览器补发 `click`** → `handleArticleClick` 看到 `textSelection.active` 为真 →
+判定「点空白取消」→ `dismissSelection()`。用户看到的就是选区一闪即消。
+
+上一轮没测出来，是因为测试只派发了 `pointerdown` / `pointerup`——
+合成的指针事件不会产生 `click`，恰好绕开了这条路径。这次补上 `MouseEvent("click")`
+后一次复现。
+
+修法：长按成功选中时置一个一次性标记，正文点击处理先消费它；新手势的
+`pointerdown` 会把标记作废，所以不会误吞后续正常的点击。
+
+### 2. `user-select: none` 是个高风险赌注，换成 selectstart 拦截
+
+原实现靠 `user-select: none` 压住系统选择菜单。但 WebKit 下正文一旦不可选，
+`caretRangeFromPoint` 就不再下探到文本节点——那意味着长按按坐标根本找不到字，
+**划线功能整个没反应**。这条在 Chromium 上测不出来（行为不同），属于测不到但赌不起的地方。
+
+改成：正文保持可选，用 `selectstart` 的 `preventDefault` 拦住原生选择的启动，
+并在 `selectionchange` 里收掉漏网的原生选区。最坏情况从「功能全废」降级成
+「多出一层系统菜单」。
+
+## 回归结果（Chromium，375×812 移动端模拟）
+
+| 检查 | 结果 |
+| --- | --- |
+| 长按 → 抬手 → 补发 click | 选区与菜单仍在（修复前：清零） |
+| 之后再轻点别处 | 选区正常取消，说明标记没有误吞后续点击 |
+| 正文内 `selectstart` | `defaultPrevented === true` |
+| 脚本强行建立的原生选区 | 被收掉，长度归零 |
+| `npm test` | 98 项通过 |
+
+## 本次暴露的工具环境陷阱（影响上一轮结论）
+
+页面不绘制时，**滚动后上半屏的命中测试数据是陈旧的**：同一段文字，
+`caretRangeFromPoint` 在 y > 440（最后绘制过的区域）能下探到文本节点，
+y < 440 一律只返回 `<p>` 且 offset 恒为 0。
+
+上一轮据此一度误判为「`user-select: none` 破坏了 caret 定位」。
+**结论**：在这个环境里量 caret / elementFromPoint 之前，必须先确认测点落在新鲜绘制区，
+或干脆先探测一个能下探到文本节点的点再用。
+
+## 仍然只能真机确认
+
+- iOS 上 `selectstart` 的 `preventDefault` 是否真能压住长按选择与系统菜单。
+- 长按 460 ms、移动容差 10 px、手柄触控抬升 14 px 三个参数的手感。
+- 手柄拖动与页面滚动的抢手势。
+- WebKit 的中文分词边界（`Intl.Segmenter`）与 Chromium 的差异。

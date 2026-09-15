@@ -67,6 +67,11 @@ export interface CustomSelectionState {
   /** 菜单的锚点矩形。拖动中为 null——拖的时候菜单要让开。 */
   anchor: Rect | null;
   clear: () => void;
+  /**
+   * 长按选中后浏览器补发的那个 click 要不要吞掉。返回 true 表示「这一下是长按的尾巴」，
+   * 调用方直接 return。一次性，读完就复位。
+   */
+  consumeTapAfterSelect: () => boolean;
   beginHandleDrag: (which: "start" | "end", event: ReactPointerEvent) => void;
   viewportHandlers: {
     onPointerDown: (event: ReactPointerEvent) => void;
@@ -250,6 +255,8 @@ export function useTextSelection(
     y: number;
     timer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
+  /** 这次长按已经选出东西了，紧跟着的那个 click 要吞掉。 */
+  const justSelectedRef = useRef(false);
   const measureFrameRef = useRef(0);
   const scrollFrameRef = useRef(0);
   const scrollSpeedRef = useRef(0);
@@ -380,6 +387,39 @@ export function useTextSelection(
     []
   );
 
+  /**
+   * 拦住原生选择的「启动」，而不是把正文设成不可选。
+   *
+   * 为什么不用 `user-select: none`：WebKit 下正文一旦不可选，`caretRangeFromPoint`
+   * 就不再下探到文本节点，长按取词会整个失效——那是"划线完全没反应"，最坏的坏法。
+   * 拦 selectstart 的最坏情况只是没拦住、多出一层系统菜单，功能本身还在。
+   * 两害相权，选可降级的那个。
+   */
+  useEffect(() => {
+    if (!enabled) return;
+    const onSelectStart = (event: Event) => {
+      const target = event.target;
+      const article = articleRef.current;
+      if (!article || !(target instanceof Node)) return;
+      if (article.contains(target)) event.preventDefault();
+    };
+    const onSelectionChange = () => {
+      const native = window.getSelection();
+      const article = articleRef.current;
+      if (!article || !native || native.isCollapsed || !native.rangeCount) return;
+      // selectstart 没拦住的漏网选区：收掉，免得系统菜单和我们的浮条叠成两套。
+      if (article.contains(native.getRangeAt(0).commonAncestorContainer)) {
+        native.removeAllRanges();
+      }
+    };
+    document.addEventListener("selectstart", onSelectStart);
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => {
+      document.removeEventListener("selectstart", onSelectStart);
+      document.removeEventListener("selectionchange", onSelectionChange);
+    };
+  }, [enabled, articleRef]);
+
   // 关掉自定义选区（切到桌面、退出阅读器）时别留下一个画在屏幕上的幽灵选区。
   // 没选区时直接返回，避免每次探测结果变化都空跑一轮 setState。
   useEffect(() => {
@@ -404,6 +444,9 @@ export function useTextSelection(
         anchor: placeOf(element, word.start),
         focus: placeOf(element, word.end),
       });
+      // 手指还按着，抬手后浏览器必然再补一个 click。那一下属于这次长按，
+      // 必须让正文的点击处理跳过——否则刚选出来的东西立刻被当成「点空白取消」清掉。
+      justSelectedRef.current = true;
     },
     [applySelection, articleRef]
   );
@@ -523,6 +566,8 @@ export function useTextSelection(
         return;
       }
 
+      // 新手势开始，上一次长按留下的吞点击标记作废（比如那一下压根没跟 click）。
+      justSelectedRef.current = false;
       const { clientX: x, clientY: y } = event;
       cancelPress();
       const timer = setTimeout(() => {
@@ -553,6 +598,12 @@ export function useTextSelection(
     cancelPress();
   }, [cancelPress]);
 
+  const consumeTapAfterSelect = useCallback(() => {
+    if (!justSelectedRef.current) return false;
+    justSelectedRef.current = false;
+    return true;
+  }, []);
+
   return {
     supported,
     active: selection !== null && !isEmptySelection(selection),
@@ -563,6 +614,7 @@ export function useTextSelection(
     handles: geometry.handles,
     anchor: dragging ? null : geometry.anchor,
     clear,
+    consumeTapAfterSelect,
     beginHandleDrag,
     viewportHandlers: {
       onPointerDown,

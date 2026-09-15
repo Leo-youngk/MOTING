@@ -3322,12 +3322,15 @@ html[data-keyboard-open] .bottom-bar {
   -webkit-touch-callout: none;
 }
 
-/* 由应用接管选择时必须把系统选择彻底关掉：只要 WebKit 还认为正文可选，
-   长按就会弹出「拷贝 / 查询 / 翻译」，跟墨听自己的浮条叠成两套菜单。
-   选区底色和手柄改由 .selection-layer 自己画。 */
+/* 由应用接管选择时，正文必须保持「可选」。
+   这条看着反直觉，但 user-select: none 在 WebKit 下会让 caretRangeFromPoint
+   不再下探到文本节点——长按按坐标找不到字，划线就整个没反应。
+   原生选择改用 selectstart 在脚本里拦住（见 use-text-selection.ts），
+   拦不住最多是多出一层系统菜单，不会把功能整个废掉。
+   选区底色和手柄由 .selection-layer 自己画。 */
 .reader-article.is-custom-select {
-  -webkit-user-select: none;
-  user-select: none;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 /* 自定义选区层。全部按视口坐标 fixed 摆放，位置每帧由脚本重新量。 */
