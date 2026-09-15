@@ -117,6 +117,47 @@ function caretFromPoint(x: number, y: number): CaretPoint | null {
   return null;
 }
 
+/**
+ * 按坐标取 caret，并保证落点是正文里的句子。
+ *
+ * 正文平时是 `user-select: none`——真机验证过，这是 WebKit 下唯一能真正压住
+ * 原生选区、放大镜和系统菜单的开关，光靠脚本拦 selectstart 一点用没有。
+ *
+ * 它的代价是：个别 WebKit 版本在不可选元素上不肯把 caret 落到文本节点。
+ * 真遇上就临时放开、同步量一次、立刻收回。整段过程不让出事件循环，
+ * 用户来不及在这个缝里拉出原生选区。
+ */
+function caretInArticle(
+  article: HTMLElement,
+  x: number,
+  y: number
+): CaretPoint | null {
+  const direct = caretFromPoint(x, y);
+  if (sentenceElementOf(direct?.node ?? null)) return direct;
+
+  const previousWebkit = article.style.getPropertyValue("-webkit-user-select");
+  const previousStandard = article.style.getPropertyValue("user-select");
+  article.style.setProperty("-webkit-user-select", "text", "important");
+  article.style.setProperty("user-select", "text", "important");
+  try {
+    // 逼一次样式重算，否则量到的还是放开之前的状态。
+    void article.offsetHeight;
+    const retry = caretFromPoint(x, y);
+    return sentenceElementOf(retry?.node ?? null) ? retry : direct;
+  } finally {
+    if (previousWebkit) {
+      article.style.setProperty("-webkit-user-select", previousWebkit);
+    } else {
+      article.style.removeProperty("-webkit-user-select");
+    }
+    if (previousStandard) {
+      article.style.setProperty("user-select", previousStandard);
+    } else {
+      article.style.removeProperty("user-select");
+    }
+  }
+}
+
 function sentenceElementOf(node: Node | null): HTMLElement | null {
   if (!node) return null;
   const element =
@@ -174,7 +215,7 @@ function placeFromPoint(
   x: number,
   y: number
 ): SelectionPlace | null {
-  const caret = caretFromPoint(x, y);
+  const caret = caretInArticle(article, x, y);
   const element = sentenceElementOf(caret?.node ?? null);
   if (!caret || !element || !article.contains(element)) return null;
   return placeOf(element, offsetInSentence(element, caret.node, caret.offset));
@@ -240,6 +281,10 @@ function sentencesIn(article: HTMLElement): SelectionSentence[] {
  * 之所以要自己做：主屏幕 PWA 里仍然是 WebKit 在管文字选择，长按就会弹出系统的
  * 「拷贝 / 查询 / 翻译」，跟墨听自己的划线浮条叠在一起打架。要让默认阅读流程里
  * 只出现一套菜单，只能把正文的 user-select 关掉，由应用自己画选区和手柄。
+ *
+ * 真机录屏验证过：只靠脚本 preventDefault 掉 selectstart 完全不管用，
+ * iOS 的原生选区、放大镜和系统菜单照样全出来，还把我们的浮条盖掉，
+ * 用户拖到的也是原生那一套。必须走 CSS 的 user-select: none。
  *
  * 选区一律以「章 + 句 + 句内字符偏移」为准，屏幕坐标每次重新量。所以改字号、
  * 换字体、转屏之后选区还在原来那几个字上。
@@ -448,7 +493,7 @@ export function useTextSelection(
     (x: number, y: number) => {
       const article = articleRef.current;
       if (!article) return;
-      const caret = caretFromPoint(x, y);
+      const caret = caretInArticle(article, x, y);
       const element = sentenceElementOf(caret?.node ?? null);
       if (!caret || !element || !article.contains(element)) return;
 
