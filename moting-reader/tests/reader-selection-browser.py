@@ -28,6 +28,10 @@ def snapshot_notes(page):
 
 def open_reader(page):
     page.goto(BASE)
+    # 现在刷新会回到上次待的地方：已经落在阅读器里就不必再从书架进一次。
+    page.wait_for_timeout(600)
+    if page.locator(".reader-article").count():
+        return
     page.get_by_role("button", name="书库", exact=True).wait_for(timeout=60000)
     page.locator("article button").first.click()
     page.locator(".reader-article").wait_for()

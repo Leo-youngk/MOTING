@@ -4137,6 +4137,8 @@ html[data-keyboard-open] .bottom-bar {
     inset 0 0.5px 0 var(--glass-sheen),
     0 -18px 50px rgb(29 25 20 / 18%);
   animation: slide-up 220ms cubic-bezier(0.22, 0.85, 0.35, 1) both;
+  /* 没拖到阈值时松手，面板要顺滑地弹回去，而不是啪一下跳回原位。 */
+  transition: transform 220ms cubic-bezier(0.22, 0.85, 0.35, 1);
 }
 
 /* 40px 是 backdrop 的 padding-top。键盘弹起时 safe-area-inset-bottom 在 standalone
@@ -4150,12 +4152,39 @@ html[data-keyboard-open] .modal-sheet {
   width: min(100%, 700px);
 }
 
+/* 把手是真能拖的：视觉上仍是一条细线，但撑出一块够手指按的透明区域。
+   touch-action 必须写死在 CSS 里——浏览器在手指落下那一刻就决定了这次触摸
+   要不要交给原生滚动，事后用脚本改已经晚了（划线那次踩过）。 */
 .modal-grabber {
+  position: relative;
+  width: 64px;
+  height: 22px;
+  margin: -4px auto 2px;
+  touch-action: none;
+  cursor: grab;
+}
+
+.modal-grabber::before {
+  position: absolute;
+  top: 9px;
+  left: 50%;
   width: 36px;
   height: 4px;
-  margin: 2px auto 6px;
   border-radius: 99px;
   background: var(--line);
+  content: "";
+  transform: translateX(-50%);
+}
+
+/* 标题栏也能拖。内容区不行——那里经常是可滚动的列表，会和滚动打架。 */
+.modal-sheet > header {
+  touch-action: none;
+}
+
+.modal-sheet.is-dragging {
+  animation: none;
+  transition: none;
+  cursor: grabbing;
 }
 
 .modal-sheet > header {
@@ -4752,6 +4781,22 @@ html[data-keyboard-open] .modal-sheet {
   box-shadow: 0 12px 28px rgb(26 22 18 / 22%);
   font-size: 12px;
   animation: toast-in 200ms ease both;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+/* 撤销按钮要够显眼、也够大：它只活 5 秒，错过就没了。 */
+.toast__undo {
+  flex-shrink: 0;
+  margin: -6px -6px -6px 0;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--mark-blue, #7fb3ff);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .app-loading {

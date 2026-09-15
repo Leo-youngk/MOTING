@@ -101,7 +101,6 @@ import {
   DEFAULT_STATS,
   dayKey,
   type AiChatTurn,
-  type AppView,
   type Book,
   type BookAiChat,
   type BookNote,
@@ -389,22 +388,49 @@ function Modal({
   className?: string;
 }) {
   useScrollLock();
+  useEscapeToClose(onClose);
+  const drag = useSheetDrag(onClose);
+  // 按下就关会误伤：手指落在面板边缘想滑动、稍微移出去一点就把面板关掉了。
+  // 记住这一下是不是从遮罩上按下的，抬手仍在遮罩上才算「点空白关闭」。
+  const fromBackdrop = useRef(false);
+
   return createPortal(
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onPointerDown={(event) => {
+        fromBackdrop.current = event.target === event.currentTarget;
+      }}
+      onPointerUp={(event) => {
+        const outside =
+          fromBackdrop.current && event.target === event.currentTarget;
+        fromBackdrop.current = false;
+        if (outside) onClose();
+      }}
+    >
       <section
-        className={`modal-sheet ${wide ? "modal-sheet--wide" : ""} ${className}`}
+        className={`modal-sheet ${wide ? "modal-sheet--wide" : ""} ${
+          drag.dragging ? "is-dragging" : ""
+        } ${className}`}
+        style={drag.offset ? { transform: `translateY(${drag.offset}px)` } : undefined}
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="modal-grabber" />
-        <header>
+        {/* 把手不再是装饰：真能拖下去关掉。touch-action 写在 CSS 里，
+            必须在手指落下之前就生效，事后再改浏览器不认。 */}
+        <div
+          className="modal-grabber"
+          role="presentation"
+          onPointerDown={drag.onPointerDown}
+        />
+        <header onPointerDown={drag.onPointerDown}>
           <h2>{title}</h2>
           <button
             type="button"
             className="icon-button"
             aria-label="关闭"
+            onPointerDown={(event) => event.stopPropagation()}
             onClick={onClose}
           >
             <X size={20} />
@@ -415,6 +441,89 @@ function Modal({
     </div>,
     document.body
   );
+}
+
+/** 开着的弹层栈。Esc 只关最上面那一层，不能一键掀掉所有层。 */
+const openSheets: Array<() => void> = [];
+
+function useEscapeToClose(onClose: () => void) {
+  const closeRef = useRef(onClose);
+
+  useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const close = () => closeRef.current();
+    openSheets.push(close);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (openSheets[openSheets.length - 1] !== close) return;
+      event.stopPropagation();
+      close();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      const at = openSheets.indexOf(close);
+      if (at >= 0) openSheets.splice(at, 1);
+    };
+  }, []);
+}
+
+/** 往下拖到这么多像素就松手关闭，没到就弹回去。 */
+const SHEET_DISMISS_PX = 96;
+
+/**
+ * 底部面板的下拉关闭。
+ *
+ * 只有把手和标题栏能拖——面板内容经常是可滚动的列表，整片都能拖会和滚动打架。
+ */
+function useSheetDrag(onClose: () => void) {
+  const startRef = useRef<{ id: number; y: number } | null>(null);
+  const [offset, setOffset] = useState(0);
+  const [dragging, setDragging] = useState(false);
+
+  const onPointerDown = useCallback((event: ReactPointerEvent) => {
+    if (!event.isPrimary || startRef.current) return;
+    startRef.current = { id: event.pointerId, y: event.clientY };
+    setDragging(true);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // 抓不到就算了，下面 document 上的监听照样能跟。
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (event: PointerEvent) => {
+      const start = startRef.current;
+      if (!start || event.pointerId !== start.id) return;
+      event.preventDefault();
+      // 只认往下拖；往上拖不该把面板拉出屏幕。
+      setOffset(Math.max(0, event.clientY - start.y));
+    };
+    const onUp = (event: PointerEvent) => {
+      const start = startRef.current;
+      if (!start || event.pointerId !== start.id) return;
+      const travelled = event.clientY - start.y;
+      startRef.current = null;
+      setDragging(false);
+      setOffset(0);
+      if (travelled > SHEET_DISMISS_PX) onClose();
+    };
+    document.addEventListener("pointermove", onMove, { passive: false });
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onUp);
+    return () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onUp);
+    };
+  }, [dragging, onClose]);
+
+  return { offset, dragging, onPointerDown };
 }
 
 function EmptyState({
@@ -4778,7 +4887,7 @@ function MiniPlayer({
       <button
         type="button"
         className="icon-button mini-player__stop"
-        aria-label="停止"
+        aria-label="关闭播放器"
         onClick={onStop}
       >
         <X size={18} />
@@ -4799,7 +4908,10 @@ export default function MotingApp() {
     useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [stats, setStats] = useState<ReadingStats>(DEFAULT_STATS);
   const [sessions, setSessions] = useState<ReadingSession[]>([]);
-  const [view, setView] = useState<AppView>({ name: "home" });
+  // 导航接在 History API 上：返回回到来处、刷新/被系统回收后还在原地、
+  // 系统返回手势也能用。切板块是平级移动，下钻才进历史栈。
+  const { view, navigate, selectTab, replace: replaceView, goBack } =
+    useAppNavigation();
   const [showSettings, setShowSettings] = useState(false);
   const [ready, setReady] = useState(false);
   const [importProgress, setImportProgress] =
@@ -4810,20 +4922,46 @@ export default function MotingApp() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [thoughtTarget, setThoughtTarget] = useState<BookNote | null>(null);
   const [thoughtDraft, setThoughtDraft] = useState("");
-  const [toast, setToast] = useState("");
+  const [toast, setToast] = useState<{
+    message: string;
+    undo?: () => void;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toastTimerRef = useRef<number | null>(null);
   const storageErrorRef = useRef(0);
 
+  const dismissToast = useCallback(() => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    setToast(null);
+  }, []);
+
   const showToast = useCallback((message: string) => {
-    setToast(message);
     if (toastTimerRef.current !== null) {
       window.clearTimeout(toastTimerRef.current);
     }
+    setToast({ message });
     toastTimerRef.current = window.setTimeout(() => {
       toastTimerRef.current = null;
-      setToast("");
+      setToast(null);
     }, 2600);
+  }, []);
+
+  /**
+   * 删除这类操作不拦在前面问「确定吗」，改成先执行、再给一段撤销时间。
+   * 常用操作快了一步，真误删也救得回来；确认框只留给删整本书那种不可逆的。
+   */
+  const showUndoToast = useCallback((message: string, undo: () => void) => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    setToast({ message, undo });
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
+    }, 5200);
   }, []);
 
   const reportStorageError = useCallback(
@@ -5130,6 +5268,28 @@ export default function MotingApp() {
     view.name === "book-notes"
       ? books.find((book) => book.id === view.bookId)
       : undefined;
+
+  // 冷启动恢复出来的视图可能指着一本已经删掉的书。下钻页拿不到书就会一路掉进
+  // 最后那个兜底分支、显示成笔记页，所以书加载完之后校一次，不对就退回所属板块。
+  useEffect(() => {
+    if (!ready) return;
+    if (
+      view.name !== "reader" &&
+      view.name !== "player" &&
+      view.name !== "book-notes"
+    ) {
+      return;
+    }
+    if (books.some((book) => book.id === view.bookId)) return;
+    replaceView({
+      name:
+        view.name === "player"
+          ? "listen"
+          : view.name === "book-notes"
+            ? "notes"
+            : "library",
+    });
+  }, [ready, books, view, replaceView]);
   const selectedBookNotes = useMemo(
     () =>
       selectedBook
@@ -5295,11 +5455,11 @@ export default function MotingApp() {
       updatedAt: Date.now(),
     };
     updateBook(updated);
-    setView({ name: "reader", bookId: book.id });
+    navigate({ name: "reader", bookId: book.id });
   };
 
   const openPlayer = (book: Book, startPlaying = false) => {
-    setView({ name: "player", bookId: book.id });
+    navigate({ name: "player", bookId: book.id });
     if (startPlaying) {
       player.start(
         book.id,
@@ -5461,6 +5621,20 @@ export default function MotingApp() {
     showToast("书籍及相关标记已删除");
   };
 
+  const restoreNotes = async (restored: BookNote[]) => {
+    try {
+      await writeNotes(restored);
+    } catch (error) {
+      reportStorageError("restore-note", error);
+      showToast("撤销失败，这条标记没能恢复");
+      return;
+    }
+    // 排序跟从库里读出来时保持一致，撤销后位置不会莫名其妙变。
+    setNotes((current) =>
+      [...current, ...restored].sort((a, b) => b.createdAt - a.createdAt)
+    );
+  };
+
   const deleteBookNote = async (note: BookNote): Promise<boolean> => {
     const group = groupKey(note);
     const doomed = notes.filter((item) => groupKey(item) === group);
@@ -5472,6 +5646,12 @@ export default function MotingApp() {
     }
     setNotes((current) =>
       current.filter((item) => groupKey(item) !== group)
+    );
+    showUndoToast(
+      doomed.some((item) => item.kind === "listening-mark")
+        ? "已删除标记"
+        : "已删除划线",
+      () => void restoreNotes(doomed)
     );
     return true;
   };
@@ -5523,7 +5703,7 @@ export default function MotingApp() {
     setSessions([]);
     setConfirmClear(false);
     setShowSettings(false);
-    setView({ name: "home" });
+    selectTab("home");
     showToast("本地书库已清空，已保留一份使用指南");
   };
 
@@ -5571,11 +5751,11 @@ export default function MotingApp() {
           }
           chatTurns={selectedBookChat?.turns ?? []}
           onChatChange={(turns) => updateChat(selectedBook.id, turns)}
-          onBack={() => setView({ name: "home" })}
+          onBack={() => goBack({ name: "library" })}
           onProgress={(position) => handleReadProgress(selectedBook, position)}
           onStartListening={(position) => {
             player.start(selectedBook.id, position);
-            setView({ name: "player", bookId: selectedBook.id });
+            navigate({ name: "player", bookId: selectedBook.id });
           }}
           onHighlight={(parts, color, style) =>
             createHighlights(selectedBook, parts, color, style)
@@ -5590,7 +5770,7 @@ export default function MotingApp() {
           book={selectedBook}
           settings={settings}
           player={player}
-          onBack={() => setView({ name: "listen" })}
+          onBack={() => goBack({ name: "listen" })}
           onOpenReader={(position) => openReader(selectedBook, position)}
           onAddNote={(position, excerpt) =>
             addListeningMark(selectedBook, position, excerpt)
@@ -5612,7 +5792,7 @@ export default function MotingApp() {
           <div className="bottom-bar">
             <BottomNavigation
               active={activeMainView}
-              onChange={(name) => setView({ name })}
+              onChange={selectTab}
             />
           </div>
 
@@ -5626,13 +5806,13 @@ export default function MotingApp() {
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}
                 onImport={() => fileInputRef.current?.click()}
-                onOpenHistory={() => setView({ name: "history" })}
+                onOpenHistory={() => navigate({ name: "history" })}
                 onOpenSettings={() => setShowSettings(true)}
               />
             ) : view.name === "history" ? (
               <HistoryScreen
                 sessions={sessions}
-                onBack={() => setView({ name: "home" })}
+                onBack={() => goBack({ name: "home" })}
               />
             ) : view.name === "library" ? (
               <LibraryScreen
@@ -5642,7 +5822,7 @@ export default function MotingApp() {
                 onOpen={(book) => openReader(book)}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenNotes={(book) =>
-                  setView({ name: "book-notes", bookId: book.id })
+                  navigate({ name: "book-notes", bookId: book.id })
                 }
                 onDelete={setDeleteTarget}
               />
@@ -5656,7 +5836,7 @@ export default function MotingApp() {
               <BookNotesScreen
                 book={selectedBook}
                 notes={selectedBookNotes}
-                onBack={() => setView({ name: "library" })}
+                onBack={() => goBack({ name: "library" })}
                 onOpen={openNote}
                 onDelete={deleteBookNote}
                 onEditThought={(note) => {
@@ -5670,7 +5850,7 @@ export default function MotingApp() {
                 books={books}
                 chats={chats}
                 onOpenBook={(book) =>
-                  setView({ name: "book-notes", bookId: book.id })
+                  navigate({ name: "book-notes", bookId: book.id })
                 }
                 onOpenNote={openNote}
                 onDelete={deleteBookNote}
@@ -5693,7 +5873,7 @@ export default function MotingApp() {
               isPlaying={player.isPlaying}
               isBuffering={player.isBuffering}
               onToggle={player.toggle}
-              onOpen={() => setView({ name: "player", bookId: activeBook.id })}
+              onOpen={() => navigate({ name: "player", bookId: activeBook.id })}
               onStop={player.stop}
             />
           ) : null}
@@ -5849,7 +6029,24 @@ export default function MotingApp() {
         </Modal>
       ) : null}
 
-      {toast ? <div className="toast">{toast}</div> : null}
+      {toast ? (
+        <div className="toast">
+          <span>{toast.message}</span>
+          {toast.undo ? (
+            <button
+              type="button"
+              className="toast__undo"
+              onClick={() => {
+                const undo = toast.undo;
+                dismissToast();
+                undo?.();
+              }}
+            >
+              撤销
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </main>
   );
 }
