@@ -18,7 +18,6 @@
   "dependencies": {
     "jszip": "^3.10.1",
     "lucide-react": "^0.468.0",
-    "motion": "^13.3.0",
     "next": "16.2.6",
     "pdfjs-dist": "^5.4.296",
     "react": "19.2.6",

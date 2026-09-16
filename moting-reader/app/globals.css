@@ -1248,11 +1248,6 @@ button:disabled {
   background: transparent;
 }
 
-.grid-book__cover-motion {
-  display: block;
-  width: 100%;
-}
-
 .grid-book__cover .book-cover {
   width: 100%;
   height: auto;
@@ -3159,28 +3154,6 @@ html[data-keyboard-open] .bottom-bar {
      变化触发的过渡」会一直卡在旧值上，换主题后底色就再也不刷新了。换色直接切。 */
 }
 
-/* 书架点封面进阅读页：封面的 shared layout transition 交给 motion 库算
-   （lib/motion.ts 里那套手写弹簧只管翻页跟手，这个交给更成熟的方案），这里
-   只定义终点的位置/尺寸——起点是书架格子里那份同 layoutId 的封面，motion
-   自己测量、自己插值。淡出也是 motion 的 opacity 动画，整枚（含书脊伪元素）
-   一起淡，不用单独再写一条 ::after 规则。 */
-.cover-flip {
-  position: fixed;
-  left: 0;
-  right: 0;
-  top: 14%;
-  z-index: 50;
-  width: 220px;
-  aspect-ratio: 2 / 3;
-  margin: 0 auto;
-  pointer-events: none;
-}
-
-.cover-flip .book-cover {
-  width: 100%;
-  height: 100%;
-}
-
 .reader-theme--calm {
   --glass-sheen: rgb(255 253 247 / 78%);
   --glass-shade: rgb(60 46 24 / 7%);
@@ -3339,45 +3312,16 @@ html[data-keyboard-open] .bottom-bar {
   white-space: nowrap;
 }
 
-/* 底栏进度条：原生图书的读数是个悬浮胶囊，不是一整条可见滑轨。滑轨本身铺满
-   这块区域、彻底透明但保留原生 range 的命中区（无障碍/触屏行为不用自己重做），
-   胶囊纯展示、盖在上面，拖动时胶囊里的数字跟手实时变。 */
-.reader-chrome__pos {
-  position: relative;
-  display: flex;
-  flex: 1;
-  align-items: center;
-  justify-content: center;
-  min-height: 40px;
-}
-
-.reader-chrome__slider {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  background: transparent;
-  border: 0;
-  opacity: 0;
-  appearance: none;
-  -webkit-appearance: none;
-}
-
-/* iOS Safari 有时候不会完全吃掉 appearance:none，轨道/滑块的原生描边会露一点；
-   这几个伪元素显式清空，别让原生 chrome 透出来盖过下面这枚胶囊。 */
-.reader-chrome__slider::-webkit-slider-runnable-track,
-.reader-chrome__slider::-webkit-slider-thumb {
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-
+/* 底栏页码：原生图书就是个悬浮的纯展示胶囊，不能拖、不能点，跟顶部的
+   .reader-chrome__remain 用同一套胶囊样式，位置对称（从底边算距离）。 */
 .reader-chrome__pos-label {
-  position: relative;
-  z-index: 1;
-  width: max-content;
-  padding: 6px 14px;
+  position: absolute;
+  bottom: calc(env(safe-area-inset-bottom) + 10px);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 14px;
   border-radius: 999px;
   border: 0.5px solid var(--glass-edge);
   background: var(--glass-fill);
@@ -3392,6 +3336,7 @@ html[data-keyboard-open] .bottom-bar {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
   white-space: nowrap;
+  transform: translateX(-50%);
   pointer-events: none;
 }
 

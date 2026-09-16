@@ -56,7 +56,6 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { motion } from "motion/react";
 import { useAppNavigation } from "../hooks/use-app-navigation";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
@@ -73,7 +72,6 @@ import {
   estimatePagination,
   nextChapterRange,
   pageAt,
-  positionAtPage,
   positionFor,
   remainingCharacters,
   withImageSizes,
@@ -367,10 +365,6 @@ let suppressNextScrollRestore = false;
 function suppressScrollRestore() {
   suppressNextScrollRestore = true;
 }
-
-// 书架点封面进阅读页的展开动效：点击那一刻先把封面当时的位置/尺寸记下来，
-// ReaderScreen 挂载时读一次就清空——只用来对齐这一次展开的起点，不是持久状态。
-let pendingCoverFlip: { bookId: string } | null = null;
 
 // 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
 // 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
@@ -1125,17 +1119,9 @@ function LibraryScreen({
                     <button
                       type="button"
                       className="grid-book__cover"
-                      onClick={() => {
-                        pendingCoverFlip = { bookId: book.id };
-                        onOpen(book);
-                      }}
+                      onClick={() => onOpen(book)}
                     >
-                      <motion.div
-                        layoutId={`book-cover-${book.id}`}
-                        className="grid-book__cover-motion"
-                      >
-                        <BookCover book={book} size="large" />
-                      </motion.div>
+                      <BookCover book={book} size="large" />
                       {isNew ? <span className="grid-book__badge">新增</span> : null}
                     </button>
                     <div className="grid-book__footer">
@@ -3372,8 +3358,6 @@ function ReaderScreen({
   const [showReaderMenu, setShowReaderMenu] = useState(false);
   // 沉浸阅读：默认露出浮层控件，点空白处收起，只留正文。
   const [chromeVisible, setChromeVisible] = useState(true);
-  // 拖底部进度条时的临时预览页码；松手前只改这个、不真正跳转。
-  const [dragPage, setDragPage] = useState<number | null>(null);
   // 分页模式横向翻页的跟手位移：拖拽中实时跟手指、松手后弹簧归零。
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -3390,15 +3374,6 @@ function ReaderScreen({
     anchorId: string;
   } | null>(null);
   const articleRef = useRef<HTMLElement>(null);
-  // 从书架封面点进来的那一次，跟书架格子里同 layoutId 的封面做 shared layout
-  // transition（motion 库自己测量起点、自己插值，见下面 JSX）。非封面入口
-  // （比如"继续阅读"卡片）没有 pendingCoverFlip，直接跳过，正常展示。
-  const [coverFlip] = useState(() => {
-    const pending = pendingCoverFlip;
-    pendingCoverFlip = null;
-    return pending?.bookId === book.id;
-  });
-  const [coverFlipLayoutDone, setCoverFlipLayoutDone] = useState(false);
   const insets = useSafeInsets();
   // iPhone 上由应用接管正文选择，桌面和拿不到 caret 定位的浏览器退回系统选择。
   const textSelection = useTextSelection(articleRef, { enabled: true });
@@ -4425,43 +4400,6 @@ function ReaderScreen({
     chapter?.sentenceCount ?? 0
   );
 
-  // 底部进度条松手后跳转。刻意不走 changeChapter：它会把落点钉死在章首/章尾，
-  // 跳不到章节中间的目标页。分页模式换章后借 restoreRef 这个既有的「重排后落到
-  // 指定句子」机制补上章内偏移；滚动模式照抄 scrollToSpeaking 那套
-  // range/pendingScrollRef，不手动碰 chapterIndex/进度——锚点线滚动停稳后自己会认出新位置。
-  const jumpToPage = (targetPage: number) => {
-    const { chapterIndex: targetChapterIndex, sentenceIndex } = positionAtPage(
-      book,
-      pagination,
-      targetPage
-    );
-    const target = positionFor(book, targetChapterIndex, sentenceIndex);
-
-    if (paged) {
-      if (targetChapterIndex === chapterIndex) {
-        const offset =
-          Math.round(targetPage) - (pagination.chapterStart[chapterIndex] ?? 1);
-        goToPage(Math.max(0, Math.min(pageCount - 1, offset)));
-      } else {
-        changeChapter(targetChapterIndex);
-        restoreRef.current = target.sentenceId;
-      }
-      return;
-    }
-
-    const selector = `[data-sentence-id="${target.sentenceId}"]`;
-    const element = articleRef.current?.querySelector<HTMLElement>(selector);
-    if (element) {
-      element.scrollIntoView({ block: "start" });
-      return;
-    }
-    anchorRef.current = null;
-    pendingScrollRef.current = { selector, block: "start" };
-    const next = { start: targetChapterIndex, end: targetChapterIndex };
-    rangeRef.current = next;
-    setRange(next);
-  };
-
   // 目录/设置/写想法/问 AI 这几个全屏浮层打开时，顶/底浮条必须跟着强制隐藏，
   // 不然浮层的呼吸缺口里会露出还在显示、还能点的浮条，看着像一条横杠。
   // 不改 chromeVisible 本身：浮层关掉后 chrome 要精确回到用户手动切换前的显隐状态。
@@ -4480,19 +4418,6 @@ function ReaderScreen({
       } ${chromeVisible && !overlayOpen ? "" : "chrome-hidden"}`}
       style={readerStyle}
     >
-      {coverFlip ? (
-        <motion.div
-          layoutId={`book-cover-${book.id}`}
-          className="cover-flip"
-          onLayoutAnimationComplete={() => setCoverFlipLayoutDone(true)}
-          animate={coverFlipLayoutDone ? { opacity: 0 } : undefined}
-          transition={{ opacity: { duration: 0.22 } }}
-          aria-hidden
-        >
-          <BookCover book={book} size="large" />
-        </motion.div>
-      ) : null}
-
       <div className="reader-chrome reader-chrome--top">
         <button
           type="button"
@@ -4552,26 +4477,9 @@ function ReaderScreen({
       </div>
 
       <div className="reader-chrome reader-chrome--bottom">
-        <div className="reader-chrome__pos">
-          <span className="reader-chrome__pos-label">
-            {dragPage ?? livePage}/{pagination.total}页
-          </span>
-          <input
-            type="range"
-            className="reader-chrome__slider"
-            aria-label="阅读进度"
-            min={1}
-            max={pagination.total}
-            step={1}
-            value={dragPage ?? livePage}
-            onChange={(event) => setDragPage(Number(event.target.value))}
-            onPointerUp={(event) => {
-              const value = Number((event.target as HTMLInputElement).value);
-              setDragPage(null);
-              jumpToPage(value);
-            }}
-          />
-        </div>
+        <span className="reader-chrome__pos-label">
+          {livePage}/{pagination.total}页
+        </span>
         <button
           type="button"
           className="reader-chrome__menu"

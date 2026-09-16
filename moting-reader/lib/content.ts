@@ -670,30 +670,3 @@ export function pageAt(
       : 0;
   return Math.min(pagination.total, start + Math.floor(fraction * pages));
 }
-
-/** pageAt 的反查：给定绝对页码，反推所在章节与章内句子位置。页码模型本身是按
- *  字数估算的，落点是近似值，够拖拽进度条跳转用，不追求逐字精确。 */
-export function positionAtPage(
-  book: Book,
-  pagination: BookPagination,
-  targetPage: number
-): { chapterIndex: number; sentenceIndex: number } {
-  const page = Math.max(1, Math.min(pagination.total, Math.round(targetPage)));
-  let lo = 0;
-  let hi = pagination.chapterStart.length - 1;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if ((pagination.chapterStart[mid] ?? 1) <= page) lo = mid;
-    else hi = mid - 1;
-  }
-  const chapterIndex = lo;
-  const start = pagination.chapterStart[chapterIndex] ?? 1;
-  const pages = pagination.chapterPages[chapterIndex] ?? 1;
-  const fraction = pages > 0 ? Math.min(1, Math.max(0, (page - start) / pages)) : 0;
-  const sentenceCount = book.chapters[chapterIndex]?.sentenceCount ?? 0;
-  const sentenceIndex = Math.max(
-    0,
-    Math.min(sentenceCount - 1, Math.round(fraction * sentenceCount))
-  );
-  return { chapterIndex, sentenceIndex };
-}
