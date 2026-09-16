@@ -1248,6 +1248,11 @@ button:disabled {
   background: transparent;
 }
 
+.grid-book__cover-motion {
+  display: block;
+  width: 100%;
+}
+
 .grid-book__cover .book-cover {
   width: 100%;
   height: auto;
@@ -3154,37 +3159,26 @@ html[data-keyboard-open] .bottom-bar {
      变化触发的过渡」会一直卡在旧值上，换主题后底色就再也不刷新了。换色直接切。 */
 }
 
-/* 书架点封面进阅读页：克隆一份封面，从点击起点的位置/尺寸用 transform 展开、
-   淡出，露出底下已经渲染好的正文。只用 translate+scale+opacity，全程走合成层，
-   不触发布局重排。起点在 JS 里量好传进来，这里只负责终点和过渡曲线。 */
+/* 书架点封面进阅读页：封面的 shared layout transition 交给 motion 库算
+   （lib/motion.ts 里那套手写弹簧只管翻页跟手，这个交给更成熟的方案），这里
+   只定义终点的位置/尺寸——起点是书架格子里那份同 layoutId 的封面，motion
+   自己测量、自己插值。淡出也是 motion 的 opacity 动画，整枚（含书脊伪元素）
+   一起淡，不用单独再写一条 ::after 规则。 */
 .cover-flip {
   position: fixed;
-  top: 0;
   left: 0;
+  right: 0;
+  top: 14%;
   z-index: 50;
-  transform-origin: 0 0;
+  width: 220px;
+  aspect-ratio: 2 / 3;
+  margin: 0 auto;
   pointer-events: none;
-  opacity: 1;
-  transition:
-    transform 380ms cubic-bezier(0.22, 0.85, 0.35, 1),
-    opacity 380ms cubic-bezier(0.22, 0.85, 0.35, 1);
-}
-
-.cover-flip.is-settled {
-  opacity: 0;
 }
 
 .cover-flip .book-cover {
   width: 100%;
   height: 100%;
-}
-
-.cover-flip .book-cover::after {
-  transition: opacity 380ms ease;
-}
-
-.cover-flip.is-settled .book-cover::after {
-  opacity: 0;
 }
 
 .reader-theme--calm {
@@ -3363,14 +3357,26 @@ html[data-keyboard-open] .bottom-bar {
   width: 100%;
   height: 100%;
   margin: 0;
+  background: transparent;
+  border: 0;
   opacity: 0;
   appearance: none;
   -webkit-appearance: none;
 }
 
+/* iOS Safari 有时候不会完全吃掉 appearance:none，轨道/滑块的原生描边会露一点；
+   这几个伪元素显式清空，别让原生 chrome 透出来盖过下面这枚胶囊。 */
+.reader-chrome__slider::-webkit-slider-runnable-track,
+.reader-chrome__slider::-webkit-slider-thumb {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
 .reader-chrome__pos-label {
   position: relative;
   z-index: 1;
+  width: max-content;
   padding: 6px 14px;
   border-radius: 999px;
   border: 0.5px solid var(--glass-edge);
@@ -3418,8 +3424,7 @@ html[data-keyboard-open] .bottom-bar {
 
 .reader-chrome__back,
 .reader-chrome__close,
-.reader-chrome__menu,
-.reader-chrome__aa {
+.reader-chrome__menu {
   display: inline-flex;
   flex-shrink: 0;
   width: 40px;
@@ -3443,8 +3448,7 @@ html[data-keyboard-open] .bottom-bar {
 
 .reader-chrome__back:active,
 .reader-chrome__close:active,
-.reader-chrome__menu:active,
-.reader-chrome__aa:active {
+.reader-chrome__menu:active {
   transform: scale(0.92);
 }
 

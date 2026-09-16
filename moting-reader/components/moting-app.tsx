@@ -56,6 +56,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { motion } from "motion/react";
 import { useAppNavigation } from "../hooks/use-app-navigation";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
@@ -369,7 +370,7 @@ function suppressScrollRestore() {
 
 // 书架点封面进阅读页的展开动效：点击那一刻先把封面当时的位置/尺寸记下来，
 // ReaderScreen 挂载时读一次就清空——只用来对齐这一次展开的起点，不是持久状态。
-let pendingCoverFlip: { bookId: string; rect: DOMRect } | null = null;
+let pendingCoverFlip: { bookId: string } | null = null;
 
 // 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
 // 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
@@ -1124,15 +1125,17 @@ function LibraryScreen({
                     <button
                       type="button"
                       className="grid-book__cover"
-                      onClick={(event) => {
-                        pendingCoverFlip = {
-                          bookId: book.id,
-                          rect: event.currentTarget.getBoundingClientRect(),
-                        };
+                      onClick={() => {
+                        pendingCoverFlip = { bookId: book.id };
                         onOpen(book);
                       }}
                     >
-                      <BookCover book={book} size="large" />
+                      <motion.div
+                        layoutId={`book-cover-${book.id}`}
+                        className="grid-book__cover-motion"
+                      >
+                        <BookCover book={book} size="large" />
+                      </motion.div>
                       {isNew ? <span className="grid-book__badge">新增</span> : null}
                     </button>
                     <div className="grid-book__footer">
@@ -3387,19 +3390,15 @@ function ReaderScreen({
     anchorId: string;
   } | null>(null);
   const articleRef = useRef<HTMLElement>(null);
-  // 从书架封面点进来的那一次，把封面从点击起点展开到全屏的过渡。非封面入口
-  // （比如"继续阅读"卡片）没记录起点，pendingCoverFlip 对不上就直接跳过，正常展示。
-  const [coverFlip] = useState<DOMRect | null>(() => {
+  // 从书架封面点进来的那一次，跟书架格子里同 layoutId 的封面做 shared layout
+  // transition（motion 库自己测量起点、自己插值，见下面 JSX）。非封面入口
+  // （比如"继续阅读"卡片）没有 pendingCoverFlip，直接跳过，正常展示。
+  const [coverFlip] = useState(() => {
     const pending = pendingCoverFlip;
     pendingCoverFlip = null;
-    return pending?.bookId === book.id ? pending.rect : null;
+    return pending?.bookId === book.id;
   });
-  const [coverFlipSettled, setCoverFlipSettled] = useState(false);
-  useLayoutEffect(() => {
-    if (!coverFlip) return;
-    const frame = requestAnimationFrame(() => setCoverFlipSettled(true));
-    return () => cancelAnimationFrame(frame);
-  }, [coverFlip]);
+  const [coverFlipLayoutDone, setCoverFlipLayoutDone] = useState(false);
   const insets = useSafeInsets();
   // iPhone 上由应用接管正文选择，桌面和拿不到 caret 定位的浏览器退回系统选择。
   const textSelection = useTextSelection(articleRef, { enabled: true });
@@ -4482,26 +4481,16 @@ function ReaderScreen({
       style={readerStyle}
     >
       {coverFlip ? (
-        <div
-          className={`cover-flip ${coverFlipSettled ? "is-settled" : ""}`}
-          style={{
-            width: `${coverFlip.width}px`,
-            height: `${coverFlip.height}px`,
-            transform: coverFlipSettled
-              ? (() => {
-                  const scale = 2.6;
-                  const endWidth = coverFlip.width * scale;
-                  const endHeight = coverFlip.height * scale;
-                  const endLeft = (window.innerWidth - endWidth) / 2;
-                  const endTop = (window.innerHeight - endHeight) / 2;
-                  return `translate(${endLeft}px, ${endTop}px) scale(${scale})`;
-                })()
-              : `translate(${coverFlip.left}px, ${coverFlip.top}px) scale(1)`,
-          }}
+        <motion.div
+          layoutId={`book-cover-${book.id}`}
+          className="cover-flip"
+          onLayoutAnimationComplete={() => setCoverFlipLayoutDone(true)}
+          animate={coverFlipLayoutDone ? { opacity: 0 } : undefined}
+          transition={{ opacity: { duration: 0.22 } }}
           aria-hidden
         >
           <BookCover book={book} size="large" />
-        </div>
+        </motion.div>
       ) : null}
 
       <div className="reader-chrome reader-chrome--top">
@@ -4516,14 +4505,6 @@ function ReaderScreen({
         <span className="reader-chrome__remain">
           {paged ? `本章还剩 ${remainingPages} 页` : `已读 ${readPercent}%`}
         </span>
-        <button
-          type="button"
-          className="reader-chrome__aa"
-          aria-label="字体与主题"
-          onClick={() => setShowSettings(true)}
-        >
-          <Type size={20} />
-        </button>
       </div>
 
       <div
