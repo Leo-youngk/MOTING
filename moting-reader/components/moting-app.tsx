@@ -4572,18 +4572,9 @@ function ReaderScreen({
 
       <div className="reader-chrome reader-chrome--bottom">
         <div className="reader-chrome__pos">
-          {dragPage !== null ? (
-            <span
-              className="reader-chrome__bubble"
-              style={{
-                left: `${
-                  ((dragPage - 1) / Math.max(1, pagination.total - 1)) * 100
-                }%`,
-              }}
-            >
-              {dragPage}
-            </span>
-          ) : null}
+          <span className="reader-chrome__pos-label">
+            {dragPage ?? livePage}/{pagination.total}页
+          </span>
           <input
             type="range"
             className="reader-chrome__slider"

@@ -3252,21 +3252,17 @@ html[data-keyboard-open] .bottom-bar {
   pointer-events: auto;
 }
 
+/* 原生 Apple Books 顶/底栏不是一整条通栏毛玻璃，是各自独立的胶囊/圆钮浮在
+   正文之上，中间露出书页底色。容器本身不挂背景，只负责摆位置；玻璃质感各自
+   放在里面的胶囊/按钮上（.reader-chrome__remain、__pos-label、__menu）。 */
 .reader-chrome--top {
   top: 0;
   padding: calc(env(safe-area-inset-top) + 10px) 12px 12px;
-  /* Apple Books 的顶/底栏是毛玻璃材质：半透明 + 模糊，不是渐变柔光。 */
-  background: color-mix(in srgb, var(--reader-background) 62%, transparent);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
 }
 
 .reader-chrome--bottom {
   bottom: 0;
   padding: 12px 12px calc(env(safe-area-inset-bottom) + 12px);
-  background: color-mix(in srgb, var(--reader-background) 62%, transparent);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
 }
 
 /* 底栏右侧是一组按钮（问 AI、阅读设置），靠这一下推成一组，别被 space-between 摊开。 */
@@ -3349,41 +3345,53 @@ html[data-keyboard-open] .bottom-bar {
   white-space: nowrap;
 }
 
-/* 底栏进度条：原生 range，无障碍/触屏行为不用自己重做，靠 accent-color 跟主题走色。 */
+/* 底栏进度条：原生图书的读数是个悬浮胶囊，不是一整条可见滑轨。滑轨本身铺满
+   这块区域、彻底透明但保留原生 range 的命中区（无障碍/触屏行为不用自己重做），
+   胶囊纯展示、盖在上面，拖动时胶囊里的数字跟手实时变。 */
 .reader-chrome__pos {
   position: relative;
   display: flex;
-  align-items: center;
   flex: 1;
+  align-items: center;
+  justify-content: center;
   min-height: 40px;
 }
 
 .reader-chrome__slider {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  height: 24px;
+  height: 100%;
   margin: 0;
-  accent-color: var(--reader-ink);
+  opacity: 0;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
-/* 拖动时悬在指头上方的页码气泡，left 由 JS 按当前页/总页数算好传进来。 */
-.reader-chrome__bubble {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  transform: translateX(-50%);
-  margin-bottom: 6px;
-  padding: 3px 9px;
+.reader-chrome__pos-label {
+  position: relative;
+  z-index: 1;
+  padding: 6px 14px;
   border-radius: 999px;
-  background: var(--reader-ink);
-  color: var(--reader-background);
+  border: 0.5px solid var(--glass-edge);
+  background: var(--glass-fill);
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    inset 0 0.5px 0 var(--glass-sheen),
+    inset 0 -0.5px 0 var(--glass-shade),
+    var(--glass-shadow);
+  color: var(--reader-muted);
   font-family: var(--font-sans);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
   white-space: nowrap;
   pointer-events: none;
-  box-shadow: var(--glass-shadow);
 }
 
+/* 之前这里刻意不挂玻璃底，怕滚过来的文字被模糊叠成一团糊字。改成对照原生
+   图书 App 的胶囊样式后实测没有这个问题：胶囊够小、模糊半径不大，压在标题
+   正上方的留白区，不会盖住正文行。 */
 .reader-chrome__remain {
   position: absolute;
   top: calc(env(safe-area-inset-top) + 10px);
@@ -3391,6 +3399,15 @@ html[data-keyboard-open] .bottom-bar {
   display: flex;
   align-items: center;
   height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 0.5px solid var(--glass-edge);
+  background: var(--glass-fill);
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    inset 0 0.5px 0 var(--glass-sheen),
+    inset 0 -0.5px 0 var(--glass-shade),
+    var(--glass-shadow);
   color: var(--reader-muted);
   font-family: var(--font-sans);
   font-size: 12px;
