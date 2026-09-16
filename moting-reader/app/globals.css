@@ -50,8 +50,8 @@
      汉字优先用 iOS 自带的宋体：它是苹果为屏幕调过的字形，笔锋和字重跟「图书」一致，
      Noto Serif SC 排在它后面只作 Windows/Android 的兜底，免得退化成 SimSun。 */
   --font-serif:
-    Georgia, "Songti SC", "STSong", "Noto Serif SC", "Noto Serif CJK SC",
-    "Source Han Serif SC", SimSun, serif;
+    "New York", ui-serif, Charter, Georgia, "Songti SC", "STSong",
+    "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", SimSun, serif;
   /* 楷体、圆体优先落 iOS 自带的 Kaiti SC / Yuanti SC；Windows 上楷体退到 KaiTi，
      圆体没有对应系统字，退到雅黑。真正的目标设备是 iPhone，四款各自成形。 */
   --font-kai:
@@ -121,29 +121,54 @@ html {
 }
 
 /* 阅读配色挂在 <html> 上而不是 .reader-shell 上：PWA 全屏时 iOS 拿根元素的底色
-   填刘海和 Home 条那两条安全区，挂在内层元素上够不着那里，就会露出外壳的灰。 */
-html[data-reader-theme="paper"] {
-  --reader-background: #f6f1e7;
-  --reader-surface: #fbf8f2;
-  --reader-ink: #302d29;
-  --reader-muted: #7b756b;
-  --reader-line: #ddd5c7;
-}
-
-html[data-reader-theme="white"] {
+   填刘海和 Home 条那两条安全区，挂在内层元素上够不着那里，就会露出外壳的灰。
+   六套主题色值取自 Apple Books 真机取样，1:1 对齐。 */
+html[data-reader-theme="original"] {
   --reader-background: #ffffff;
   --reader-surface: #ffffff;
-  --reader-ink: #202020;
-  --reader-muted: #77736e;
-  --reader-line: #e7e4df;
+  --reader-ink: #000000;
+  --reader-muted: #8e8e93;
+  --reader-line: rgb(60 60 67 / 16%);
 }
 
-html[data-reader-theme="night"] {
-  --reader-background: #1e2021;
-  --reader-surface: #282a2b;
-  --reader-ink: #e6e0d6;
-  --reader-muted: #aaa49b;
-  --reader-line: #393b3c;
+html[data-reader-theme="paper"] {
+  --reader-background: #f5f5f5;
+  --reader-surface: #ffffff;
+  --reader-ink: #000000;
+  --reader-muted: #8e8e93;
+  --reader-line: rgb(60 60 67 / 16%);
+}
+
+html[data-reader-theme="bold"] {
+  --reader-background: #ffffff;
+  --reader-surface: #ffffff;
+  --reader-ink: #000000;
+  --reader-muted: #77777c;
+  --reader-line: rgb(60 60 67 / 22%);
+}
+
+html[data-reader-theme="calm"] {
+  --reader-background: #efe0c9;
+  --reader-surface: #f6ecdb;
+  --reader-ink: #3a3428;
+  --reader-muted: #8a8069;
+  --reader-line: rgb(90 78 55 / 20%);
+}
+
+html[data-reader-theme="focus"] {
+  --reader-background: #f6f3ea;
+  --reader-surface: #fbf9f2;
+  --reader-ink: #1d1d1f;
+  --reader-muted: #8e8e93;
+  --reader-line: rgb(60 60 67 / 14%);
+}
+
+html[data-reader-theme="quiet"] {
+  --reader-background: #414045;
+  --reader-surface: #4c4b50;
+  --reader-ink: #e8e6e1;
+  --reader-muted: #a4a3a8;
+  --reader-line: rgb(255 255 255 / 16%);
   color-scheme: dark;
 }
 
@@ -3129,19 +3154,55 @@ html[data-keyboard-open] .bottom-bar {
      变化触发的过渡」会一直卡在旧值上，换主题后底色就再也不刷新了。换色直接切。 */
 }
 
-.reader-theme--paper {
+/* 书架点封面进阅读页：克隆一份封面，从点击起点的位置/尺寸用 transform 展开、
+   淡出，露出底下已经渲染好的正文。只用 translate+scale+opacity，全程走合成层，
+   不触发布局重排。起点在 JS 里量好传进来，这里只负责终点和过渡曲线。 */
+.cover-flip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 50;
+  transform-origin: 0 0;
+  pointer-events: none;
+  opacity: 1;
+  transition:
+    transform 380ms cubic-bezier(0.22, 0.85, 0.35, 1),
+    opacity 380ms cubic-bezier(0.22, 0.85, 0.35, 1);
+}
+
+.cover-flip.is-settled {
+  opacity: 0;
+}
+
+.cover-flip .book-cover {
+  width: 100%;
+  height: 100%;
+}
+
+.cover-flip .book-cover::after {
+  transition: opacity 380ms ease;
+}
+
+.cover-flip.is-settled .book-cover::after {
+  opacity: 0;
+}
+
+.reader-theme--calm {
   --glass-sheen: rgb(255 253 247 / 78%);
   --glass-shade: rgb(60 46 24 / 7%);
   --glass-shadow: 0 1px 2px rgb(60 46 24 / 8%), 0 12px 30px rgb(60 46 24 / 14%);
 }
 
-.reader-theme--white {
+.reader-theme--original,
+.reader-theme--paper,
+.reader-theme--bold,
+.reader-theme--focus {
   --glass-sheen: rgb(255 255 255 / 85%);
   --glass-shade: rgb(0 0 0 / 6%);
   --glass-shadow: 0 1px 2px rgb(0 0 0 / 7%), 0 12px 30px rgb(0 0 0 / 13%);
 }
 
-.reader-theme--night {
+.reader-theme--quiet {
   --glass-sheen: rgb(255 255 255 / 15%);
   --glass-shade: rgb(0 0 0 / 36%);
   --glass-shadow: 0 1px 2px rgb(0 0 0 / 45%), 0 14px 36px rgb(0 0 0 / 52%);
@@ -3193,12 +3254,19 @@ html[data-keyboard-open] .bottom-bar {
 
 .reader-chrome--top {
   top: 0;
-  padding: calc(env(safe-area-inset-top) + 12px) 16px 12px;
+  padding: calc(env(safe-area-inset-top) + 10px) 12px 12px;
+  /* Apple Books 的顶/底栏是毛玻璃材质：半透明 + 模糊，不是渐变柔光。 */
+  background: color-mix(in srgb, var(--reader-background) 62%, transparent);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
 }
 
 .reader-chrome--bottom {
   bottom: 0;
-  padding: 12px 16px calc(env(safe-area-inset-bottom) + 16px);
+  padding: 12px 12px calc(env(safe-area-inset-bottom) + 12px);
+  background: color-mix(in srgb, var(--reader-background) 62%, transparent);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
 }
 
 /* 底栏右侧是一组按钮（问 AI、阅读设置），靠这一下推成一组，别被 space-between 摊开。 */
@@ -3257,8 +3325,7 @@ html[data-keyboard-open] .bottom-bar {
   }
 }
 
-.reader-chrome__chapter,
-.reader-chrome__pos {
+.reader-chrome__chapter {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -3282,33 +3349,60 @@ html[data-keyboard-open] .bottom-bar {
   white-space: nowrap;
 }
 
+/* 底栏进度条：原生 range，无障碍/触屏行为不用自己重做，靠 accent-color 跟主题走色。 */
 .reader-chrome__pos {
-  border: 0.5px solid var(--glass-edge);
-  background: var(--glass-fill);
-  color: var(--reader-muted);
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-height: 40px;
+}
+
+.reader-chrome__slider {
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  accent-color: var(--reader-ink);
+}
+
+/* 拖动时悬在指头上方的页码气泡，left 由 JS 按当前页/总页数算好传进来。 */
+.reader-chrome__bubble {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  transform: translateX(-50%);
+  margin-bottom: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--reader-ink);
+  color: var(--reader-background);
   font-family: var(--font-sans);
   font-size: 12px;
-  backdrop-filter: var(--glass-blur);
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade),
-    var(--glass-shadow);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: var(--glass-shadow);
 }
 
 .reader-chrome__remain {
   position: absolute;
-  top: calc(env(safe-area-inset-top) + 22px);
+  top: calc(env(safe-area-inset-top) + 10px);
   left: 50%;
+  display: flex;
+  align-items: center;
+  height: 40px;
   color: var(--reader-muted);
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0.02em;
   transform: translateX(-50%);
   pointer-events: none;
 }
 
+.reader-chrome__back,
 .reader-chrome__close,
-.reader-chrome__menu {
+.reader-chrome__menu,
+.reader-chrome__aa {
   display: inline-flex;
   flex-shrink: 0;
   width: 40px;
@@ -3330,9 +3424,53 @@ html[data-keyboard-open] .bottom-bar {
     var(--glass-shadow);
 }
 
+.reader-chrome__back:active,
 .reader-chrome__close:active,
-.reader-chrome__menu:active {
+.reader-chrome__menu:active,
+.reader-chrome__aa:active {
   transform: scale(0.92);
+}
+
+/* 书内堆叠菜单：右下角圆形按钮唤起的几张圆角卡片，对齐 Apple Books。 */
+.reader-menu__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.reader-menu {
+  position: fixed;
+  z-index: 31;
+  right: 14px;
+  bottom: calc(env(safe-area-inset-bottom) + 66px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(232px, calc(100vw - 28px));
+}
+
+.reader-menu__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  border: 0.5px solid var(--glass-edge);
+  border-radius: 14px;
+  background: var(--glass-fill);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  color: var(--reader-ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  transition: transform 150ms ease;
+}
+
+.reader-menu__row:active {
+  transform: scale(0.98);
 }
 
 .reader-article {
@@ -3430,10 +3568,34 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .reader-shell.is-paged .reader-viewport {
+  position: relative;
   height: 100dvh;
   overflow: hidden;
   /* 横向手势归翻页，别让浏览器抢去做后退。 */
   touch-action: pan-y;
+}
+
+/* 翻页时领先边缘一抹很快就淡掉的阴影，让平移有一点「纸页掠过」的质感。 */
+.reader-page-turn {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 56px;
+  pointer-events: none;
+  background: linear-gradient(to right, rgb(0 0 0 / 14%), transparent);
+  animation: page-turn 260ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@keyframes page-turn {
+  from {
+    opacity: 0.85;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(48px);
+  }
 }
 
 .reader-shell.is-paged .reader-article {
@@ -3444,6 +3606,12 @@ html[data-keyboard-open] .bottom-bar {
   column-gap: 48px;
   transition: transform 260ms cubic-bezier(0.32, 0.72, 0, 1);
   will-change: transform;
+}
+
+/* 手指实时跟手和松手后的弹簧结算都是逐帧 JS 改 transform，这段时间必须关掉
+   CSS 过渡，否则每一帧都会被 260ms 缓动再拖尾一次，手感会发糊。 */
+.reader-shell.is-paged .reader-article.is-dragging {
+  transition: none;
 }
 
 .reader-shell.is-paged .reader-title {
@@ -3467,8 +3635,30 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .reader-title {
-  margin-bottom: 52px;
+  margin-bottom: 44px;
   text-align: center;
+}
+
+/* 章首 ornament：一道细横线、中间坐一颗小菱形，对齐 Apple Books 章首饰线。
+   只旋转菱形本身，不能旋转父级，否则两侧细线会跟着变斜。 */
+.reader-title__ornament {
+  position: relative;
+  display: block;
+  width: 64px;
+  height: 1px;
+  margin: 24px auto 0;
+  background: var(--reader-line);
+}
+
+.reader-title__ornament::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  background: var(--reader-line);
+  transform: translate(-50%, -50%) rotate(45deg);
 }
 
 .reader-title span {
@@ -3480,11 +3670,12 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .reader-title h1 {
-  margin: 13px 0 9px;
+  margin: 0;
   font-family: var(--font-serif);
-  font-size: clamp(27px, 7vw, 38px);
-  letter-spacing: -0.02em;
-  line-height: 1.35;
+  font-size: clamp(21px, 5.6vw, 27px);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.45;
 }
 
 .reader-title p {
@@ -4216,19 +4407,22 @@ html[data-keyboard-open] .modal-sheet {
 
 /* 阅读器目录：顶部书封 + 书名，下面章节列表，标题在左、起始进度在右，当前章高亮。 */
 .toc {
-  padding: 6px 0 2px;
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  padding: calc(env(safe-area-inset-top) + 16px) 20px 0;
 }
 
 .toc__head {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 6px 0 16px;
-  border-bottom: 1px solid var(--line-soft);
+  gap: 16px;
+  padding: 4px 0 18px;
 }
 
 .toc__cover {
-  width: 52px;
+  width: 78px;
   flex-shrink: 0;
 }
 
@@ -4247,8 +4441,10 @@ html[data-keyboard-open] .modal-sheet {
 
 .toc__meta strong {
   overflow: hidden;
-  font-family: var(--font-serif);
-  font-size: 16px;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 21px;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4266,27 +4462,39 @@ html[data-keyboard-open] .modal-sheet {
 /* 目录自己滚，不带着整张 sheet 一起滚：打开时会直接落到当前章，
    标题和关闭按钮得留在原处。 */
 .toc__list {
-  max-height: 52dvh;
+  flex: 1;
+  max-height: none;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 4px 0;
+  padding: 4px 0 20px;
 }
 
 .toc__item {
   display: flex;
   width: 100%;
-  min-height: 52px;
+  min-height: 56px;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--line-soft);
+  padding: 16px 10px;
   background: transparent;
   text-align: left;
 }
 
-.toc__item:last-child {
-  border-bottom: 0;
+/* 分隔线内缩到与文字对齐；当前章那一行换成整条圆角灰底、不再画线。 */
+.toc__item + .toc__item:not(.is-active) {
+  border-top: 1px solid var(--reader-line);
+}
+
+.toc__item.is-active {
+  margin: 2px -20px;
+  padding: 16px 30px;
+  border-radius: 18px;
+  background: rgb(120 120 128 / 16%);
+}
+
+.toc__item.is-active + .toc__item {
+  border-top: 0;
 }
 
 .toc__title {
@@ -4294,8 +4502,8 @@ html[data-keyboard-open] .modal-sheet {
   display: -webkit-box;
   overflow: hidden;
   color: var(--ink);
-  font-family: var(--font-serif);
-  font-size: 15px;
+  font-family: var(--font-sans);
+  font-size: 17px;
   line-height: 1.4;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -4307,19 +4515,66 @@ html[data-keyboard-open] .modal-sheet {
   flex-shrink: 0;
   align-items: center;
   justify-content: flex-end;
-  color: var(--subtle);
+  color: var(--muted);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: 16px;
   font-variant-numeric: tabular-nums;
 }
 
 .toc__item.is-active .toc__title {
-  color: var(--accent-deep);
-  font-weight: 600;
+  color: var(--ink);
+  font-weight: 500;
 }
 
 .toc__item.is-active .toc__page {
-  color: var(--accent);
+  color: var(--muted);
+}
+
+/* 目录做成接近全屏的毛玻璃大圆角 sheet，对齐 iPhone 图书的目录页。 */
+.modal-sheet--toc {
+  width: 100%;
+  max-height: none;
+  height: calc(100dvh - env(safe-area-inset-top) - 6px);
+  padding: 0;
+  border-radius: 26px 26px 0 0;
+  /* 大 sheet 不做全屏实时模糊：观感与 Apple 接近，但避免整屏 backdrop-filter 的
+     合成开销（真机与截图都会卡）。毛玻璃只留给小面积控件。 */
+  background: color-mix(in srgb, var(--reader-surface) 97%, transparent);
+}
+
+.modal-sheet--toc > header,
+.modal-sheet--toc .modal-grabber {
+  display: none;
+}
+
+.toc__close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  width: 52px;
+  height: 52px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--reader-surface) 66%, transparent);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  color: var(--ink);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 8%);
+}
+
+.toc__pos {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.toc__pos b {
+  color: var(--ink);
+  font-weight: 600;
 }
 
 .reader-settings {

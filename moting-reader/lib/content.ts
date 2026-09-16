@@ -615,3 +615,85 @@ export function formatRemaining(book: Book, position?: BookPosition): string {
   if (position.percent >= 99) return "已读完";
   return `剩余${formatReadingTime(remainingCharacters(book, position))}`;
 }
+
+/** 全书页码模型：按当前排版估算每章起止页，供目录与页脚显示绝对页码。 */
+export interface BookPagination {
+  chapterStart: number[];
+  chapterPages: number[];
+  total: number;
+}
+
+export function estimatePagination(
+  book: Book,
+  layout: { fontSize: number; lineHeight: number; contentWidth: number },
+  viewport: { width: number; height: number }
+): BookPagination {
+  const columnWidth = Math.max(
+    120,
+    Math.min(viewport.width - 42, layout.contentWidth)
+  );
+  const perLine = Math.max(8, Math.floor(columnWidth / layout.fontSize));
+  const usableHeight = Math.max(200, viewport.height - 132);
+  const lines = Math.max(
+    6,
+    Math.floor(usableHeight / (layout.fontSize * layout.lineHeight))
+  );
+  const perPage = Math.max(1, perLine * lines);
+
+  const chapterStart: number[] = [];
+  const chapterPages: number[] = [];
+  let cursor = 1;
+  for (const chapter of book.chapters) {
+    chapterStart.push(cursor);
+    const pages = Math.max(
+      1,
+      Math.ceil((chapter.characterCount || 1) / perPage)
+    );
+    chapterPages.push(pages);
+    cursor += pages;
+  }
+  return { chapterStart, chapterPages, total: Math.max(1, cursor - 1) };
+}
+
+/** 某阅读位置对应的绝对页码（1 起）。 */
+export function pageAt(
+  pagination: BookPagination,
+  chapterIndex: number,
+  sentenceIndex: number,
+  sentenceCount: number
+): number {
+  const start = pagination.chapterStart[chapterIndex] ?? 1;
+  const pages = pagination.chapterPages[chapterIndex] ?? 1;
+  const fraction =
+    sentenceCount > 0
+      ? Math.min(1, Math.max(0, sentenceIndex / sentenceCount))
+      : 0;
+  return Math.min(pagination.total, start + Math.floor(fraction * pages));
+}
+
+/** pageAt 的反查：给定绝对页码，反推所在章节与章内句子位置。页码模型本身是按
+ *  字数估算的，落点是近似值，够拖拽进度条跳转用，不追求逐字精确。 */
+export function positionAtPage(
+  book: Book,
+  pagination: BookPagination,
+  targetPage: number
+): { chapterIndex: number; sentenceIndex: number } {
+  const page = Math.max(1, Math.min(pagination.total, Math.round(targetPage)));
+  let lo = 0;
+  let hi = pagination.chapterStart.length - 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if ((pagination.chapterStart[mid] ?? 1) <= page) lo = mid;
+    else hi = mid - 1;
+  }
+  const chapterIndex = lo;
+  const start = pagination.chapterStart[chapterIndex] ?? 1;
+  const pages = pagination.chapterPages[chapterIndex] ?? 1;
+  const fraction = pages > 0 ? Math.min(1, Math.max(0, (page - start) / pages)) : 0;
+  const sentenceCount = book.chapters[chapterIndex]?.sentenceCount ?? 0;
+  const sentenceIndex = Math.max(
+    0,
+    Math.min(sentenceCount - 1, Math.round(fraction * sentenceCount))
+  );
+  return { chapterIndex, sentenceIndex };
+}

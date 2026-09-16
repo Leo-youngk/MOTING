@@ -28,7 +28,6 @@ import {
   Play,
   Plus,
   Search,
-  SlidersHorizontal,
   Sparkles,
   Square,
   Trash2,
@@ -70,13 +69,17 @@ import {
   imageSize,
   initialPosition,
   makeId,
+  estimatePagination,
   nextChapterRange,
+  pageAt,
+  positionAtPage,
   positionFor,
   remainingCharacters,
   withImageSizes,
 } from "../lib/content";
 import { createDemoBook } from "../lib/demo";
 import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "../lib/file-limits";
+import { springTo } from "../lib/motion";
 import {
   clearLibrary,
   getAllBooks,
@@ -164,10 +167,23 @@ const READER_FONTS: { value: ReaderFont; label: string; cssVar: string }[] = [
 ];
 
 const READER_THEMES: { value: ReaderTheme; label: string }[] = [
+  { value: "original", label: "原版" },
+  { value: "quiet", label: "夜间" },
   { value: "paper", label: "纸张" },
-  { value: "white", label: "纯白" },
-  { value: "night", label: "夜间" },
+  { value: "bold", label: "高对比" },
+  { value: "calm", label: "暖棕" },
+  { value: "focus", label: "米黄" },
 ];
+
+/** 主题瓦片与阅读页共用的 1:1 色板（取自 Apple Books 真机取样）。 */
+const READER_THEME_SWATCH: Record<ReaderTheme, { bg: string; ink: string }> = {
+  original: { bg: "#ffffff", ink: "#000000" },
+  paper: { bg: "#f5f5f5", ink: "#000000" },
+  bold: { bg: "#ffffff", ink: "#000000" },
+  calm: { bg: "#efe0c9", ink: "#3a3428" },
+  focus: { bg: "#f6f3ea", ink: "#1d1d1f" },
+  quiet: { bg: "#414045", ink: "#e8e6e1" },
+};
 
 function FontPicker({
   value,
@@ -350,6 +366,10 @@ let suppressNextScrollRestore = false;
 function suppressScrollRestore() {
   suppressNextScrollRestore = true;
 }
+
+// 书架点封面进阅读页的展开动效：点击那一刻先把封面当时的位置/尺寸记下来，
+// ReaderScreen 挂载时读一次就清空——只用来对齐这一次展开的起点，不是持久状态。
+let pendingCoverFlip: { bookId: string; rect: DOMRect } | null = null;
 
 // 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
 // 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
@@ -1104,7 +1124,13 @@ function LibraryScreen({
                     <button
                       type="button"
                       className="grid-book__cover"
-                      onClick={() => onOpen(book)}
+                      onClick={(event) => {
+                        pendingCoverFlip = {
+                          bookId: book.id,
+                          rect: event.currentTarget.getBoundingClientRect(),
+                        };
+                        onOpen(book);
+                      }}
                     >
                       <BookCover book={book} size="large" />
                       {isNew ? <span className="grid-book__badge">新增</span> : null}
@@ -2062,14 +2088,14 @@ function SettingsPanel({
           <h2>默认排版</h2>
         </div>
         <div className="segmented-control">
-          {(["paper", "white", "night"] as const).map((theme) => (
+          {READER_THEMES.map((opt) => (
             <button
               type="button"
-              key={theme}
-              className={settings.theme === theme ? "is-active" : ""}
-              onClick={() => onChange({ ...settings, theme })}
+              key={opt.value}
+              className={settings.theme === opt.value ? "is-active" : ""}
+              onClick={() => onChange({ ...settings, theme: opt.value })}
             >
-              {theme === "paper" ? "纸张" : theme === "white" ? "纯白" : "夜间"}
+              {opt.label}
             </button>
           ))}
         </div>
@@ -2320,12 +2346,8 @@ const ArticleBody = memo(function ArticleBody({
             data-chapter-section={index}
           >
             <div className="reader-title">
-              <span>
-                {String(index + 1).padStart(2, "0")} /{" "}
-                {String(book.chapters.length).padStart(2, "0")}
-              </span>
               <h1>{item.title}</h1>
-              {index === 0 ? <p>{book.title}</p> : null}
+              <span className="reader-title__ornament" aria-hidden />
             </div>
 
             {item.paragraphs.map((paragraph) => {
@@ -3342,8 +3364,16 @@ function ReaderScreen({
   const [showChapters, setShowChapters] = useState(false);
   const tocListRef = useRevealActiveChapter(showChapters);
   const [showSettings, setShowSettings] = useState(false);
+  // 书内右下角那枚圆形按钮唤起的堆叠菜单（目录／主题与设置／问 AI），
+  // 对齐 Apple Books 阅读页的单一入口。
+  const [showReaderMenu, setShowReaderMenu] = useState(false);
   // 沉浸阅读：默认露出浮层控件，点空白处收起，只留正文。
   const [chromeVisible, setChromeVisible] = useState(true);
+  // 拖底部进度条时的临时预览页码；松手前只改这个、不真正跳转。
+  const [dragPage, setDragPage] = useState<number | null>(null);
+  // 分页模式横向翻页的跟手位移：拖拽中实时跟手指、松手后弹簧归零。
+  const [dragX, setDragX] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
   const [popup, setPopup] = useState<ReaderPopupState | null>(null);
   const [thoughtDraft, setThoughtDraft] = useState<{
     note: BookNote;
@@ -3357,6 +3387,19 @@ function ReaderScreen({
     anchorId: string;
   } | null>(null);
   const articleRef = useRef<HTMLElement>(null);
+  // 从书架封面点进来的那一次，把封面从点击起点展开到全屏的过渡。非封面入口
+  // （比如"继续阅读"卡片）没记录起点，pendingCoverFlip 对不上就直接跳过，正常展示。
+  const [coverFlip] = useState<DOMRect | null>(() => {
+    const pending = pendingCoverFlip;
+    pendingCoverFlip = null;
+    return pending?.bookId === book.id ? pending.rect : null;
+  });
+  const [coverFlipSettled, setCoverFlipSettled] = useState(false);
+  useLayoutEffect(() => {
+    if (!coverFlip) return;
+    const frame = requestAnimationFrame(() => setCoverFlipSettled(true));
+    return () => cancelAnimationFrame(frame);
+  }, [coverFlip]);
   const insets = useSafeInsets();
   // iPhone 上由应用接管正文选择，桌面和拿不到 caret 定位的浏览器退回系统选择。
   const textSelection = useTextSelection(articleRef, { enabled: true });
@@ -3527,6 +3570,7 @@ function ReaderScreen({
       window.removeEventListener("scroll", onUserScroll);
       window.removeEventListener("wheel", stop);
       window.removeEventListener("touchstart", stop);
+      window.removeEventListener("touchmove", stop);
       window.removeEventListener("keydown", stop);
     };
 
@@ -3567,6 +3611,14 @@ function ReaderScreen({
 
     const settle = () => {
       if (settled) return;
+      // 用户已经在滚了（scrollY 离开了我们上次 place() 落下的位置），别再拽回去。
+      // scroll 事件是异步派发的，ResizeObserver／rAF 回调有可能先跑到——
+      // 尤其是滑动触发接章／摘章时，版面变化会让 ResizeObserver 抢先回调，
+      // 光靠 onUserScroll 拦不住这一下，表现就是「刚进书滑动会被弹回原位」。
+      if (Math.abs(window.scrollY - appliedY) > 1) {
+        stop();
+        return;
+      }
       // 一次落位就收手，不再留着钩子等下一次版面变化。
       if (place() || Date.now() > deadline) {
         stop();
@@ -3592,6 +3644,9 @@ function ReaderScreen({
     window.addEventListener("scroll", onUserScroll, { passive: true });
     window.addEventListener("wheel", stop, { passive: true, once: true });
     window.addEventListener("touchstart", stop, { passive: true, once: true });
+    // 点进书的那一下 touchstart 在 effect 挂上之前就派发过了，once 监听器接不到；
+    // 手指还没抬就开始滑时，靠 touchmove 兜住这段手势，立刻停止位置恢复。
+    window.addEventListener("touchmove", stop, { passive: true, once: true });
     window.addEventListener("keydown", stop, { once: true });
     return stop;
     // 只在进入这本书／切换阅读模式时回到上次的位置。连续滚动里 chapterIndex 会随滑动
@@ -4152,8 +4207,15 @@ function ReaderScreen({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [paged]);
 
-  const swipeRef = useRef<{ x: number; y: number } | null>(null);
+  const swipeRef = useRef<{ x: number; y: number; t: number } | null>(null);
   const turnedRef = useRef(false);
+  const cancelSpringRef = useRef<(() => void) | null>(null);
+
+  // 拖拽期间的橡皮筋阻尼：位移越大越"粘手"，不分是不是真的翻到头，纯按距离压。
+  const dampPageDrag = (rawDx: number) => {
+    const limit = pageStep > 0 ? pageStep * 3 : 300;
+    return rawDx * (1 - Math.min(0.8, Math.abs(rawDx) / limit));
+  };
 
   // 选区可能是拖动系统选择手柄结束的，那一下不落在正文元素上，只能听 document。
   useEffect(() => {
@@ -4196,17 +4258,53 @@ function ReaderScreen({
   }, [popup]);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    swipeRef.current = { x: event.clientX, y: event.clientY };
+    swipeRef.current = { x: event.clientX, y: event.clientY, t: performance.now() };
+    cancelSpringRef.current?.();
+    cancelSpringRef.current = null;
     textSelection.viewportHandlers.onPointerDown(event);
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     textSelection.viewportHandlers.onPointerMove(event);
+    if (!paged) return;
+    const start = swipeRef.current;
+    if (!start) return;
+    // 进了选区状态就把跟手让出去：同一次手势不该既拖选区又拖页面。
+    if (textSelection.active || textSelection.dragging) {
+      if (isDragging) {
+        setIsDragging(false);
+        setDragX(0);
+      }
+      return;
+    }
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) {
+      if (isDragging) {
+        setIsDragging(false);
+        setDragX(0);
+      }
+      return;
+    }
+    const dx = event.clientX - start.x;
+    const dy = event.clientY - start.y;
+    if (!isDragging) {
+      // 横向位移明显超过纵向、且过了一个小阈值，才判定是翻页手势，
+      // 避免跟纵向滚动、轻点误判打架。
+      if (Math.abs(dx) < 8 || Math.abs(dx) <= Math.abs(dy)) return;
+      setIsDragging(true);
+    }
+    setDragX(dampPageDrag(dx));
   };
 
   const handlePointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
     swipeRef.current = null;
     textSelection.viewportHandlers.onPointerCancel(event);
+    if (isDragging) {
+      cancelSpringRef.current?.();
+      cancelSpringRef.current = null;
+      setIsDragging(false);
+      setDragX(0);
+    }
   };
 
   const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -4214,13 +4312,60 @@ function ReaderScreen({
     swipeRef.current = null;
     textSelection.viewportHandlers.onPointerUp(event);
     // 进了选区状态就先把翻页让出去：同一次手势不该既调选区又翻页。
-    if (textSelection.active || textSelection.dragging) return;
+    if (textSelection.active || textSelection.dragging) {
+      if (isDragging) {
+        setIsDragging(false);
+        setDragX(0);
+      }
+      return;
+    }
     // 正在划词就别把这一下当成翻页手势。
     const selection = window.getSelection();
-    if (selection && !selection.isCollapsed) return;
+    if (selection && !selection.isCollapsed) {
+      if (isDragging) {
+        setIsDragging(false);
+        setDragX(0);
+      }
+      return;
+    }
     if (!paged || !start) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
+
+    if (isDragging) {
+      // 手指已经在实时跟手了：按位移+速度判定完成翻页还是弹回原位，
+      // 两种情况都交给弹簧把视觉位置遛到 0，CSS transition 这时候必须是关着的
+      // （isDragging 一直保持到弹簧 onDone 才关，避免弹簧的每一帧又被 CSS 过渡二次拖尾）。
+      const elapsed = Math.max(1, performance.now() - start.t);
+      const velocity = (dx / elapsed) * 1000;
+      const step = pageStep || 1;
+      const shouldTurn = Math.abs(dx) > step * 0.35 || Math.abs(velocity) > 500;
+      const settle = () => {
+        cancelSpringRef.current = null;
+        setIsDragging(false);
+      };
+      if (shouldTurn) {
+        turnedRef.current = true;
+        const delta = dx < 0 ? 1 : -1;
+        turnPage(delta);
+        cancelSpringRef.current = springTo(setDragX, {
+          from: dampPageDrag(dx) - delta * step,
+          to: 0,
+          velocity,
+          onDone: settle,
+        });
+      } else {
+        cancelSpringRef.current = springTo(setDragX, {
+          from: dampPageDrag(dx),
+          to: 0,
+          velocity,
+          onDone: settle,
+        });
+      }
+      return;
+    }
+
+    // 没有触发实时跟手（比如很短促的一下）时，退回原来「松手一次性判定」的翻页/点击逻辑。
     if (Math.abs(dx) > 44 && Math.abs(dx) > Math.abs(dy)) {
       turnedRef.current = true;
       turnPage(dx < 0 ? 1 : -1);
@@ -4263,32 +4408,121 @@ function ReaderScreen({
     book.readingPosition?.percent ?? initial.percent ?? 0
   );
 
+  // 目录与页脚用的全书绝对页码：按当前排版估算，改字号／转窗会跟着重算。
+  const pagination = useMemo(
+    () =>
+      estimatePagination(book, settings, {
+        width: typeof window === "undefined" ? 390 : window.innerWidth,
+        height: typeof window === "undefined" ? 844 : window.innerHeight,
+      }),
+    [book, settings]
+  );
+  const currentPage = pageAt(
+    pagination,
+    chapterIndex,
+    book.readingPosition?.chapterIndex === chapterIndex
+      ? book.readingPosition.sentenceIndex
+      : 0,
+    chapter?.sentenceCount ?? 0
+  );
+
+  // 底部进度条松手后跳转。刻意不走 changeChapter：它会把落点钉死在章首/章尾，
+  // 跳不到章节中间的目标页。分页模式换章后借 restoreRef 这个既有的「重排后落到
+  // 指定句子」机制补上章内偏移；滚动模式照抄 scrollToSpeaking 那套
+  // range/pendingScrollRef，不手动碰 chapterIndex/进度——锚点线滚动停稳后自己会认出新位置。
+  const jumpToPage = (targetPage: number) => {
+    const { chapterIndex: targetChapterIndex, sentenceIndex } = positionAtPage(
+      book,
+      pagination,
+      targetPage
+    );
+    const target = positionFor(book, targetChapterIndex, sentenceIndex);
+
+    if (paged) {
+      if (targetChapterIndex === chapterIndex) {
+        const offset =
+          Math.round(targetPage) - (pagination.chapterStart[chapterIndex] ?? 1);
+        goToPage(Math.max(0, Math.min(pageCount - 1, offset)));
+      } else {
+        changeChapter(targetChapterIndex);
+        restoreRef.current = target.sentenceId;
+      }
+      return;
+    }
+
+    const selector = `[data-sentence-id="${target.sentenceId}"]`;
+    const element = articleRef.current?.querySelector<HTMLElement>(selector);
+    if (element) {
+      element.scrollIntoView({ block: "start" });
+      return;
+    }
+    anchorRef.current = null;
+    pendingScrollRef.current = { selector, block: "start" };
+    const next = { start: targetChapterIndex, end: targetChapterIndex };
+    rangeRef.current = next;
+    setRange(next);
+  };
+
+  // 目录/设置/写想法/问 AI 这几个全屏浮层打开时，顶/底浮条必须跟着强制隐藏，
+  // 不然浮层的呼吸缺口里会露出还在显示、还能点的浮条，看着像一条横杠。
+  // 不改 chromeVisible 本身：浮层关掉后 chrome 要精确回到用户手动切换前的显隐状态。
+  const overlayOpen = showChapters || showSettings || Boolean(thoughtDraft) || askAiText !== null;
+  // 进度条的实时页码：分页模式用手指翻页时立刻变的 pageIndex，跟底栏原来那行文字
+  // 同一个算法；滚动模式没有 pageIndex，退回 currentPage（阅读位置驱动，锚点线
+  // 停稳后 400ms 内更新，跟 TOC 里「第 X 页」用的是同一个近似值）。
+  const livePage = paged
+    ? pagination.chapterStart[chapterIndex] + pageIndex
+    : currentPage;
+
   return (
     <div
       className={`reader-shell reader-theme--${settings.theme} ${
         paged ? "is-paged" : "is-scroll"
-      } ${chromeVisible ? "" : "chrome-hidden"}`}
+      } ${chromeVisible && !overlayOpen ? "" : "chrome-hidden"}`}
       style={readerStyle}
     >
+      {coverFlip ? (
+        <div
+          className={`cover-flip ${coverFlipSettled ? "is-settled" : ""}`}
+          style={{
+            width: `${coverFlip.width}px`,
+            height: `${coverFlip.height}px`,
+            transform: coverFlipSettled
+              ? (() => {
+                  const scale = 2.6;
+                  const endWidth = coverFlip.width * scale;
+                  const endHeight = coverFlip.height * scale;
+                  const endLeft = (window.innerWidth - endWidth) / 2;
+                  const endTop = (window.innerHeight - endHeight) / 2;
+                  return `translate(${endLeft}px, ${endTop}px) scale(${scale})`;
+                })()
+              : `translate(${coverFlip.left}px, ${coverFlip.top}px) scale(1)`,
+          }}
+          aria-hidden
+        >
+          <BookCover book={book} size="large" />
+        </div>
+      ) : null}
+
       <div className="reader-chrome reader-chrome--top">
         <button
           type="button"
-          className="reader-chrome__chapter"
-          onClick={() => setShowChapters(true)}
-        >
-          <span>{chapter?.title ?? "正文"}</span>
-          <ChevronDown size={15} />
-        </button>
-        <span className="reader-chrome__remain">
-          {paged ? `本章还剩 ${remainingPages} 页` : ""}
-        </span>
-        <button
-          type="button"
-          className="reader-chrome__close"
+          className="reader-chrome__back"
           aria-label="返回书架"
           onClick={onBack}
         >
-          <X size={20} />
+          <ChevronLeft size={24} />
+        </button>
+        <span className="reader-chrome__remain">
+          {paged ? `本章还剩 ${remainingPages} 页` : `已读 ${readPercent}%`}
+        </span>
+        <button
+          type="button"
+          className="reader-chrome__aa"
+          aria-label="字体与主题"
+          onClick={() => setShowSettings(true)}
+        >
+          <Type size={20} />
         </button>
       </div>
 
@@ -4303,10 +4537,10 @@ function ReaderScreen({
           ref={articleRef}
           className={`reader-article is-font-${settings.fontFamily} ${
             customSelect ? "is-custom-select" : ""
-          }`}
+          } ${isDragging ? "is-dragging" : ""}`}
           style={
             paged
-              ? { transform: `translateX(${-pageIndex * pageStep}px)` }
+              ? { transform: `translateX(${-pageIndex * pageStep + dragX}px)` }
               : undefined
           }
           onClick={handleArticleClick}
@@ -4331,33 +4565,98 @@ function ReaderScreen({
           endSentinelRef={endSentinelRef}
         />
         </article>
+        {paged ? (
+          <span key={pageIndex} className="reader-page-turn" aria-hidden />
+        ) : null}
       </div>
 
       <div className="reader-chrome reader-chrome--bottom">
-        <span className="reader-chrome__pos">
-          {paged ? `${pageIndex + 1} / ${pageCount} 页` : `已读 ${readPercent}%`}
-        </span>
-        {/* 划词问 AI 走正文批注，这本书的常驻对话得另有入口，否则聊过的就找不回来了。 */}
+        <div className="reader-chrome__pos">
+          {dragPage !== null ? (
+            <span
+              className="reader-chrome__bubble"
+              style={{
+                left: `${
+                  ((dragPage - 1) / Math.max(1, pagination.total - 1)) * 100
+                }%`,
+              }}
+            >
+              {dragPage}
+            </span>
+          ) : null}
+          <input
+            type="range"
+            className="reader-chrome__slider"
+            aria-label="阅读进度"
+            min={1}
+            max={pagination.total}
+            step={1}
+            value={dragPage ?? livePage}
+            onChange={(event) => setDragPage(Number(event.target.value))}
+            onPointerUp={(event) => {
+              const value = Number((event.target as HTMLInputElement).value);
+              setDragPage(null);
+              jumpToPage(value);
+            }}
+          />
+        </div>
         <button
           type="button"
           className="reader-chrome__menu"
-          aria-label="问 AI"
-          onClick={() => {
-            setInlineAsk(null);
-            setAskAiText("");
-          }}
+          aria-label="阅读菜单"
+          onClick={() => setShowReaderMenu(true)}
         >
-          <Sparkles size={19} />
-        </button>
-        <button
-          type="button"
-          className="reader-chrome__menu"
-          aria-label="阅读设置"
-          onClick={() => setShowSettings(true)}
-        >
-          <SlidersHorizontal size={20} />
+          <List size={20} />
         </button>
       </div>
+
+      {showReaderMenu ? (
+        <>
+          <button
+            type="button"
+            className="reader-menu__scrim"
+            aria-label="关闭菜单"
+            onClick={() => setShowReaderMenu(false)}
+          />
+          <div className="reader-menu" role="menu">
+            <button
+              type="button"
+              className="reader-menu__row"
+              onClick={() => {
+                setShowReaderMenu(false);
+                setShowChapters(true);
+              }}
+            >
+              <span>目录</span>
+              <List size={18} />
+            </button>
+            <button
+              type="button"
+              className="reader-menu__row"
+              onClick={() => {
+                setShowReaderMenu(false);
+                setShowSettings(true);
+              }}
+            >
+              <span>主题与设置</span>
+              <Type size={18} />
+            </button>
+            {/* 划词问 AI 走正文批注，这本书的常驻对话得另有入口，否则聊过的就找不回来了。 */}
+            <button
+              type="button"
+              className="reader-menu__row"
+              onClick={() => {
+                setShowReaderMenu(false);
+                setInlineAsk(null);
+                setAskAiText("");
+              }}
+            >
+              <span>问 AI</span>
+              <Sparkles size={18} />
+            </button>
+          </div>
+        </>
+      ) : null}
 
       {showRecall ? (
         <button
@@ -4505,7 +4804,7 @@ function ReaderScreen({
         <Modal
           title="目录"
           onClose={() => setShowChapters(false)}
-          className="modal-sheet--reader"
+          className="modal-sheet--toc"
         >
           <div className="toc">
             <div className="toc__head">
@@ -4514,22 +4813,23 @@ function ReaderScreen({
               </div>
               <div className="toc__meta">
                 <strong>{book.title}</strong>
-                <span>{book.author}</span>
-                <small>{`共 ${book.chapters.length} 章`}</small>
+                <span className="toc__pos">
+                  页码
+                  <b>{`第 ${currentPage} 页，共 ${pagination.total} 页`}</b>
+                  <ChevronDown size={16} />
+                </span>
               </div>
+              <button
+                type="button"
+                className="toc__close"
+                aria-label="关闭目录"
+                onClick={() => setShowChapters(false)}
+              >
+                <X size={22} />
+              </button>
             </div>
             <div className="toc__list" ref={tocListRef}>
               {book.chapters.map((item, index) => {
-                const startPercent =
-                  book.characterCount > 0
-                    ? Math.round(
-                        (book.chapters
-                          .slice(0, index)
-                          .reduce((sum, c) => sum + c.characterCount, 0) /
-                          book.characterCount) *
-                          100,
-                      )
-                    : 0;
                 const active = index === chapterIndex;
                 return (
                   <button
@@ -4543,7 +4843,7 @@ function ReaderScreen({
                   >
                     <span className="toc__title">{item.title}</span>
                     <span className="toc__page">
-                      {active ? <Check size={16} /> : `${startPercent}%`}
+                      {pagination.chapterStart[index]}
                     </span>
                   </button>
                 );
@@ -4573,7 +4873,15 @@ function ReaderScreen({
                     applySettings({ ...settings, theme: opt.value })
                   }
                 >
-                  <span className="rset-theme__glyph">文</span>
+                  <span
+                    className="rset-theme__glyph"
+                    style={{
+                      background: READER_THEME_SWATCH[opt.value].bg,
+                      color: READER_THEME_SWATCH[opt.value].ink,
+                    }}
+                  >
+                    Aa
+                  </span>
                   <span className="rset-theme__label">{opt.label}</span>
                 </button>
               ))}
