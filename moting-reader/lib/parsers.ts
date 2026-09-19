@@ -10,6 +10,7 @@ import {
   imageSize,
   makeId,
   normalizeWhitespace,
+  splitBlocksIntoSections,
 } from "./content";
 import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "./file-limits";
 import type {
@@ -382,14 +383,18 @@ async function parseEpub(
     if (!entry) continue;
     const extracted = extractTextBlocks(await entry.async("text"));
     await resolveImages(extracted.blocks, itemPath);
-    const chapter = createChapter(
-      titles.get(itemPath) ||
-        extracted.title ||
-        `第 ${chapters.length + 1} 章`,
-      extracted.blocks,
-      chapters.length
-    );
-    if (chapter && chapter.characterCount > 8) chapters.push(chapter);
+    // 一个文件未必只装一章：整本书塞进一个 XHTML 的排版很常见，那种文件要按
+    // 里面的标题再切开，否则连续阅读的章节窗口形同虚设，正文会整本挂进 DOM。
+    const fileTitle =
+      titles.get(itemPath) || extracted.title || `第 ${chapters.length + 1} 章`;
+    for (const section of splitBlocksIntoSections(extracted.blocks, fileTitle)) {
+      const chapter = createChapter(
+        section.title,
+        section.blocks,
+        chapters.length
+      );
+      if (chapter && chapter.characterCount > 8) chapters.push(chapter);
+    }
 
     report(
       onProgress,

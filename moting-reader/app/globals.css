@@ -3666,11 +3666,12 @@ html[data-keyboard-open] .bottom-bar {
   text-wrap: pretty;
 }
 
-/* 连续阅读只让视口附近的段落参与布局，分页模式保留完整多栏测量。 */
-.reader-shell.is-scroll .reader-article .reader-block {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
-}
+/* 这里曾经挂过 content-visibility: auto + contain-intrinsic-size: auto 120px。
+   已经去掉：DOM 规模由章节窗口（一次只挂 CHAPTER_WINDOW 章）管着，这层跳过渲染
+   是重复的，代价却是实打实的——没渲染过的段落一律按 120px 占位，而真实段高在
+   36px 到 1191px 之间，文档高度因此一边滚一边正负抖动（实测 40 帧里抖了 20 次、
+   累计 4087px）。Chrome 有 scroll anchoring 能把这些抖动挡掉，iOS Safari 至今没有
+   （WebKit #171099），抖动会原样变成正文往下掉。 */
 
 .reader-article .reader-block.is-heading {
   margin: 2em 0 0.9em;

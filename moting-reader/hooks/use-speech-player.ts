@@ -103,6 +103,8 @@ function locationAfter(
   let remaining = Math.abs(delta);
   const direction = delta >= 0 ? 1 : -1;
 
+  if (!book.chapters.length) return null;
+
   while (remaining > 0) {
     const sentences = flattenChapter(book.chapters[chapter]);
     sentence += direction;
@@ -115,7 +117,16 @@ function locationAfter(
         sentence = flattenChapter(book.chapters[chapter]).length - 1;
       }
     }
-    if (chapter < 0 || chapter >= book.chapters.length) return null;
+    // 走到书的两头就停在端点。这里以前返回 null，调用方直接 return，
+    // 于是开头按快退、结尾按快进都是一点反应都没有，看着就像按钮坏了。
+    if (chapter < 0) return { chapterIndex: 0, sentenceIndex: 0 };
+    if (chapter >= book.chapters.length) {
+      const last = book.chapters.length - 1;
+      return {
+        chapterIndex: last,
+        sentenceIndex: Math.max(0, flattenChapter(book.chapters[last]).length - 1),
+      };
+    }
     remaining -= 1;
   }
 
@@ -198,6 +209,16 @@ export function useSpeechPlayer({
   const blockedVoicesRef = useRef(new Set<string>());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const clipUrlRef = useRef("");
+  /**
+   * 正在播的这一段音频、它对应的文本和时间轴。
+   * 快进快退只要目标句还在这一段里，就能直接跳时间轴，不必重新合成。
+   */
+  const playingClipRef = useRef<{
+    bookId: string;
+    chapterIndex: number;
+    segment: SpeechBlock;
+    clip: SpeechClip;
+  } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const edgeDownRef = useRef(false);
   const waitingForClipRef = useRef(false);
@@ -350,6 +371,7 @@ export function useSpeechPlayer({
     store.cancelPending();
     silenceAudio();
     releaseClip();
+    playingClipRef.current = null;
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
@@ -371,6 +393,27 @@ export function useSpeechPlayer({
     setActiveVoiceURI("");
     setVoiceError("");
   }, [cancelHandover, clearTimers, releaseClip, silenceAudio, store]);
+
+  /** 把「现在读到哪一句」落到状态和进度上。播放推进和段内快进共用这一条路。 */
+  const commitSpan = useCallback(
+    (book: Book, chapterIndex: number, span: SpeechSpan) => {
+      if (locationRef.current?.sentenceId === span.sentenceId) return;
+      const nextLocation: SpeechLocation = {
+        bookId: book.id,
+        chapterIndex,
+        sentenceIndex: span.sentenceIndex,
+        sentenceId: span.sentenceId,
+      };
+      locationRef.current = nextLocation;
+      setLocation(nextLocation);
+      setCurrentSentenceId(span.sentenceId);
+      onProgressRef.current(
+        book.id,
+        positionFor(book, chapterIndex, span.sentenceIndex)
+      );
+    },
+    []
+  );
 
   /** 章节分段的结果按（章, 引擎, 长短）缓存，滚动播放时不必每段重排一次全章。 */
   const segmentFor = useCallback(
@@ -450,20 +493,7 @@ export function useSpeechPlayer({
 
       const applySpan = (span: SpeechSpan) => {
         if (token !== tokenRef.current) return;
-        if (locationRef.current?.sentenceId === span.sentenceId) return;
-        const nextLocation: SpeechLocation = {
-          bookId,
-          chapterIndex,
-          sentenceIndex: span.sentenceIndex,
-          sentenceId: span.sentenceId,
-        };
-        locationRef.current = nextLocation;
-        setLocation(nextLocation);
-        setCurrentSentenceId(span.sentenceId);
-        onProgressRef.current(
-          bookId,
-          positionFor(book, chapterIndex, span.sentenceIndex)
-        );
+        commitSpan(book, chapterIndex, span);
       };
 
       // 交接时从中途起播，高亮也要直接落在那一句上，不能从段首开始往下爬。
@@ -509,6 +539,8 @@ export function useSpeechPlayer({
         engineRef.current = "system";
         waitingForClipRef.current = false;
         setIsBuffering(false);
+        // 系统朗读没有可跳的时间轴，段内快进这条路在这里必须断掉。
+        playingClipRef.current = null;
         silenceAudio();
         releaseClip();
         const utterance = new SpeechSynthesisUtterance(segment.text);
@@ -653,6 +685,7 @@ export function useSpeechPlayer({
 
           waitingForClipRef.current = false;
           setIsBuffering(false);
+          playingClipRef.current = { bookId, chapterIndex, segment, clip };
           noteVoiceUsed(resolvedEdgeVoiceURI(settingsRef.current.voiceURI));
           setVoiceError("");
           void audio.play().catch(() => {
@@ -738,6 +771,7 @@ export function useSpeechPlayer({
     [
       cancelHandover,
       clearTimers,
+      commitSpan,
       holdForResume,
       noteVoiceUsed,
       releaseClip,
@@ -1044,9 +1078,39 @@ export function useSpeechPlayer({
       );
       if (!next) return;
       cancelHandover();
+
+      // 目标句还在正在播的这段音频里就直接跳时间轴。
+      //
+      // 走 playAt 的话，它会按新起点重新切一段短文本去合成——文本变了缓存键就变了，
+      // 哪怕音频早就在内存里也必然落空，于是每按一次快进都要等一轮云端合成。
+      // 实测稳态播的是 2000 字 / 52 句的长批次，±2 句几乎都落在段内，白等 3~4 秒。
+      // 暂停时不走这条路：那时按快进本来就该顺带起播，交给 playAt 更省事。
+      const playing = playingClipRef.current;
+      const audio = audioRef.current;
+      if (
+        playing &&
+        audio &&
+        playingRef.current &&
+        engineRef.current === "edge" &&
+        !waitingForClipRef.current &&
+        playing.bookId === book.id &&
+        playing.chapterIndex === next.chapterIndex
+      ) {
+        const span = spanForSentence(playing.segment, next.sentenceIndex);
+        if (span) {
+          try {
+            audio.currentTime = timeAt(playing.clip.timeline, span.start);
+            commitSpan(book, next.chapterIndex, span);
+            return;
+          } catch {
+            // 写不进去（元数据还没到位之类）就老实重开这一段。
+          }
+        }
+      }
+
       playAt(book.id, next.chapterIndex, next.sentenceIndex, { quick: true });
     },
-    [cancelHandover, playAt]
+    [cancelHandover, commitSpan, playAt]
   );
 
   const changeChapter = useCallback(

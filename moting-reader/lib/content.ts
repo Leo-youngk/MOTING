@@ -214,6 +214,96 @@ export function withImageSizes(
   };
 }
 
+/**
+ * 一章的规模上限。超过任一条就得再切开。
+ *
+ * 连续阅读靠章节窗口（一次只挂 CHAPTER_WINDOW 章）把 DOM 规模摁住，前提是「一章」
+ * 本身不能太大。实测《白鹿原》整本 47 万字落在一个 EPUB 文件里、被当成一章时，
+ * 正文一次性挂出 1616 段 / 15819 个句子 span，滚动掉到 4fps；按标题切开后是 141fps。
+ */
+const MAX_CHAPTER_CHARACTERS = 8000;
+const MAX_CHAPTER_BLOCKS = 200;
+
+export interface BlockSection {
+  title: string;
+  blocks: BlockInput[];
+}
+
+function sectionSize(blocks: BlockInput[]): { chars: number; count: number } {
+  return {
+    chars: blocks.reduce((sum, block) => sum + block.text.length, 0),
+    count: blocks.length,
+  };
+}
+
+function oversized(blocks: BlockInput[]): boolean {
+  const { chars, count } = sectionSize(blocks);
+  return chars > MAX_CHAPTER_CHARACTERS || count > MAX_CHAPTER_BLOCKS;
+}
+
+/** 连标题都没有、还是太长的，只能按规模硬切，至少保证单章挂得动。 */
+function splitOversized(section: BlockSection): BlockSection[] {
+  if (!oversized(section.blocks)) return [section];
+
+  const parts: BlockSection[] = [];
+  let chunk: BlockInput[] = [];
+  for (const block of section.blocks) {
+    chunk.push(block);
+    if (oversized(chunk)) {
+      parts.push({ title: `${section.title} · ${parts.length + 1}`, blocks: chunk });
+      chunk = [];
+    }
+  }
+  if (chunk.length) {
+    parts.push({ title: `${section.title} · ${parts.length + 1}`, blocks: chunk });
+  }
+  return parts;
+}
+
+/**
+ * 把一个文件解析出来的块切成若干章。
+ *
+ * EPUB 里「一个 spine 文件 = 一章」只是常见情况，不是规矩：实测《白鹿原》整本正文
+ * 都在 chapter001.xhtml 里，原书的 34 章是文件内部的 34 个 `<h2>`。所以文件规模正常时
+ * 原样返回（多数书本来就一文件一章，章内的 h2 是小节标题，拆开只会把目录搞碎），
+ * 只有明显超标的文件才按标题切。
+ *
+ * 切的时候只认最浅的那一级标题：h2 和 h3 混排时 h3 是章内小标题，不该各自成章。
+ */
+export function splitBlocksIntoSections(
+  blocks: BlockInput[],
+  fallbackTitle: string
+): BlockSection[] {
+  if (!blocks.length) return [];
+  if (!oversized(blocks)) return [{ title: fallbackTitle, blocks }];
+
+  const levels = blocks
+    .filter((block) => block.kind === "heading")
+    .map((block) => block.level ?? 3);
+  const splitLevel = levels.length ? Math.min(...levels) : 0;
+
+  const sections: BlockSection[] = [];
+  let current: BlockSection = { title: fallbackTitle, blocks: [] };
+
+  for (const block of blocks) {
+    const startsChapter =
+      splitLevel > 0 &&
+      block.kind === "heading" &&
+      (block.level ?? 3) === splitLevel &&
+      Boolean(block.text.trim());
+    if (startsChapter) {
+      if (current.blocks.length) sections.push(current);
+      // 标题本身变成章名，不再作为正文段落重复一遍。
+      current = { title: block.text, blocks: [] };
+      continue;
+    }
+    current.blocks.push(block);
+  }
+  if (current.blocks.length) sections.push(current);
+
+  return sections.flatMap(splitOversized);
+}
+
 const CHAPTER_PATTERN =
   /^(?:#{1,2}\s+.+|第[〇零一二三四五六七八九十百千万两0-9]+[章卷部篇回]\s*.{0,40}|(?:chapter|part)\s+[\divxlcdm]+.*)$/i;
 

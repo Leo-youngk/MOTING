@@ -3278,6 +3278,9 @@ function AiInlineAsk({
  */
 const READING_ANCHOR_TOP = 150;
 
+/** 滚动过程中最多隔这么久留一份「卸载兜底」快照。防抖落盘仍然是 400ms。 */
+const SNAPSHOT_INTERVAL_MS = 250;
+
 /**
  * 阅读位置的同步兜底。
  *
@@ -3689,7 +3692,13 @@ function ReaderScreen({
           // 句子是行内 span，锚点线经常落在行与行之间的空隙里，命中测试只能
           // 打到外层段落。这时就在这一段里按「逐行矩形」找真正压着线的那一句，
           // 不然这次滚动会被整个丢掉——进度停在上一次，回来就差一大截。
-          const byLine = sentenceCrossing(hit, y);
+          //
+          // 只能在段落里找。命中栈里除了段落还有 section、article 这些祖先，
+          // 在它们身上扫等于把整章的句子逐个量一遍：实测一章 15799 句时单次要 370ms，
+          // 而这是每个 scroll 事件都要走的路径，滚动会直接掉到 4fps。
+          const block = hit.closest<HTMLElement>(".reader-block");
+          if (!block) continue;
+          const byLine = sentenceCrossing(block, y);
           if (byLine) return byLine;
         }
       }
@@ -3745,12 +3754,22 @@ function ReaderScreen({
       if (anchor) commitAnchor(anchor);
     };
 
+    let snapshotAt = 0;
+
     const schedule = () => {
       // 当场先量一份快照：卸载时（退出阅读器、切书）effect 清理跑在 DOM 拆掉之后，
       // 那时再量是量不到的，只能靠这份快照把最后这一下补写进去。
-      const snapshot = measureAnchor();
+      //
+      // 但它只是兜底，不必每个 scroll 事件都量——滚动中 scroll 事件按帧来，
+      // 每次都量等于把一次强制同步布局摊进每一帧。隔一段留一份就够了，
+      // 正常路径仍然以「停下来那一刻重新量」的结果为准。
+      const now = performance.now();
+      if (now - snapshotAt >= SNAPSHOT_INTERVAL_MS) {
+        snapshotAt = now;
+        const snapshot = measureAnchor();
+        pendingSave = snapshot ? () => commitAnchor(snapshot) : null;
+      }
       if (pendingTimer) clearTimeout(pendingTimer);
-      pendingSave = snapshot ? () => commitAnchor(snapshot) : null;
       pendingTimer = setTimeout(() => {
         pendingTimer = null;
         pendingSave = null;

@@ -11,10 +11,12 @@ import {
   nextChapterRange,
   positionFor,
   sliceSpeechBlock,
+  splitBlocksIntoSections,
   splitIntoSentences,
   toSpeakableText,
   withImageSizes,
 } from "../lib/content.ts";
+import type { BlockInput } from "../lib/content.ts";
 
 test("按中文标点切分朗读句子", () => {
   assert.deepEqual(splitIntoSentences("第一句。第二句！还可以吗？可以；结束。"), [
@@ -327,4 +329,77 @@ test("连续滚动：两端同时进区时先往下接，读者是朝前走的",
     ),
     { start: 5, end: 6 }
   );
+});
+
+const longText = (chars: number) => "字".repeat(chars) + "。";
+
+test("切章：文件规模正常时原样返回，不把章内小标题拆成章", () => {
+  const sections = splitBlocksIntoSections(
+    [
+      { text: "开头一段。" },
+      { kind: "heading", level: 2, text: "第一节" },
+      { text: "小节正文。" },
+    ],
+    "第三章"
+  );
+  assert.equal(sections.length, 1);
+  assert.equal(sections[0].title, "第三章");
+  // 标题仍然留在正文里当小标题，没被吃掉
+  assert.equal(sections[0].blocks.length, 3);
+});
+
+test("切章：整本书塞进一个文件时按最浅一级标题切开", () => {
+  const blocks: BlockInput[] = [{ text: "题记。" }];
+  for (let i = 1; i <= 4; i++) {
+    blocks.push({ kind: "heading", level: 2, text: `第${i}章` });
+    blocks.push({ text: longText(2000) });
+    // h3 是章内小标题，不该各自成章
+    blocks.push({ kind: "heading", level: 3, text: `${i}.1 小节` });
+    blocks.push({ text: longText(500) });
+  }
+
+  const sections = splitBlocksIntoSections(blocks, "白鹿原");
+  assert.deepEqual(
+    sections.map((section) => section.title),
+    ["白鹿原", "第1章", "第2章", "第3章", "第4章"]
+  );
+  // 章标题变成章名，不再作为段落重复一遍；h3 留在正文里
+  assert.deepEqual(
+    sections[1].blocks.map((block) => block.kind ?? "text"),
+    ["text", "heading", "text"]
+  );
+  assert.equal(sections[0].blocks.length, 1);
+});
+
+test("切章：没有标题可切的超长文件按规模硬切", () => {
+  const blocks: BlockInput[] = Array.from({ length: 30 }, () => ({
+    text: longText(1000),
+  }));
+  const sections = splitBlocksIntoSections(blocks, "正文");
+  assert.ok(sections.length >= 3, `实际切了 ${sections.length} 段`);
+  assert.deepEqual(sections[0].title, "正文 · 1");
+  // 块不能被劈开，所以每段最多超出上限一个块的量
+  for (const section of sections) {
+    const chars = section.blocks.reduce((sum, b) => sum + b.text.length, 0);
+    assert.ok(chars <= 8000 + 1001, `单段 ${chars} 字，超了`);
+  }
+  // 一个块都不能丢
+  assert.equal(
+    sections.reduce((sum, s) => sum + s.blocks.length, 0),
+    blocks.length
+  );
+});
+
+test("切章：段落短但极多的文件也会被切开", () => {
+  const blocks: BlockInput[] = Array.from({ length: 900 }, () => ({
+    text: "很短的一句话。",
+  }));
+  const sections = splitBlocksIntoSections(blocks, "对白");
+  assert.ok(sections.length >= 4, `实际切了 ${sections.length} 段`);
+  for (const section of sections) {
+    assert.ok(
+      section.blocks.length <= 201,
+      `单段 ${section.blocks.length} 段，超了`
+    );
+  }
 });
