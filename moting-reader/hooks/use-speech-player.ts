@@ -61,6 +61,8 @@ interface SpeechPlayerState {
   prefetchVoices: (voiceURIs: string[]) => void;
   /** 关面板、跳章、换书时把还没人要的准备任务掐掉。 */
   cancelVoicePrefetch: () => void;
+  /** 进播放页时把首段提前备好，点下去就不用等合成。 */
+  prefetchStart: (book: Book, position: BookPosition) => void;
   /** 这一场用过的音色，最近的排前面。面板拿它决定预取谁。 */
   recentVoiceURIs: string[];
 }
@@ -966,6 +968,42 @@ export function useSpeechPlayer({
     store.cancelPending();
   }, [store]);
 
+  /**
+   * 把某个位置的首段提前备好。
+   *
+   * 点下播放键到出声这段等待，几乎全花在首段合成加下载上（实测 360 字约 5 秒）。
+   * 进到播放页多半就是要听，而从进页面到真正点下去总有几秒，正好拿来盖住这段耗时：
+   * 备中了的话 playAt 里 store.peek 会同步命中，立刻出声。
+   * 没备完也不亏——playAt 用同一个缓存键请求时会并进这条正在飞的请求，不会重来一遍。
+   */
+  const prefetchStart = useCallback(
+    (book: Book, position: BookPosition) => {
+      // 正在播的时候没什么可备的，接下一段自有 prefetchNext 管。
+      if (playingRef.current || waitingForClipRef.current) return;
+      // 云端已经不可用（退回了系统朗读），备了也用不上。
+      if (edgeDownRef.current) return;
+      const voiceURI = settingsRef.current.voiceURI;
+      if (voiceURI && !isEdgeVoiceURI(voiceURI)) return;
+      // 这里收整本书而不是 bookId：调用方是子组件，它的 effect 跑在父组件的
+      // `booksRef.current = books` 之前，那时按 id 去 booksRef 里找是找不到的
+      // （首次挂载时拿到的还是空数组，于是这个预取一次都没成功过）。
+      const chapter = book.chapters[position.chapterIndex];
+      if (!chapter) return;
+      // 必须和 playAt 起播时算出来的那一段完全一致，否则是另一个缓存键，白备。
+      const segment = segmentFromChapter(
+        chapter,
+        position.sentenceIndex,
+        "edge",
+        true
+      );
+      if (!segment) return;
+      const voiceName = edgeVoiceName(voiceURI);
+      if (store.has(segment.text, voiceName)) return;
+      store.prefetch(segment.text, voiceName);
+    },
+    [store]
+  );
+
   const start = useCallback(
     (bookId: string, position?: BookPosition) => {
       const book = booksRef.current.find((item) => item.id === bookId);
@@ -1279,6 +1317,7 @@ export function useSpeechPlayer({
     retryVoiceSwitch,
     prefetchVoices,
     cancelVoicePrefetch,
+    prefetchStart,
     recentVoiceURIs,
   };
 }

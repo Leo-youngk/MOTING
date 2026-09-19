@@ -4890,6 +4890,7 @@ interface PlayerControls {
   retryVoiceSwitch: () => void;
   prefetchVoices: (voiceURIs: string[]) => void;
   cancelVoicePrefetch: () => void;
+  prefetchStart: (book: Book, position: BookPosition) => void;
   recentVoiceURIs: string[];
 }
 
@@ -4936,6 +4937,17 @@ function PlayerScreen({
     if (activeForBook && (player.isPlaying || player.isPaused)) player.toggle();
     else player.start(book.id, basePosition);
   };
+
+  // 进到这一页多半就是要听。趁用户还在看封面、调速度的这几秒把首段备上，
+  // 点下去就能同步命中缓存、立刻出声，而不是干等一轮云端合成。
+  // 只认书和章句：播放中 basePosition 每句都在变，那时也不需要再备。
+  const prefetchStart = player.prefetchStart;
+  const prefetchChapter = basePosition.chapterIndex;
+  const prefetchSentence = basePosition.sentenceIndex;
+  useEffect(() => {
+    if (playing) return;
+    prefetchStart(book, positionFor(book, prefetchChapter, prefetchSentence));
+  }, [book, prefetchChapter, prefetchSentence, playing, prefetchStart]);
 
   /**
    * 打开音色面板就顺手把几个候选的短首段备上：用户开面板多半就是要换，

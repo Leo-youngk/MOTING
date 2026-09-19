@@ -7,6 +7,18 @@ import { handleZlibrary } from "./zlibrary";
 
 const MAX_TTS_TEXT_LENGTH = 5000;
 const TTS_CHUNK_LENGTH = 360;
+/**
+ * 点下播放键之后听到声音的时间，几乎全花在这一次合成上，而合成耗时基本跟字数走
+ * （实测约「固定开销 + 18ms/字」）。首段刚好也是 360 字，按 TTS_CHUNK_LENGTH 切只有
+ * 一片，下面那个并发度等于没用上。切细到 120 字让它真正并发：同样 360 字，
+ * 1 片要 17.8s，3 片并发只要 3.6s。
+ */
+const QUICK_TTS_CHUNK_LENGTH = 120;
+/**
+ * 超过这个长度的就是播放中后台预取的长批次，早几秒晚几秒用户感觉不到，
+ * 继续用粗分片——4800 字按 120 切要 40 个子请求，会顶到 Workers 的 subrequest 上限。
+ */
+const QUICK_SYNTH_MAX_LENGTH = 600;
 const TTS_CONCURRENCY = 4;
 const MAX_TTS_AUDIO_BYTES = 20 * 1024 * 1024;
 const MAX_AI_MODELS_BODY_BYTES = 32 * 1024;
@@ -314,7 +326,12 @@ async function synthesizeLongSpeech(
   voice: string,
   signal: AbortSignal
 ) {
-  const chunks = splitSpeechText(text, TTS_CHUNK_LENGTH);
+  const chunks = splitSpeechText(
+    text,
+    text.length <= QUICK_SYNTH_MAX_LENGTH
+      ? QUICK_TTS_CHUNK_LENGTH
+      : TTS_CHUNK_LENGTH
+  );
   const results = new Array<Awaited<ReturnType<typeof synthesizeSpeech>>>(
     chunks.length
   );
