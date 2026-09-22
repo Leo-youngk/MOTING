@@ -171,11 +171,24 @@ export function Bookstore({
   const [error, setError] = useState("");
 
   const [category, setCategory] = useState<string>(WEREAD_CATEGORIES[0]);
+  /**
+   * 分类下的两种看法，缺一不可：
+   * rank 是挑出来的好书（按推荐值，卡评分人数），browse 是这个分类里能一直往下翻的全部书。
+   * 只给 rank 等于逼着用户只能看「神作」，想随便逛就没地方去。
+   */
+  const [mode, setMode] = useState<"rank" | "browse">("rank");
   const [rank, setRank] = useState<WereadBook[]>([]);
   const [rankPool, setRankPool] = useState(0);
   const [rankLoading, setRankLoading] = useState(true);
   const [rankError, setRankError] = useState("");
   const [rankAll, setRankAll] = useState(false);
+
+  const [browse, setBrowse] = useState<WereadBook[]>([]);
+  const [browseIdx, setBrowseIdx] = useState(0);
+  const [browseMore, setBrowseMore] = useState(false);
+  const [browseLoading, setBrowseLoading] = useState(false);
+  const [browseError, setBrowseError] = useState("");
+  const browseController = useRef<AbortController | null>(null);
 
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<WereadBook[] | null>(null);
@@ -295,9 +308,45 @@ export function Bookstore({
 
   function pickCategory(next: string) {
     if (next === category) return;
+    browseController.current?.abort();
     setRankLoading(true);
     setRankAll(false);
+    setBrowse([]);
+    setBrowseIdx(0);
+    setBrowseMore(false);
+    setBrowseError("");
     setCategory(next);
+    if (mode === "browse") loadBrowse(next, 0);
+  }
+
+  /** 分类浏览直接复用搜索接口——分类词本来就是当关键词搜的。 */
+  function loadBrowse(target: string, fromIdx: number) {
+    browseController.current?.abort();
+    const controller = new AbortController();
+    browseController.current = controller;
+    setBrowseLoading(true);
+    searchWeread(target, fromIdx, 20, controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) return;
+        setBrowse((current) => (fromIdx ? [...current, ...data.books] : data.books));
+        setBrowseIdx(data.nextIdx);
+        setBrowseMore(data.hasMore);
+        setBrowseError("");
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) {
+          setBrowseError(reason instanceof Error ? reason.message : "这个分类暂时打不开");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setBrowseLoading(false);
+      });
+  }
+
+  function pickMode(next: "rank" | "browse") {
+    if (next === mode) return;
+    setMode(next);
+    if (next === "browse" && !browse.length) loadBrowse(category, 0);
   }
 
   function runSearch(keyword: string, fromIdx: number) {
@@ -505,12 +554,13 @@ export function Bookstore({
             <div className="store-lane__head">
               <div>
                 <h3>
-                  <Trophy size={15} aria-hidden="true" />
-                  {category}榜
+                  {mode === "rank" ? <Trophy size={15} aria-hidden="true" /> : null}
+                  {mode === "rank" ? `${category}榜` : category}
                 </h3>
                 <small>
-                  按微信读书推荐值排序
-                  {rankPool ? ` · 从 ${rankPool} 本里挑的` : ""}，墨听自己排的
+                  {mode === "rank"
+                    ? `按微信读书推荐值排序${rankPool ? ` · 从 ${rankPool} 本里挑的` : ""}，墨听自己排的`
+                    : "这个分类下的书，按微信读书的顺序，可以一直往下翻"}
                 </small>
               </div>
             </div>
@@ -528,7 +578,52 @@ export function Bookstore({
               ))}
             </div>
 
-            {rankLoading ? (
+            <div className="store-modes" role="group" aria-label="查看方式">
+              <button type="button" aria-pressed={mode === "rank"} onClick={() => pickMode("rank")}>
+                榜单
+              </button>
+              <button
+                type="button"
+                aria-pressed={mode === "browse"}
+                onClick={() => pickMode("browse")}
+              >
+                全部
+              </button>
+            </div>
+
+            {mode === "browse" ? (
+              browseError && !browse.length ? (
+                <p className="store-error" role="alert">{browseError}</p>
+              ) : !browse.length && browseLoading ? (
+                <RankSkeleton />
+              ) : (
+                <>
+                  <div className="store-ranklist">
+                    {browse.map((book, index) => (
+                      <StoreRow
+                        key={book.bookId}
+                        book={book}
+                        priority={index < RANK_PREVIEW}
+                        onOpen={openBook}
+                      />
+                    ))}
+                  </div>
+                  {browseLoading ? (
+                    <p className="store-muted store-rank-empty" role="status">正在加载…</p>
+                  ) : browseMore ? (
+                    <button
+                      type="button"
+                      className="secondary-button store-more"
+                      onClick={() => loadBrowse(category, browseIdx)}
+                    >
+                      再看 20 本（已看 {browse.length} 本）
+                    </button>
+                  ) : (
+                    <p className="store-muted store-rank-empty">这个分类翻到底了。</p>
+                  )}
+                </>
+              )
+            ) : rankLoading ? (
               <RankSkeleton />
             ) : rankError ? (
               <p className="store-error" role="alert">{rankError}</p>

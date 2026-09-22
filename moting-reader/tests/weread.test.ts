@@ -282,17 +282,87 @@ test("榜单按推荐值排序，并卡掉评分人数不足的", async () => {
       };
     })
   );
-  assert.equal(pagesAsked, 3, "攒池要翻够页数");
+  assert.equal(pagesAsked, 5, "攒池要翻够页数");
   const data = (await response.json()) as {
     category: string;
     books: WereadBook[];
     poolSize: number;
   };
   assert.equal(data.category, "科幻");
-  assert.equal(data.poolSize, 6);
+  assert.equal(data.poolSize, 10);
   assert.deepEqual(
     data.books.map((b) => b.bookId),
-    ["hot40", "hot20", "hot0"],
+    ["hot80", "hot60", "hot40", "hot20", "hot0"],
     "只有 12 个人打分的 99% 不能上榜"
   );
+});
+
+test("攒池缺页时只做短缓存，别把坏运气钉在缓存里", async () => {
+  const seen: number[] = [];
+  const response = await handleWeread(
+    request("/api/weread/rank?category=%E5%B0%8F%E8%AF%B4"),
+    env,
+    undefined,
+    gateway((body) => {
+      const idx = Number(body.maxIdx);
+      seen.push(idx);
+      // 第 3 页怎么试都给不出东西，其余正常。
+      if (idx === 40) return { results: [] };
+      return {
+        results: [
+          {
+            books: [
+              {
+                bookInfo: {
+                  bookId: `b${idx}`,
+                  title: `书${idx}`,
+                  author: "A",
+                  newRating: 900,
+                  newRatingCount: 9000,
+                },
+              },
+            ],
+          },
+        ],
+      };
+    })
+  );
+  assert.equal(
+    seen.filter((i) => i === 40).length,
+    2,
+    "拿不到的那一页要重试一次"
+  );
+  assert.match(
+    response.headers.get("cache-control") ?? "",
+    /max-age=300/,
+    "缺页的结果只缓存 5 分钟"
+  );
+  const data = (await response.json()) as { books: WereadBook[]; poolSize: number };
+  assert.equal(data.poolSize, 4, "缺的那页不凑数，其余照常上榜");
+});
+
+test("攒池完整时按正常时长缓存", async () => {
+  const response = await handleWeread(
+    request("/api/weread/rank?category=%E5%B0%8F%E8%AF%B4"),
+    env,
+    undefined,
+    gateway((body) => ({
+      results: [
+        {
+          books: [
+            {
+              bookInfo: {
+                bookId: `b${body.maxIdx}`,
+                title: "书",
+                author: "A",
+                newRating: 900,
+                newRatingCount: 9000,
+              },
+            },
+          ],
+        },
+      ],
+    }))
+  );
+  assert.match(response.headers.get("cache-control") ?? "", /max-age=21600/);
 });

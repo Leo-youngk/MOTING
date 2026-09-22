@@ -28,12 +28,25 @@ const COVER_CACHE_SECONDS = 60 * 60 * 24 * 30;
 /** 推荐和相似推荐的回包不带评分，得按本补查。并发度照搬 TTS 那边的经验值。 */
 const ENRICH_CONCURRENCY = 6;
 const MAX_ENRICH = 12;
-/** 榜单：翻几页攒池、上榜的评分人数下限、榜长。 */
-const RANK_PAGES = 3;
+/**
+ * 榜单：翻几页攒池、上榜的评分人数下限、榜长。
+ * 分类搜索能一直往下翻（实测 220 本还 hasMore=1 且无重复），池子深浅只是取舍：
+ * 翻 5 页约 100 本，「小说」能筛出 40 本可信评分，「科幻」只有 14 本——
+ * 后者就让榜短一点，不要为了凑长度把门槛降下去。想随便逛的走「全部」那条路。
+ */
+const RANK_PAGES = 5;
 const RANK_PAGE_SIZE = 20;
 const RANK_MIN_RATING_COUNT = 500;
-const RANK_LIMIT = 20;
+const RANK_LIMIT = 40;
 const RANK_CACHE_SECONDS = 60 * 60 * 6;
+/** 攒池缺页时的短缓存，让下一次访问有机会补全。 */
+const RANK_DEGRADED_CACHE_SECONDS = 60 * 5;
+/**
+ * 榜单算法版本，进缓存键。
+ * 改了排序/筛选/重试这类逻辑就加一，否则旧结果会一直供到 6 小时后。
+ * 池深和榜长本身也在键里，那两个不用靠这个版本号。
+ */
+const RANK_VERSION = "2";
 
 interface WereadEnv {
   WEREAD_API_KEY?: string;
@@ -245,12 +258,22 @@ async function enrichRatings(
   });
 }
 
+/**
+ * build 可以返回 { data, seconds } 来覆盖默认 TTL。
+ * 用处：结果本身是降级的（比如攒池时有页没取回来）就别按正常时长缓存，
+ * 否则一次运气不好的结果会被钉在缓存里好几个小时。
+ */
+interface Built {
+  data: unknown;
+  seconds?: number;
+}
+
 async function cached(
   cache: Cache | null,
   ctx: ExecutionContext | undefined,
   key: Request,
   seconds: number,
-  build: () => Promise<unknown>
+  build: () => Promise<Built>
 ): Promise<Response> {
   if (cache) {
     try {
@@ -260,9 +283,10 @@ async function cached(
       // Cache API 在本地预览下不可用时照常回源。
     }
   }
-  const response = Response.json(await build(), {
+  const built = await build();
+  const response = Response.json(built.data, {
     headers: {
-      "cache-control": `public, max-age=${seconds}`,
+      "cache-control": `public, max-age=${built.seconds ?? seconds}`,
       "x-content-type-options": "nosniff",
     },
   });
@@ -300,10 +324,12 @@ async function handleSearch(
   return cached(cache, ctx, key, SEARCH_CACHE_SECONDS, async () => {
     const data = await searchPage(keyword, maxIdx, size, env, signal, fetcher);
     return {
-      books: data.books,
-      hasMore: data.hasMore,
-      nextIdx: maxIdx + data.books.length,
-    } satisfies WereadSearchResult;
+      data: {
+        books: data.books,
+        hasMore: data.hasMore,
+        nextIdx: maxIdx + data.books.length,
+      } satisfies WereadSearchResult,
+    };
   });
 }
 
@@ -366,26 +392,52 @@ async function handleRank(
   if (/[\u0000-\u001f\u007f]/.test(category)) return errorResponse("分类含有无效字符", 400);
   const minCount = parseCount(url.searchParams.get("minCount"), RANK_MIN_RATING_COUNT, 100000);
 
+  // 池深和榜长必须进缓存键：调了参数而键不变的话，旧结果会一直供到 6 小时后才换。
   const key = new Request(
-    `${url.origin}/api/weread/rank?${new URLSearchParams({ category, minCount: String(minCount) })}`
+    `${url.origin}/api/weread/rank?${new URLSearchParams({
+      category,
+      minCount: String(minCount),
+      pages: String(RANK_PAGES),
+      limit: String(RANK_LIMIT),
+      v: RANK_VERSION,
+    })}`
   );
   return cached(cache, ctx, key, RANK_CACHE_SECONDS, async () => {
+    // 上游偶尔会有一页少给或不给，重试一次基本就能补上。
+    const fetchPage = async (index: number) => {
+      const maxIdx = index * RANK_PAGE_SIZE;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const page = await searchPage(category, maxIdx, RANK_PAGE_SIZE, env, signal, fetcher);
+          if (page.books.length) return page.books;
+        } catch {
+          if (signal.aborted) return null;
+        }
+      }
+      return null;
+    };
     const pages = await Promise.all(
-      Array.from({ length: RANK_PAGES }, (_, index) =>
-        searchPage(category, index * RANK_PAGE_SIZE, RANK_PAGE_SIZE, env, signal, fetcher).catch(
-          () => ({ books: [] as WereadBook[], hasMore: false })
-        )
-      )
+      Array.from({ length: RANK_PAGES }, (_, index) => fetchPage(index))
     );
+
     const pool = new Map<string, WereadBook>();
+    let missing = 0;
     for (const page of pages) {
-      for (const book of page.books) if (!pool.has(book.bookId)) pool.set(book.bookId, book);
+      if (!page) {
+        missing += 1;
+        continue;
+      }
+      for (const book of page) if (!pool.has(book.bookId)) pool.set(book.bookId, book);
     }
     const ranked = [...pool.values()]
       .filter((book) => book.rating !== null && (book.ratingCount ?? 0) >= minCount)
       .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))
       .slice(0, RANK_LIMIT);
-    return { category, books: ranked, poolSize: pool.size } satisfies WereadRank;
+    return {
+      data: { category, books: ranked, poolSize: pool.size } satisfies WereadRank,
+      // 池子不完整就别按 6 小时缓存，不然一次坏运气会让榜单短上半天。
+      seconds: missing ? RANK_DEGRADED_CACHE_SECONDS : undefined,
+    };
   });
 }
 
@@ -407,11 +459,13 @@ async function handleBook(
     if (!book) throw new GatewayError("微信读书没有返回这本书的资料");
     const detail = record(data.newRatingDetail);
     return {
-      ...book,
-      ratingGood: count(detail?.good),
-      ratingFair: count(detail?.fair),
-      ratingPoor: count(detail?.poor),
-    } satisfies WereadBookDetail;
+      data: {
+        ...book,
+        ratingGood: count(detail?.good),
+        ratingFair: count(detail?.fair),
+        ratingPoor: count(detail?.poor),
+      } satisfies WereadBookDetail,
+    };
   });
 }
 
@@ -438,11 +492,13 @@ async function handleRecommend(
       fetcher
     );
     return {
-      books,
-      nextIdx: maxIdx + books.length,
-      hasMore: books.length >= size,
-      sessionId: null,
-    } satisfies WereadFeed;
+      data: {
+        books,
+        nextIdx: maxIdx + books.length,
+        hasMore: books.length >= size,
+        sessionId: null,
+      } satisfies WereadFeed,
+    };
   });
 }
 
@@ -481,11 +537,13 @@ async function handleSimilar(
       fetcher
     );
     return {
-      books,
-      nextIdx: maxIdx + books.length,
-      hasMore: books.length >= size,
-      sessionId: text(wrapper?.sessionId, 64),
-    } satisfies WereadFeed;
+      data: {
+        books,
+        nextIdx: maxIdx + books.length,
+        hasMore: books.length >= size,
+        sessionId: text(wrapper?.sessionId, 64),
+      } satisfies WereadFeed,
+    };
   });
 }
 
