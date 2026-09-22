@@ -4,6 +4,7 @@ import type {
   WereadBook,
   WereadBookDetail,
   WereadFeed,
+  WereadRank,
   WereadSearchResult,
 } from "../lib/weread-types.ts";
 
@@ -27,6 +28,12 @@ const COVER_CACHE_SECONDS = 60 * 60 * 24 * 30;
 /** 推荐和相似推荐的回包不带评分，得按本补查。并发度照搬 TTS 那边的经验值。 */
 const ENRICH_CONCURRENCY = 6;
 const MAX_ENRICH = 12;
+/** 榜单：翻几页攒池、上榜的评分人数下限、榜长。 */
+const RANK_PAGES = 3;
+const RANK_PAGE_SIZE = 20;
+const RANK_MIN_RATING_COUNT = 500;
+const RANK_LIMIT = 20;
+const RANK_CACHE_SECONDS = 60 * 60 * 6;
 
 interface WereadEnv {
   WEREAD_API_KEY?: string;
@@ -291,26 +298,94 @@ async function handleSearch(
     `${url.origin}/api/weread/search?${new URLSearchParams({ keyword, maxIdx: String(maxIdx), count: String(size) })}`
   );
   return cached(cache, ctx, key, SEARCH_CACHE_SECONDS, async () => {
-    const data = await gateway(
-      "/store/search",
-      { keyword, scope: 10, count: size, maxIdx },
-      env,
-      signal,
-      fetcher
-    );
-    const groups = Array.isArray(data.results) ? data.results : [];
-    const group = record(groups[0]);
-    const raw = Array.isArray(group?.books) ? group.books : [];
-    const books = raw
-      .map(normalizeBook)
-      .filter((book): book is WereadBook => book !== null);
-    const total = count(group?.scopeCount) ?? books.length;
+    const data = await searchPage(keyword, maxIdx, size, env, signal, fetcher);
     return {
-      books,
-      total,
-      hasMore: data.hasMore === 1 || maxIdx + books.length < total,
-      nextIdx: maxIdx + books.length,
+      books: data.books,
+      hasMore: data.hasMore,
+      nextIdx: maxIdx + data.books.length,
     } satisfies WereadSearchResult;
+  });
+}
+
+/**
+ * scope=10 的回包是**一本书一个分组**（20 个分组各 1 本，scopeCount 都是 1），
+ * 不是「一个分组装 20 本」。只读 results[0] 会永远只拿到一本书——这里必须把所有
+ * 分组摊平。scope=0 的回包才是按「电子书 / 作者 / 书单」分组的，首个分组常常是空的。
+ */
+function collectBooks(data: Record<string, unknown>): WereadBook[] {
+  const groups = Array.isArray(data.results) ? data.results : [];
+  const books: WereadBook[] = [];
+  const seen = new Set<string>();
+  for (const value of groups) {
+    const group = record(value);
+    const raw = Array.isArray(group?.books) ? group.books : [];
+    for (const item of raw) {
+      const book = normalizeBook(item);
+      if (!book || seen.has(book.bookId)) continue;
+      seen.add(book.bookId);
+      books.push(book);
+    }
+  }
+  return books;
+}
+
+async function searchPage(
+  keyword: string,
+  maxIdx: number,
+  size: number,
+  env: WereadEnv,
+  signal: AbortSignal,
+  fetcher: typeof fetch
+): Promise<{ books: WereadBook[]; hasMore: boolean }> {
+  const data = await gateway(
+    "/store/search",
+    { keyword, scope: 10, count: size, maxIdx },
+    env,
+    signal,
+    fetcher
+  );
+  const books = collectBooks(data);
+  return { books, hasMore: data.hasMore === 1 && books.length > 0 };
+}
+
+/**
+ * 分类榜。微信读书官方没有排行榜接口，这里按分类词连翻几页搜索攒出书池，
+ * 卡掉评分人数不足的，再按推荐值排序——**是墨听自己排的，不是官方榜单**，
+ * 界面上必须写明。实测一个分类翻 3 页约 60 本，其中 13~38 本评分可信。
+ */
+async function handleRank(
+  url: URL,
+  env: WereadEnv,
+  signal: AbortSignal,
+  fetcher: typeof fetch,
+  cache: Cache | null,
+  ctx?: ExecutionContext
+): Promise<Response> {
+  const category = url.searchParams.get("category")?.trim() ?? "";
+  if (!category || category.length > MAX_KEYWORD_LENGTH) return errorResponse("分类无效", 400);
+  if (/[\u0000-\u001f\u007f]/.test(category)) return errorResponse("分类含有无效字符", 400);
+  const minCount = parseCount(url.searchParams.get("minCount"), RANK_MIN_RATING_COUNT, 100000);
+
+  const key = new Request(
+    `${url.origin}/api/weread/rank?${new URLSearchParams({ category, minCount: String(minCount) })}`
+  );
+  return cached(cache, ctx, key, RANK_CACHE_SECONDS, async () => {
+    const pages = await Promise.all(
+      Array.from({ length: RANK_PAGES }, (_, index) =>
+        searchPage(category, index * RANK_PAGE_SIZE, RANK_PAGE_SIZE, env, signal, fetcher).catch(
+          () => ({ books: [] as WereadBook[], hasMore: false })
+        )
+      )
+    );
+    const pool = new Map<string, WereadBook>();
+    for (const page of pages) {
+      for (const book of page.books) if (!pool.has(book.bookId)) pool.set(book.bookId, book);
+    }
+    const ranked = [...pool.values()]
+      .filter((book) => book.rating !== null && (book.ratingCount ?? 0) >= minCount)
+      .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))
+      .slice(0, RANK_LIMIT);
+    return { category, books: ranked, poolSize: pool.size } satisfies WereadRank;
   });
 }
 
@@ -484,6 +559,8 @@ export async function handleWeread(
     switch (url.pathname) {
       case "/api/weread/search":
         return await handleSearch(url, env, signal, fetcher, cache, ctx);
+      case "/api/weread/rank":
+        return await handleRank(url, env, signal, fetcher, cache, ctx);
       case "/api/weread/book":
         return await handleBook(url, env, signal, fetcher, cache, ctx);
       case "/api/weread/recommend":

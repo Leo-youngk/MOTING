@@ -52,10 +52,14 @@
   gap: 14px;
   overflow-x: auto;
   padding-bottom: 4px;
-  scroll-snap-type: x proximity;
   scrollbar-width: none;
-  /* iOS Safari 不认 overscroll-behavior，横向只能靠 touch-action 拦。 */
-  touch-action: pan-x;
+  /*
+   * 这里**不能**写 touch-action: pan-x。横滑轨道占了书城大半个屏，
+   * 一旦声明 pan-x 就等于禁掉这块区域的竖向滑动，手指落在卡片上往下滑页面不动，
+   * 手感就是「卡」。让浏览器按手势方向自己判断才对。
+   * （CLAUDE.md 里那条「横向滑动只能用 touch-action 拦」说的是阅读正文页，
+   *   那里要禁的是横滑；轨道这里恰恰相反，别照搬。）
+   */
 }
 
 .store-lane__track::-webkit-scrollbar {
@@ -71,7 +75,6 @@
   gap: 5px;
   padding: 0;
   background: transparent;
-  scroll-snap-align: start;
   text-align: left;
 }
 
@@ -425,4 +428,82 @@
 
 @media (prefers-reduced-motion: reduce) {
   .store-skeleton { animation: none; }
+}
+
+
+/* 榜单分类 chips */
+.store-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  margin-bottom: 14px;
+  scrollbar-width: none;
+}
+
+.store-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.store-chips button {
+  flex: 0 0 auto;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--glass-tint);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.store-chips button[aria-pressed="true"] {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.store-ranklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 名次。宽度写死，1 和 10 对齐同一条竖线。 */
+.store-rank {
+  width: 22px;
+  flex: 0 0 auto;
+  color: var(--subtle);
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.store-rank--top {
+  color: var(--accent);
+  font-size: 17px;
+}
+
+.store-rank-empty {
+  padding: 22px 4px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.store-lane__more {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.store-more {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.store-skeleton--row {
+  width: 100%;
+  height: 72px;
+  border-radius: 14px;
 }

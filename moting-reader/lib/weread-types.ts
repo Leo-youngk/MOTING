@@ -49,7 +49,6 @@ export interface WereadBookDetail extends WereadBook {
 
 export interface WereadSearchResult {
   books: WereadBook[];
-  total: number;
   hasMore: boolean;
   nextIdx: number;
 }
@@ -63,7 +62,7 @@ export interface WereadFeed {
 }
 
 /** 书城里的一条流。 */
-export type WereadLaneKind = "recommend" | "similar" | "top-rated";
+export type WereadLaneKind = "recommend" | "similar";
 
 export interface WereadLane {
   kind: WereadLaneKind;
@@ -73,3 +72,29 @@ export interface WereadLane {
   subtitle: string;
   books: WereadBook[];
 }
+
+export interface WereadRank {
+  category: string;
+  books: WereadBook[];
+  /** 排名是从多大的池子里挑出来的，界面上要如实说。 */
+  poolSize: number;
+}
+
+/**
+ * 榜单分类。微信读书没有分类浏览接口，这些词是拿去当搜索关键词用的——
+ * 实测 scope=10 搜「科幻」「历史」这类词能翻出上千条，足够攒出一条榜。
+ */
+export const WEREAD_CATEGORIES = [
+  "小说",
+  "科幻",
+  "悬疑",
+  "历史",
+  "传记",
+  "心理学",
+  "哲学",
+  "经济",
+  "社会",
+  "成长",
+] as const;
+
+export type WereadCategory = (typeof WEREAD_CATEGORIES)[number];

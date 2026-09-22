@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { handleWeread } from "../worker/weread.ts";
-import { buildTopRated, wereadCoverUrl } from "../lib/weread.ts";
+import { wereadCoverUrl } from "../lib/weread.ts";
 import {
   formatRatingCount,
   formatReadingCount,
@@ -39,23 +39,6 @@ function gateway(
 const unused = (() => {
   throw new Error("Unexpected upstream request");
 }) as unknown as typeof fetch;
-
-function wereadBook(overrides: Partial<WereadBook> = {}): WereadBook {
-  return {
-    bookId: "1",
-    title: "书",
-    author: "作者",
-    translator: null,
-    coverUrl: null,
-    intro: null,
-    category: null,
-    rating: 900,
-    ratingCount: 10000,
-    ratingLabel: "神作",
-    readingCount: 100,
-    ...overrides,
-  };
-}
 
 test("推荐值是千分制，930 要显示成 93.0%", () => {
   assert.equal(ratingPercent(930), "93.0%");
@@ -106,7 +89,7 @@ test("搜索走 scope=10 电子书，并把评分从外层收进书里", async (
     })
   );
   assert.equal(response.status, 200);
-  const data = (await response.json()) as { books: WereadBook[]; total: number };
+  const data = (await response.json()) as { books: WereadBook[] };
   assert.equal(data.books.length, 1, "缺 bookId 的条目要丢掉");
   assert.deepEqual(data.books[0], {
     bookId: "834464",
@@ -121,7 +104,6 @@ test("搜索走 scope=10 电子书，并把评分从外层收进书里", async (
     ratingLabel: "神作",
     readingCount: 3396,
   });
-  assert.equal(data.total, 42);
 });
 
 test("相似推荐必须同时带 maxIdx 和 sessionId，否则网关回参数格式错误", async () => {
@@ -230,28 +212,87 @@ test("封面转发只放行微信读书自己的图床", async () => {
   }
 });
 
-test("高分好书卡评分人数门槛，够不上就宁可空着", () => {
-  const pool = [
-    wereadBook({ bookId: "a", rating: 960, ratingCount: 30 }),
-    wereadBook({ bookId: "b", rating: 880, ratingCount: 50000 }),
-    wereadBook({ bookId: "c", rating: 930, ratingCount: 90000 }),
-    wereadBook({ bookId: "c", rating: 930, ratingCount: 90000 }),
-    wereadBook({ bookId: "d", rating: null, ratingCount: 90000 }),
-  ];
-  const top = buildTopRated(pool, 500, 5);
-  assert.deepEqual(
-    top.map((b) => b.bookId),
-    ["c", "b"],
-    "只有 30 人打分的 96% 不算数，重复的书也只留一条"
-  );
-  assert.deepEqual(buildTopRated([wereadBook({ ratingCount: 10 })], 500, 5), []);
-});
-
-test("列表封面取缩略图档，详情页才取大图", () => {
+test("封面按渲染尺寸选档：行 t4_、卡片 t7_、详情 t9_", () => {
   const large = "https://cdn.weread.qq.com/weread/cover/13/cpplatform_x/t6_cpplatform_x1784541125.jpg";
-  assert.match(wereadCoverUrl(large, "thumb"), /%2Fs_cpplatform_x1784541125\.jpg/);
-  assert.match(wereadCoverUrl(large), /%2Ft6_cpplatform_x1784541125\.jpg/);
+  assert.match(wereadCoverUrl(large, "card"), /%2Ft7_cpplatform_x1784541125\.jpg/);
+  assert.match(wereadCoverUrl(large), /%2Ft9_cpplatform_x1784541125\.jpg/);
   // 本来就是缩略图的地址原样放过，不要造一个不存在的变体出来。
   const small = "https://wfqqreader-1252317822.image.myqcloud.com/cover/457/22946457/s_22946457.jpg";
-  assert.match(wereadCoverUrl(small, "thumb"), /%2Fs_22946457\.jpg/);
+  // s_ 那档太小（70×101），卡片上糊；任意档位都要能互转。
+  assert.match(wereadCoverUrl(small, "card"), /%2Ft7_22946457\.jpg/);
+  assert.match(wereadCoverUrl(small, "row"), /%2Ft4_22946457\.jpg/);
+});
+
+test("搜索要把所有分组摊平——scope=10 是一本书一个分组", async () => {
+  const response = await handleWeread(
+    request("/api/weread/search?keyword=%E7%A7%91%E5%B9%BB&count=20"),
+    env,
+    undefined,
+    gateway(() => ({
+      hasMore: 1,
+      // 真实回包长这样：20 个分组，每组 scopeCount=1、books 里就一本。
+      results: Array.from({ length: 3 }, (_, i) => ({
+        title: "电子书",
+        scopeCount: 1,
+        books: [{ bookInfo: { bookId: `b${i}`, title: `书${i}`, author: "作者" } }],
+      })),
+    }))
+  );
+  const data = (await response.json()) as { books: WereadBook[]; hasMore: boolean };
+  assert.equal(data.books.length, 3, "只读 results[0] 会永远只拿到一本书");
+  assert.equal(data.hasMore, true);
+});
+
+test("榜单按推荐值排序，并卡掉评分人数不足的", async () => {
+  let pagesAsked = 0;
+  const response = await handleWeread(
+    request("/api/weread/rank?category=%E7%A7%91%E5%B9%BB"),
+    env,
+    undefined,
+    gateway((body) => {
+      assert.equal(body.keyword, "科幻");
+      pagesAsked += 1;
+      const idx = Number(body.maxIdx);
+      return {
+        hasMore: 1,
+        results: [
+          {
+            books: [
+              {
+                bookInfo: {
+                  bookId: `hot${idx}`,
+                  title: `热门${idx}`,
+                  author: "A",
+                  newRating: 900 + idx,
+                  newRatingCount: 9000,
+                },
+              },
+              {
+                bookInfo: {
+                  bookId: `thin${idx}`,
+                  title: `冷门${idx}`,
+                  author: "B",
+                  newRating: 990,
+                  newRatingCount: 12,
+                },
+              },
+            ],
+          },
+        ],
+      };
+    })
+  );
+  assert.equal(pagesAsked, 3, "攒池要翻够页数");
+  const data = (await response.json()) as {
+    category: string;
+    books: WereadBook[];
+    poolSize: number;
+  };
+  assert.equal(data.category, "科幻");
+  assert.equal(data.poolSize, 6);
+  assert.deepEqual(
+    data.books.map((b) => b.bookId),
+    ["hot40", "hot20", "hot0"],
+    "只有 12 个人打分的 99% 不能上榜"
+  );
 });

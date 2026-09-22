@@ -1,30 +1,50 @@
 import type {
-  WereadBook,
   WereadBookDetail,
   WereadFeed,
+  WereadRank,
   WereadSearchResult,
 } from "./weread-types";
 
 export class WereadError extends Error {}
 
 /**
- * 图床同一张封面有几档尺寸，靠文件名前缀区分：`s_` 是缩略图，`t6_`/`t7_`/`t9_` 是大图。
- * 实测同一张图 s_ 6.5KB、t6_ 45KB——书城一屏 20 张卡，选错档就是 900KB 对 130KB。
+ * 图床同一张封面有整整一梯尺寸，靠文件名前缀区分（实测）：
+ * s_ 70×101 · t1_ 84×121 · t4_ 174×251 · t6_ 250×361 · t7_ 285×412 · t9_ 428×619。
+ *
+ * 选档只看「渲染宽度 × 设备像素比」：104px 的卡片在 iPhone 3 倍屏上要 312px，
+ * 拿 s_ 那档等于放大四倍半，糊得一眼能看出来——这个坑踩过一次。
+ * 两个图床的任意两档都能互转，所以传进来是哪一档都不影响。
  */
-const COVER_VARIANT = /\/t\d+_/;
+const COVER_VARIANT = /\/(?:s|t\d+)_/;
+const COVER_SIZES = {
+  /** 行式列表的小封面：50 CSS px，3 倍屏要 150。 */
+  row: "t4_",
+  /** 横滑卡片：104 CSS px，3 倍屏要 312。 */
+  card: "t7_",
+  /** 详情页大图，以及要压进书库存起来的封面。 */
+  large: "t9_",
+} as const;
 
 /**
  * 封面必须经 Worker 转发：微信读书图床不给 CORS 头，直接取会把 canvas 污染掉。
- *
- * 默认要大图：书籍资料那条链路要把封面压到 440px 存进书库，拿缩略图会糊。
- * 列表里的小卡片显式传 "thumb"。
+ * 默认取大图——书籍资料那条链路要把封面压到 440px 存进书库，拿小图会糊。
  */
 export function wereadCoverUrl(
   coverUrl: string,
-  size: "thumb" | "full" = "full"
+  size: keyof typeof COVER_SIZES = "large"
 ): string {
-  const target = size === "thumb" ? coverUrl.replace(COVER_VARIANT, "/s_") : coverUrl;
+  const target = coverUrl.replace(COVER_VARIANT, `/${COVER_SIZES[size]}`);
   return `/api/weread/cover?u=${encodeURIComponent(target)}`;
+}
+
+export function fetchWereadRank(
+  category: string,
+  signal?: AbortSignal
+): Promise<WereadRank> {
+  return request<WereadRank>(
+    `/api/weread/rank?category=${encodeURIComponent(category)}`,
+    signal
+  );
 }
 
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -93,29 +113,4 @@ export function fetchWereadSimilar(
   });
   if (sessionId) params.set("sessionId", sessionId);
   return request<WereadFeed>(`/api/weread/similar?${params}`, signal);
-}
-
-/**
- * 「高分好书」是本地合成的，不是微信读书的官方榜单。
- *
- * 规则写在这里而不是散在组件里：评分人数太少的推荐值不可信（几十个人打的 95%
- * 说明不了什么），先卡人数门槛，再按推荐值排序。一本都不够格就返回空，
- * 让调用方把这条流整个藏掉——宁可不显示，也不要凑一条名不副实的榜。
- */
-export function buildTopRated(
-  books: WereadBook[],
-  minRatingCount: number,
-  limit: number
-): WereadBook[] {
-  const seen = new Set<string>();
-  return books
-    .filter((book) => {
-      if (book.rating === null) return false;
-      if ((book.ratingCount ?? 0) < minRatingCount) return false;
-      if (seen.has(book.bookId)) return false;
-      seen.add(book.bookId);
-      return true;
-    })
-    .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))
-    .slice(0, limit);
 }
