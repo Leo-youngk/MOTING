@@ -13,8 +13,10 @@ import {
 import {
   formatRatingCount,
   formatReadingCount,
+  preferredCategory,
   ratingPercent,
   RATING_TRUSTWORTHY_COUNT,
+  rememberCategory,
   WEREAD_CATEGORIES,
   type WereadBook,
   type WereadBookDetail,
@@ -167,7 +169,7 @@ export function Bookstore({
   /** 本地书库。最近读的那本会被当成「相似推荐」的种子。 */
   books: Book[];
   onBack: () => void;
-  onFindBook: (title: string) => void;
+  onFindBook: (title: string, author: string) => void;
   /** 从主页的书城条点进来时带的书，直接落在这本书的详情上。 */
   initialBookId?: string;
 }) {
@@ -175,7 +177,7 @@ export function Bookstore({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const [category, setCategory] = useState<string>(WEREAD_CATEGORIES[0]);
+  const [category, setCategory] = useState<string>(() => preferredCategory());
   /**
    * 分类下的两种看法，缺一不可：
    * rank 是挑出来的好书（按推荐值，卡评分人数），browse 是这个分类里能一直往下翻的全部书。
@@ -217,18 +219,25 @@ export function Bookstore({
     // 刻意不在开头 setLoading(true)：换种子时保留旧内容直到新数据到位，
     // 既避开在 effect 同步阶段 setState，也不会让整页闪一下骨架屏再跳回来。
     const loadLanes = async () => {
-      const next: WereadLane[] = [];
       try {
         const recommend = await fetchWereadRecommend(0, 20, signal);
         if (signal.aborted) return;
-        if (recommend.books.length) {
-          next.push({
-            kind: "recommend",
-            title: "为你推荐",
-            subtitle: "微信读书按你的阅读记录挑的",
-            books: recommend.books,
-          });
-        }
+        // 推荐一到就渲染。相似推荐要先搜种子书再查相似，是串着的两跳，
+        // 从前把三个请求攒齐才 setLanes，进书城得盯着骨架屏等三四秒。
+        setLanes(
+          recommend.books.length
+            ? [
+                {
+                  kind: "recommend",
+                  title: "为你推荐",
+                  subtitle: "微信读书按你的阅读记录挑的",
+                  books: recommend.books,
+                },
+              ]
+            : []
+        );
+        setError("");
+        setLoading(false);
       } catch (reason) {
         if (signal.aborted) return;
         setError(reason instanceof Error ? reason.message : "书城暂时打不开");
@@ -237,31 +246,26 @@ export function Bookstore({
       }
 
       // 相似推荐要先拿种子书在微信读书里的 bookId，本地书库里没有这个 id。
-      if (seedTitle) {
-        try {
-          const matched = await searchWeread(seedTitle, 0, 1, signal);
-          const target = matched.books[0];
-          if (target && !signal.aborted) {
-            const similar = await fetchWereadSimilar(target.bookId, 0, 20, "", signal);
-            if (similar.books.length && !signal.aborted) {
-              next.push({
-                kind: "similar",
-                title: `因为你在读《${seedTitle}》`,
-                seedTitle,
-                subtitle: "微信读书的相似推荐",
-                books: similar.books,
-              });
-            }
-          }
-        } catch {
-          // 相似推荐拿不到就少一条流，不影响书城其余部分。
-        }
+      if (!seedTitle) return;
+      try {
+        const matched = await searchWeread(seedTitle, 0, 1, signal);
+        const target = matched.books[0];
+        if (!target || signal.aborted) return;
+        const similar = await fetchWereadSimilar(target.bookId, 0, 20, "", signal);
+        if (!similar.books.length || signal.aborted) return;
+        setLanes((current) => [
+          ...current,
+          {
+            kind: "similar",
+            title: `因为你在读《${seedTitle}》`,
+            seedTitle,
+            subtitle: "微信读书的相似推荐",
+            books: similar.books,
+          },
+        ]);
+      } catch {
+        // 相似推荐拿不到就少一条流，不影响书城其余部分。
       }
-      if (signal.aborted) return;
-
-      setLanes(next);
-      setError("");
-      setLoading(false);
     };
 
     void loadLanes();
@@ -322,6 +326,7 @@ export function Bookstore({
     setBrowseMore(false);
     setBrowseError("");
     setCategory(next);
+    rememberCategory(next);
     if (mode === "browse") loadBrowse(next, 0);
   }
 
@@ -465,7 +470,7 @@ export function Bookstore({
             type="button"
             className="primary-button"
             disabled={!shown}
-            onClick={() => shown && onFindBook(shown.title)}
+            onClick={() => shown && onFindBook(shown.title, shown.author)}
           >
             去找这本书
             <ArrowRight size={17} />

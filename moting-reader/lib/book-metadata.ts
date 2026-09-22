@@ -78,6 +78,41 @@ export function titleLooksLikeFileName(book: Book): boolean {
  */
 const AUTHOR_ROLE = /[（(][^）)]*[）)]/g;
 
+/**
+ * 「去找这本书」发给在线找书的查询词：干净书名 + 第一个作者。
+ *
+ * 只给书名不够用——Z-Library 上同名书一大堆，《活着》能翻出十几个不相干的版本。
+ * 作者这里要连方括号国别一起剥掉：展示时「[英]简·奥斯汀」里的国别是有用信息
+ * （formatAuthors 特意保留），但当搜索词就是纯噪声，会把结果搜没。
+ */
+export function bookSearchQuery(title: string, author: string): string {
+  // 这里**不能**用 cleanTitleText：它把「全集 / 完整版」当盗版噪声剥掉，
+  // 那是对着导入文件的脏文件名定的规则。微信读书给的是正规书名，
+  // 《简·奥斯汀小说全集》被剥成《简·奥斯汀小说》就搜不到了。只去括号和书名号。
+  const name =
+    title
+      .normalize("NFKC")
+      .replace(BRACKETED, " ")
+      .replace(TITLE_MARKS, " ")
+      .replace(/\s+/g, " ")
+      .trim() || title.trim();
+  const cleaned = (author ?? "")
+    .normalize("NFKC")
+    .replace(/[[【][^\]】]*[\]】]/g, " ")
+    .replace(AUTHOR_ROLE, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  // 多作者只取第一个：合著书的第二作者反而会让搜索落空。
+  const head = cleaned.split(/[、,，;；/]/)[0].trim();
+  const words = head.split(/\s+/).filter(Boolean);
+  // 中文名不含空格，空格后面多半是第二个作者或「著 / 编」这类后缀；
+  // 西文名反过来，空格是名字的一部分，得留住。
+  const who = (/[\u4e00-\u9fa5]/.test(head) ? words[0] ?? "" : words.slice(0, 3).join(" "))
+    .replace(/[著编译]$/, "")
+    .trim();
+  return [name, who].filter(Boolean).join(" ");
+}
+
 /** 上游的作者字段很脏：会带角色后缀、重复、繁简混排。最多留两个。 */
 export function formatAuthors(authors: string[]): string {
   const cleaned = authors

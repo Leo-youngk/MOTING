@@ -98,3 +98,30 @@ export const WEREAD_CATEGORIES = [
 ] as const;
 
 export type WereadCategory = (typeof WEREAD_CATEGORIES)[number];
+
+const CATEGORY_KEY = "moting:store-category";
+
+/**
+ * 主页和书城看同一个分类的榜。
+ *
+ * 在书城里选过就一直跟着那个选择走；没选过的话按天轮换——固定钉死在「小说」
+ * 会让主页那条榜天天长一个样，而榜本身 6 小时才换一次内容。
+ */
+export function preferredCategory(): string {
+  try {
+    const saved = window.localStorage.getItem(CATEGORY_KEY);
+    if (saved && (WEREAD_CATEGORIES as readonly string[]).includes(saved)) return saved;
+  } catch {
+    // 隐私模式下读不到，落到按天轮换即可。
+  }
+  const day = Math.floor(Date.now() / 86_400_000);
+  return WEREAD_CATEGORIES[day % WEREAD_CATEGORIES.length];
+}
+
+export function rememberCategory(category: string): void {
+  try {
+    window.localStorage.setItem(CATEGORY_KEY, category);
+  } catch {
+    // 记不住就下次再按天轮换，不值得为它报错。
+  }
+}

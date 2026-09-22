@@ -282,17 +282,17 @@ test("榜单按推荐值排序，并卡掉评分人数不足的", async () => {
       };
     })
   );
-  assert.equal(pagesAsked, 5, "攒池要翻够页数");
+  assert.equal(pagesAsked, 8, "攒池要翻够页数");
   const data = (await response.json()) as {
     category: string;
     books: WereadBook[];
     poolSize: number;
   };
   assert.equal(data.category, "科幻");
-  assert.equal(data.poolSize, 10);
+  assert.equal(data.poolSize, 16);
   assert.deepEqual(
     data.books.map((b) => b.bookId),
-    ["hot80", "hot60", "hot40", "hot20", "hot0"],
+    ["hot140", "hot120", "hot100", "hot80", "hot60", "hot40", "hot20", "hot0"],
     "只有 12 个人打分的 99% 不能上榜"
   );
 });
@@ -338,7 +338,7 @@ test("攒池缺页时只做短缓存，别把坏运气钉在缓存里", async ()
     "缺页的结果只缓存 5 分钟"
   );
   const data = (await response.json()) as { books: WereadBook[]; poolSize: number };
-  assert.equal(data.poolSize, 4, "缺的那页不凑数，其余照常上榜");
+  assert.equal(data.poolSize, 7, "缺的那页不凑数，其余照常上榜");
 });
 
 test("攒池完整时按正常时长缓存", async () => {

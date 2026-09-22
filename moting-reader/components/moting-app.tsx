@@ -67,6 +67,7 @@ import { AiRequestError, fetchAiModels, streamAiChat } from "../lib/ai";
 import {
   BookMetadataError,
   cleanTitleText,
+  bookSearchQuery,
   coverProxyUrl,
   decideAutoApply,
   fetchCoverDataUrl,
@@ -6759,7 +6760,9 @@ export default function MotingApp() {
                     books={books}
                     initialBookId={view.bookId ?? ""}
                     onBack={() => goBack({ name: "home" })}
-                    onFindBook={(title) => navigate({ name: "find", query: title })}
+                    onFindBook={(title, author) =>
+                      navigate({ name: "find", query: bookSearchQuery(title, author) })
+                    }
                   />
                 </Suspense>
               </div>

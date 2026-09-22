@@ -55,10 +55,14 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
     if (!initialQuery.trim()) return;
     const controller = new AbortController();
     searchController.current = controller;
-    searchZlibrary(initialQuery.trim(), 1, "", controller.signal).then((data) => {
+    searchOnce(initialQuery.trim(), 1, "", controller.signal).then(({ data, keyword, fellBackFrom }) => {
       if (controller.signal.aborted) return;
+      if (fellBackFrom) {
+        setQuery(keyword);
+        setNotice(`没有「${fellBackFrom}」，改成只搜《${keyword}》。`);
+      }
       setResults(data.books);
-      setLastSearch({ query: initialQuery.trim(), format: "", page: data.page });
+      setLastSearch({ query: keyword, format: "", page: data.page });
       setHasMore(data.hasMore);
     }).catch((error) => {
       if (!controller.signal.aborted) showError(error);
@@ -97,6 +101,24 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
     }
   }
 
+  /**
+   * 搜一次；「书名 作者」一本都搜不到时，退回只搜书名。
+   *
+   * 书城的「去找这本书」带进来的就是「书名 作者」——加作者是为了甩掉同名书，
+   * 但 Z-Library 上作者名的写法千奇百怪，加上去有时候会把结果搜成零。
+   * 那就自己退一步，并且在反馈栏里说清楚退过，别让人以为这本书根本没有。
+   */
+  async function searchOnce(keyword: string, page: number, fmt: string, signal: AbortSignal) {
+    const data = await searchZlibrary(keyword, page, fmt, signal);
+    if (page > 1 || data.books.length || !keyword.includes(" ")) {
+      return { data, keyword, fellBackFrom: "" };
+    }
+    const titleOnly = keyword.slice(0, keyword.lastIndexOf(" ")).trim();
+    if (!titleOnly || titleOnly === keyword) return { data, keyword, fellBackFrom: "" };
+    const retry = await searchZlibrary(titleOnly, page, fmt, signal);
+    return { data: retry, keyword: titleOnly, fellBackFrom: keyword };
+  }
+
   async function search(nextPage = 1) {
     const searchQuery = nextPage > 1 && lastSearch ? lastSearch.query : query.trim();
     const searchFormat = nextPage > 1 && lastSearch ? lastSearch.format : format;
@@ -112,13 +134,22 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
       resultsRef.current?.scrollTo({ top: 0 });
     }
     try {
-      const data = await searchZlibrary(searchQuery, nextPage, searchFormat, controller.signal);
+      const { data, keyword, fellBackFrom } = await searchOnce(
+        searchQuery,
+        nextPage,
+        searchFormat,
+        controller.signal
+      );
       if (controller.signal.aborted) return;
+      if (fellBackFrom) {
+        setQuery(keyword);
+        setNotice(`没有「${fellBackFrom}」，改成只搜《${keyword}》。`);
+      }
       setResults((current) => {
         const all = nextPage === 1 ? data.books : [...current, ...data.books];
         return [...new Map(all.map((book) => [`${book.id}:${book.hash}`, book])).values()];
       });
-      setLastSearch({ query: searchQuery, format: searchFormat, page: data.page });
+      setLastSearch({ query: keyword, format: searchFormat, page: data.page });
       setHasMore(data.hasMore);
     } catch (error) {
       if (!controller.signal.aborted) showError(error);

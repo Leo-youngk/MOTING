@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  bookSearchQuery,
   cleanTitleText,
   decideAutoApply,
   formatAuthors,
@@ -80,6 +81,24 @@ test("上游脏作者字段被清理成一行可读的署名", () => {
   assert.equal(formatAuthors([]), "");
   // 微信读书的作者带国别方括号，方括号不是我们要剥的噪声，得原样留着。
   assert.equal(formatAuthors(["[哥]加西亚•马尔克斯"]), "[哥]加西亚•马尔克斯");
+});
+
+test("「去找这本书」的查询词带上作者，国别方括号要剥掉", () => {
+  // 展示时保留国别（formatAuthors），当搜索词时它是噪声。
+  assert.equal(
+    bookSearchQuery("简·奥斯汀小说全集（果麦经典）", "[英]简·奥斯汀"),
+    "简·奥斯汀小说全集 简·奥斯汀"
+  );
+  // 合著只取第一个人，第二个作者反而会把结果搜没。
+  assert.equal(
+    bookSearchQuery("体验派人生", "[美]布里奇特·希尔顿 [美]乔·哈夫著"),
+    "体验派人生 布里奇特·希尔顿"
+  );
+  assert.equal(bookSearchQuery("尼采金句100则", "[德]尼采 大咸鱼编"), "尼采金句100则 尼采");
+  // 西文名里的空格是名字的一部分，不能按空格切。
+  assert.equal(bookSearchQuery("Sapiens", "Yuval Noah Harari"), "Sapiens Yuval Noah Harari");
+  // 没有作者就只发书名，不要留下一个尾巴空格。
+  assert.equal(bookSearchQuery("活着", ""), "活着");
 });
 
 test("资料齐全的书不查询，缺封面或缺作者的才查", () => {

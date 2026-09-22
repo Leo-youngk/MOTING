@@ -25,19 +25,25 @@ const SEARCH_CACHE_SECONDS = 60 * 60 * 6;
 const BOOK_CACHE_SECONDS = 60 * 60 * 24;
 const FEED_CACHE_SECONDS = 60 * 30;
 const COVER_CACHE_SECONDS = 60 * 60 * 24 * 30;
-/** 推荐和相似推荐的回包不带评分，得按本补查。并发度照搬 TTS 那边的经验值。 */
-const ENRICH_CONCURRENCY = 6;
+/**
+ * 推荐和相似推荐的回包不带评分，得按本补查。
+ * 并发度直接等于总数：12 本一轮打完，只花一个往返。
+ * 原来是 6，要跑两轮——实测「换一批」2.8s 里有一大半是白等的第二轮。
+ */
 const MAX_ENRICH = 12;
+const ENRICH_CONCURRENCY = MAX_ENRICH;
 /**
  * 榜单：翻几页攒池、上榜的评分人数下限、榜长。
+ * 池子从 5 页提到 8 页（160 本）、榜长 40 提到 60：原来一个分类翻来覆去就那 40 本，
+ * 看几次就腻了。页是并发取的，加三页几乎不增加耗时。
  * 分类搜索能一直往下翻（实测 220 本还 hasMore=1 且无重复），池子深浅只是取舍：
- * 翻 5 页约 100 本，「小说」能筛出 40 本可信评分，「科幻」只有 14 本——
- * 后者就让榜短一点，不要为了凑长度把门槛降下去。想随便逛的走「全部」那条路。
+ * 冷门分类筛出来的本来就少，那就让榜短一点，不要为了凑长度把门槛降下去。
+ * 想随便逛的走「全部」那条路。
  */
-const RANK_PAGES = 5;
+const RANK_PAGES = 8;
 const RANK_PAGE_SIZE = 20;
 const RANK_MIN_RATING_COUNT = 500;
-const RANK_LIMIT = 40;
+const RANK_LIMIT = 60;
 const RANK_CACHE_SECONDS = 60 * 60 * 6;
 /** 攒池缺页时的短缓存，让下一次访问有机会补全。 */
 const RANK_DEGRADED_CACHE_SECONDS = 60 * 5;

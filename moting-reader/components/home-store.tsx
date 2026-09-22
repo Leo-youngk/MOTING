@@ -3,15 +3,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronRight, RefreshCw, Trophy } from "lucide-react";
 import { fetchWereadRank, fetchWereadRecommend } from "../lib/weread";
-import { WEREAD_CATEGORIES, type WereadBook } from "../lib/weread-types";
+import { preferredCategory, type WereadBook } from "../lib/weread-types";
 import { StoreCard, StoreRow } from "./bookstore";
 import "./home-store.css";
 
-/** 主页只露这么多。再多就把下面的阅读看板挤出屏幕，逛完整的去书城。 */
-const FEED_COUNT = 8;
+/**
+ * 一次取 20 本，主页只露 8 本。
+ *
+ * 20 这个数字不是随便定的：书城页的「为你推荐」取的就是 (0, 20)，主页跟它对齐
+ * 才能共用同一份边缘缓存——进书城时那条流是现成的，不用再冷启一次。
+ */
+const FEED_COUNT = 20;
+const FEED_SHOWN = 8;
 const RANK_COUNT = 3;
-/** 主页固定看这一个分类的榜，换分类是书城里的事。 */
-const RANK_CATEGORY = WEREAD_CATEGORIES[0];
 
 /**
  * 主页的书城条：为你推荐一条横滑 + 一个榜的前三名。
@@ -31,48 +35,94 @@ export function HomeStore({
   const [feedLoading, setFeedLoading] = useState(true);
   const [feedFailed, setFeedFailed] = useState(false);
   const feedController = useRef<AbortController | null>(null);
+  /** 后台先取好的下一批。「换一批」点下去时直接换上，不用现场等网络。 */
+  const ahead = useRef<{ from: number; books: WereadBook[]; next: number } | null>(null);
+  const aheadController = useRef<AbortController | null>(null);
 
+  const [category] = useState(() => preferredCategory());
   const [rank, setRank] = useState<WereadBook[]>([]);
   const [rankLoading, setRankLoading] = useState(true);
 
-  const loadFeed = useCallback((fromIdx: number) => {
-    feedController.current?.abort();
+  /**
+   * 预取下一批。
+   *
+   * 「换一批」每次换的是新的 maxIdx，也就是每次都是一个没被缓存过的请求——
+   * 实测回源要 2.8 秒，点下去干等。趁用户在看这一批，先把下一批取回来。
+   */
+  const prefetch = useCallback((from: number) => {
+    aheadController.current?.abort();
     const controller = new AbortController();
-    feedController.current = controller;
-
-    // 用函数声明是为了能自己回头调一次：翻到池子尽头时从头再来，
-    // 这样「换一批」永远换得出东西。retried 保证最多回头一次，不会转圈。
-    function run(idx: number, retried: boolean) {
-      fetchWereadRecommend(idx, FEED_COUNT, controller.signal)
-        .then((data) => {
-          if (controller.signal.aborted) return;
-          if (!data.books.length && idx > 0 && !retried) {
-            run(0, true);
-            return;
-          }
-          setFeed(data.books);
-          setFeedIdx(data.hasMore ? data.nextIdx : 0);
-          setFeedFailed(false);
-          setFeedLoading(false);
-        })
-        .catch(() => {
-          if (controller.signal.aborted) return;
-          setFeedFailed(true);
-          setFeedLoading(false);
-        });
-    }
-
-    run(fromIdx, false);
+    aheadController.current = controller;
+    ahead.current = null;
+    fetchWereadRecommend(from, FEED_COUNT, controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted || !data.books.length) return;
+        ahead.current = { from, books: data.books, next: data.hasMore ? data.nextIdx : 0 };
+      })
+      .catch(() => {
+        // 预取失败无所谓，点「换一批」时还会正常走一次请求。
+      });
   }, []);
+
+  const loadFeed = useCallback(
+    (fromIdx: number) => {
+      feedController.current?.abort();
+      const controller = new AbortController();
+      feedController.current = controller;
+
+      // 用函数声明是为了能自己回头调一次：翻到池子尽头时从头再来，
+      // 这样「换一批」永远换得出东西。retried 保证最多回头一次，不会转圈。
+      function run(idx: number, retried: boolean) {
+        fetchWereadRecommend(idx, FEED_COUNT, controller.signal)
+          .then((data) => {
+            if (controller.signal.aborted) return;
+            if (!data.books.length && idx > 0 && !retried) {
+              run(0, true);
+              return;
+            }
+            const next = data.hasMore ? data.nextIdx : 0;
+            setFeed(data.books);
+            setFeedIdx(next);
+            setFeedFailed(false);
+            setFeedLoading(false);
+            prefetch(next);
+          })
+          .catch(() => {
+            if (controller.signal.aborted) return;
+            setFeedFailed(true);
+            setFeedLoading(false);
+          });
+      }
+
+      run(fromIdx, false);
+    },
+    [prefetch]
+  );
+
+  function shuffle() {
+    const ready = ahead.current;
+    if (ready && ready.from === feedIdx) {
+      ahead.current = null;
+      setFeed(ready.books);
+      setFeedIdx(ready.next);
+      prefetch(ready.next);
+      return;
+    }
+    setFeedLoading(true);
+    loadFeed(feedIdx);
+  }
 
   useEffect(() => {
     loadFeed(0);
-    return () => feedController.current?.abort();
+    return () => {
+      feedController.current?.abort();
+      aheadController.current?.abort();
+    };
   }, [loadFeed]);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchWereadRank(RANK_CATEGORY, controller.signal)
+    fetchWereadRank(category, controller.signal)
       .then((data) => {
         if (!controller.signal.aborted) {
           setRank(data.books.slice(0, RANK_COUNT));
@@ -83,7 +133,7 @@ export function HomeStore({
         if (!controller.signal.aborted) setRankLoading(false);
       });
     return () => controller.abort();
-  }, []);
+  }, [category]);
 
   // 两块都没拿到就只留一行交代，别在主页上摆一块空白或者红色报错。
   if (feedFailed && !rankLoading && !rank.length) {
@@ -111,10 +161,7 @@ export function HomeStore({
             type="button"
             className="text-button"
             disabled={feedLoading || feedFailed}
-            onClick={() => {
-              setFeedLoading(true);
-              loadFeed(feedIdx);
-            }}
+            onClick={shuffle}
           >
             <RefreshCw size={13} aria-hidden="true" />
             换一批
@@ -126,7 +173,7 @@ export function HomeStore({
             ? Array.from({ length: 4 }, (_, index) => (
                 <div className="store-skeleton store-skeleton--card" key={index} />
               ))
-            : feed.map((book, index) => (
+            : feed.slice(0, FEED_SHOWN).map((book, index) => (
                 <StoreCard
                   key={book.bookId}
                   book={book}
@@ -142,7 +189,7 @@ export function HomeStore({
           <div className="home-store__rank-head">
             <h3>
               <Trophy size={15} aria-hidden="true" />
-              {RANK_CATEGORY}榜
+              {category}榜
             </h3>
             <small>按微信读书推荐值排序，墨听自己排的</small>
           </div>
