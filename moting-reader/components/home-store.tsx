@@ -160,6 +160,8 @@ export function HomeStore({
                   key={book.bookId}
                   book={book}
                   rank={index + 1}
+                  // 榜只有三行，滚一下就到，别让它懒加载出一排空封面。
+                  priority
                   onOpen={(target) => onOpenBook(target.bookId)}
                 />
               ))}
