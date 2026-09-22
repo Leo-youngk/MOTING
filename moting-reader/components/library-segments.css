@@ -1,0 +1,22 @@
+.library-segments {
+  display: flex;
+  padding: 3px;
+  margin-block: 20px 16px;
+  border-radius: 14px;
+  background: var(--glass-tint);
+}
+.library-segments button {
+  flex: 1;
+  min-height: 42px;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+}
+.library-segments button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 7%);
+  font-weight: 600;
+}
+.library-segments button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

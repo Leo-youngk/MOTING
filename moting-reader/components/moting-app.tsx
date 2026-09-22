@@ -1,5 +1,7 @@
 "use client";
 
+import "./library-segments.css";
+
 import {
   ArrowLeft,
   ArrowUp,
@@ -138,6 +140,11 @@ import { EDGE_VOICES } from "../lib/edge-voices";
 
 const OnlineLibrary = lazy(() =>
   import("./online-library").then(({ OnlineLibrary: Component }) => ({
+    default: Component,
+  }))
+);
+const Discovery = lazy(() =>
+  import("./discovery").then(({ Discovery: Component }) => ({
     default: Component,
   }))
 );
@@ -1039,7 +1046,8 @@ function LibraryScreen({
 }) {
   const [query, setQuery] = useState("");
   const [sheetBook, setSheetBook] = useState<Book | null>(null);
-  const [online, setOnline] = useState(false);
+  const [libraryMode, setLibraryMode] = useState<"local" | "discover" | "online">("local");
+  const [onlineQuery, setOnlineQuery] = useState<string | null>(null);
 
   const filtered = books.filter((book) =>
     `${book.title} ${book.author}`.toLowerCase().includes(query.toLowerCase())
@@ -1062,13 +1070,18 @@ function LibraryScreen({
       />
 
       <div className="library-segments" role="group" aria-label="书库来源">
-        <button type="button" aria-pressed={!online} onClick={() => setOnline(false)}>本地书库</button>
-        <button type="button" aria-pressed={online} onClick={() => setOnline(true)}>在线找书</button>
+        <button type="button" aria-pressed={libraryMode === "local"} onClick={() => setLibraryMode("local")}>本地书库</button>
+        <button type="button" aria-pressed={libraryMode === "discover"} onClick={() => setLibraryMode("discover")}>发现书籍</button>
+        <button type="button" aria-pressed={libraryMode === "online"} onClick={() => { setOnlineQuery(null); setLibraryMode("online"); }}>在线找书</button>
       </div>
 
-      {online ? (
+      {libraryMode === "online" ? (
         <Suspense fallback={<div className="online-loading">正在打开在线书库…</div>}>
-          <OnlineLibrary books={books} onImport={onOnlineImport} onOpen={onOpen} />
+          <OnlineLibrary key={onlineQuery ?? "manual"} initialQuery={onlineQuery ?? ""} books={books} onImport={onOnlineImport} onOpen={onOpen} />
+        </Suspense>
+      ) : libraryMode === "discover" ? (
+        <Suspense fallback={<div className="online-loading">正在打开书籍发现…</div>}>
+          <Discovery onFindBook={(title) => { setOnlineQuery(title); setLibraryMode("online"); }} />
         </Suspense>
       ) : <>
       <label className="ios-search">

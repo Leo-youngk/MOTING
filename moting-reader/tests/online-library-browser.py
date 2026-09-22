@@ -132,10 +132,11 @@ with sync_playwright() as playwright:
     # Verify the EPUB was actually persisted, with exactly one online source record.
     saved = page.evaluate("""() => new Promise((resolve, reject) => {const r=indexedDB.open('moting-reader');r.onsuccess=()=>{const db=r.result;const q=db.transaction('books').objectStore('books').getAll();q.onsuccess=()=>{resolve(q.result.filter(b=>b.onlineSourceId).map(b=>({title:b.title,source:b.onlineSourceId,chapters:b.chapters.length})));db.close()};q.onerror=()=>reject(q.error)}})""")
     assert saved == [{"title": "在线导入测试", "source": "zlibrary:17:aabbcc", "chapters": 1}], saved
-    # A new page resets the view; keep the same local database.
+    # Cold start restores the reader; go back to its library parent while keeping the same database.
     page.reload()
     page.wait_for_load_state("networkidle")
-    page.get_by_role("button", name="书库", exact=True).click()
+    page.evaluate("history.back()")
+    expect(page.get_by_role("button", name="在线找书", exact=True)).to_be_visible()
     page.get_by_role("button", name="在线找书", exact=True).click()
     page.get_by_label("在线搜索书名或作者").fill("不存在")
     state["mode"] = "empty"

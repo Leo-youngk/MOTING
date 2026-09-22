@@ -8,17 +8,18 @@ import { ONLINE_BOOK_FORMATS, ONLINE_BOOK_MAX_BYTES, type OnlineBook } from "../
 import type { Book } from "../lib/types";
 import "./online-library.css";
 
-export function OnlineLibrary({ books, onImport, onOpen }: {
+export function OnlineLibrary({ books, onImport, onOpen, initialQuery = "" }: {
   books: Book[];
   onImport: (file: File, sourceId: string, onProgress: (label: string) => void) => Promise<void>;
   onOpen: (book: Book) => void;
+  initialQuery?: string;
 }) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [format, setFormat] = useState("");
   const [results, setResults] = useState<OnlineBook[]>([]);
   const [lastSearch, setLastSearch] = useState<{ query: string; format: string; page: number } | null>(null);
   const [hasMore, setHasMore] = useState(false);
-  const [searching, setSearching] = useState(false);
+  const [searching, setSearching] = useState(Boolean(initialQuery.trim()));
   const [connected, setConnected] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [email, setEmail] = useState("");
@@ -47,6 +48,23 @@ export function OnlineLibrary({ books, onImport, onOpen }: {
       authController.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    if (!initialQuery.trim()) return;
+    const controller = new AbortController();
+    searchController.current = controller;
+    searchZlibrary(initialQuery.trim(), 1, "", controller.signal).then((data) => {
+      if (controller.signal.aborted) return;
+      setResults(data.books);
+      setLastSearch({ query: initialQuery.trim(), format: "", page: data.page });
+      setHasMore(data.hasMore);
+    }).catch((error) => {
+      if (!controller.signal.aborted) showError(error);
+    }).finally(() => {
+      if (!controller.signal.aborted) setSearching(false);
+    });
+    return () => controller.abort();
+  }, [initialQuery]);
 
   useEffect(() => {
     const element = resultsRef.current;
