@@ -93,7 +93,9 @@ export function bookSearchQuery(title: string, author: string): string {
     title
       .normalize("NFKC")
       .replace(BRACKETED, " ")
-      .replace(TITLE_MARKS, " ")
+      // 书名号和引号换成空字符而不是空格：《北京“浙江村”的生活史》拆成
+      // 「北京 浙江村 的生活史」会把一个词打散，搜出来的东西就散了。
+      .replace(TITLE_MARKS, "")
       .replace(/\s+/g, " ")
       .trim() || title.trim();
   const cleaned = (author ?? "")

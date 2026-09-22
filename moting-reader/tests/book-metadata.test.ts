@@ -97,6 +97,11 @@ test("「去找这本书」的查询词带上作者，国别方括号要剥掉",
   assert.equal(bookSearchQuery("尼采金句100则", "[德]尼采 大咸鱼编"), "尼采金句100则 尼采");
   // 西文名里的空格是名字的一部分，不能按空格切。
   assert.equal(bookSearchQuery("Sapiens", "Yuval Noah Harari"), "Sapiens Yuval Noah Harari");
+  // 书名里的引号要抹掉而不是换成空格，否则一个词被拆成两截。
+  assert.equal(
+    bookSearchQuery("跨越边界的社区：北京“浙江村”的生活史", "项飙"),
+    "跨越边界的社区:北京浙江村的生活史 项飙"
+  );
   // 没有作者就只发书名，不要留下一个尾巴空格。
   assert.equal(bookSearchQuery("活着", ""), "活着");
 });
