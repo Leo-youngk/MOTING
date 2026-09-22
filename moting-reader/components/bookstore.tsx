@@ -27,7 +27,7 @@ import "./bookstore.css";
 
 /** 横滑轨道里先露几本，其余收进「全部」里，免得一条流拖出几十张图。 */
 const LANE_PREVIEW = 8;
-const RANK_PREVIEW = 5;
+const RANK_PREVIEW = 9;
 
 /** 打开的是哪一份完整列表。null 表示停在书城首页。 */
 type Expanded = { title: string; subtitle: string; books: WereadBook[] } | null;
@@ -91,18 +91,40 @@ export function Rating({ book, compact = false }: { book: WereadBook; compact?: 
 
 export function StoreCard({
   book,
+  rank,
+  dense = false,
   priority = false,
   onOpen,
 }: {
   book: WereadBook;
+  /** 榜单里的名次，从 1 开始；普通列表不传。盖在封面左上角。 */
+  rank?: number;
+  /**
+   * 紧凑档：书名压成一行、不显示作者。
+   * 网格一屏能多塞三分之一的书，而作者在这么窄的卡片上本来就只剩几个字。
+   */
+  dense?: boolean;
   priority?: boolean;
   onOpen: (book: WereadBook) => void;
 }) {
   return (
-    <button type="button" className="store-card" onClick={() => onOpen(book)}>
-      <Cover book={book} size="card" priority={priority} />
+    <button
+      type="button"
+      className={`store-card${dense ? " store-card--dense" : ""}`}
+      onClick={() => onOpen(book)}
+    >
+      <span className="store-card__art">
+        <Cover book={book} size="card" priority={priority} />
+        {rank ? (
+          <span className={`store-card__rank${rank <= 3 ? " store-card__rank--top" : ""}`}>
+            {rank}
+          </span>
+        ) : null}
+      </span>
       <span className="store-card__title">{book.title}</span>
-      <span className="store-card__author">{book.author || "作者未提供"}</span>
+      {dense ? null : (
+        <span className="store-card__author">{book.author || "作者未提供"}</span>
+      )}
       <Rating book={book} compact />
     </button>
   );
@@ -152,9 +174,9 @@ export function LaneSkeleton() {
 
 export function RankSkeleton() {
   return (
-    <div className="store-ranklist" role="status" aria-label="正在加载榜单">
-      {Array.from({ length: RANK_PREVIEW }, (_, index) => (
-        <div className="store-skeleton store-skeleton--row" key={index} />
+    <div className="store-grid" role="status" aria-label="正在加载榜单">
+      {Array.from({ length: 6 }, (_, index) => (
+        <div className="store-skeleton store-skeleton--tile" key={index} />
       ))}
     </div>
   );
@@ -511,9 +533,15 @@ export function Bookstore({
         <p className="store-expanded__note">
           {expanded.subtitle} · 共 {expanded.books.length} 本
         </p>
-        <div className="store-results">
+        <div className="store-grid">
           {expanded.books.map((book, index) => (
-            <StoreRow key={book.bookId} book={book} priority={index < 4} onOpen={openBook} />
+            <StoreCard
+              key={book.bookId}
+              book={book}
+              dense
+              priority={index < 6}
+              onOpen={openBook}
+            />
           ))}
         </div>
       </section>
@@ -564,9 +592,17 @@ export function Bookstore({
               回到书城
             </button>
           </div>
-          {results.map((book, index) => (
-            <StoreRow key={book.bookId} book={book} priority={index < 4} onOpen={openBook} />
-          ))}
+          <div className="store-grid">
+            {results.map((book, index) => (
+              <StoreCard
+                key={book.bookId}
+                book={book}
+                dense
+                priority={index < 6}
+                onOpen={openBook}
+              />
+            ))}
+          </div>
           {searching ? (
             <p className="store-muted" role="status">正在搜索…</p>
           ) : null}
@@ -637,12 +673,13 @@ export function Bookstore({
                 <RankSkeleton />
               ) : (
                 <>
-                  <div className="store-ranklist">
+                  <div className="store-grid">
                     {browse.map((book, index) => (
-                      <StoreRow
+                      <StoreCard
                         key={book.bookId}
                         book={book}
-                        priority={index < RANK_PREVIEW}
+                        dense
+                        priority={index < 6}
                         onOpen={openBook}
                       />
                     ))}
@@ -668,13 +705,14 @@ export function Bookstore({
               <p className="store-error" role="alert">{rankError}</p>
             ) : rank.length ? (
               <>
-                <div className="store-ranklist">
+                <div className="store-grid">
                   {rankShown.map((book, index) => (
-                    <StoreRow
+                    <StoreCard
                       key={book.bookId}
                       book={book}
                       rank={index + 1}
-                      priority={index < RANK_PREVIEW}
+                      dense
+                      priority={index < 6}
                       onOpen={openBook}
                     />
                   ))}

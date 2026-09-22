@@ -34,13 +34,22 @@ const MAX_ENRICH = 12;
 const ENRICH_CONCURRENCY = MAX_ENRICH;
 /**
  * 榜单：翻几页攒池、上榜的评分人数下限、榜长。
- * 池子从 5 页提到 8 页（160 本）、榜长 40 提到 60：原来一个分类翻来覆去就那 40 本，
- * 看几次就腻了。页是并发取的，加三页几乎不增加耗时。
+ * 池子从 5 页提到 6 页（120 本）、榜长 40 提到 60：原来一个分类翻来覆去就那 40 本，
+ * 看几次就腻了。再往上加页数会踩上游风控，别为了池子深把接口打死。
  * 分类搜索能一直往下翻（实测 220 本还 hasMore=1 且无重复），池子深浅只是取舍：
  * 冷门分类筛出来的本来就少，那就让榜短一点，不要为了凑长度把门槛降下去。
  * 想随便逛的走「全部」那条路。
  */
-const RANK_PAGES = 8;
+const RANK_PAGES = 6;
+/**
+ * 一次并发几页。
+ *
+ * 一次榜单请求会放大成 RANK_PAGES 个上游搜索，这个倍数要当回事：
+ * 先前调到 8 页并发，连着取几个分类之后 poolSize 就从 160 掉到 11，
+ * 再往下调就直接 403——上游是有风控的，不是单纯的慢。
+ * 现在 6 页分两轮各 3 个，瞬时并发比最早的 5 页并发还低，池子仍有 120 本。
+ */
+const RANK_PAGE_BATCH = 3;
 const RANK_PAGE_SIZE = 20;
 const RANK_MIN_RATING_COUNT = 500;
 const RANK_LIMIT = 60;
@@ -422,9 +431,15 @@ async function handleRank(
       }
       return null;
     };
-    const pages = await Promise.all(
-      Array.from({ length: RANK_PAGES }, (_, index) => fetchPage(index))
-    );
+    // 分批并发，别把 8 个搜索同时砸给上游。
+    const pages: Array<WereadBook[] | null> = [];
+    for (let start = 0; start < RANK_PAGES; start += RANK_PAGE_BATCH) {
+      const size = Math.min(RANK_PAGE_BATCH, RANK_PAGES - start);
+      const batch = await Promise.all(
+        Array.from({ length: size }, (_, index) => fetchPage(start + index))
+      );
+      pages.push(...batch);
+    }
 
     const pool = new Map<string, WereadBook>();
     let missing = 0;

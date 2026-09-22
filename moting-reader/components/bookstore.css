@@ -562,3 +562,63 @@
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+
+/*
+ * 书城里的竖向列表一律用网格。
+ * 行式一行 92px，一屏只看得到六七本，用户的原话是「一下子能看到的书太少」；
+ * 三列网格配紧凑卡片一屏能看到九本，多出三分之一。
+ * 主页那条榜还是行式——它只有三本，行式能把作者和评分人数都摆开。
+ */
+.store-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px 10px;
+}
+
+.store-grid .store-card {
+  width: auto;
+}
+
+/* 网格里的封面跟着列宽走，不再写死 104px。 */
+.store-grid .store-cover {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 104 / 148;
+}
+
+.store-card__art {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+
+/* 名次盖在封面角上，不再单独占一列——那一列在网格里摆不下。 */
+.store-card__rank {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 20px;
+  padding: 2px 5px;
+  border-radius: 3px 0 6px 0;
+  background: color-mix(in srgb, var(--ink) 62%, transparent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.store-card__rank--top {
+  background: var(--accent);
+}
+
+.store-card--dense .store-card__title {
+  -webkit-line-clamp: 1;
+}
+
+.store-skeleton--tile {
+  width: 100%;
+  aspect-ratio: 104 / 196;
+  border-radius: 6px;
+}
