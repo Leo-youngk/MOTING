@@ -73,13 +73,6 @@ export interface WereadLane {
   books: WereadBook[];
 }
 
-export interface WereadRank {
-  category: string;
-  books: WereadBook[];
-  /** 排名是从多大的池子里挑出来的，界面上要如实说。 */
-  poolSize: number;
-}
-
 /**
  * 榜单分类。微信读书的 gateway 没有分类浏览接口，这些词是拿去当搜索关键词用的——
  * 实测 scope=10 搜「文学」「心理」这类词能翻出上千条，足够攒出一条榜。
@@ -104,6 +97,24 @@ export const WEREAD_CATEGORIES = [
 ] as const;
 
 export type WereadCategory = (typeof WEREAD_CATEGORIES)[number];
+
+/**
+ * 分类词 → 离线书目的文件名。
+ * 加减分类要同时改 scripts/fetch-catalog.mjs 里的那份清单，再重跑一次脚本。
+ */
+export const CATEGORY_SLUGS: Record<string, string> = {
+  小说: "novel",
+  文学: "literature",
+  历史: "history",
+  传记: "biography",
+  哲学: "philosophy",
+  心理: "psychology",
+  个人成长: "growth",
+  经济理财: "finance",
+  社会: "society",
+  科幻: "scifi",
+  旅行: "travel",
+};
 
 const CATEGORY_KEY = "moting:store-category";
 

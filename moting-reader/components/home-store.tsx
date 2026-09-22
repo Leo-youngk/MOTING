@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronRight, RefreshCw, Trophy } from "lucide-react";
-import { fetchWereadRank, fetchWereadRecommend } from "../lib/weread";
+import { fetchWereadRecommend } from "../lib/weread";
+import { loadCatalog, rankOf } from "../lib/store-catalog";
 import { preferredCategory, type WereadBook } from "../lib/weread-types";
 import { StoreCard, StoreRow } from "./bookstore";
 import "./home-store.css";
@@ -121,18 +122,20 @@ export function HomeStore({
   }, [loadFeed]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    fetchWereadRank(category, controller.signal)
+    let alive = true;
+    // 书目是本地文件，这一下基本不花时间。
+    loadCatalog(category)
       .then((data) => {
-        if (!controller.signal.aborted) {
-          setRank(data.books.slice(0, RANK_COUNT));
-          setRankLoading(false);
-        }
+        if (!alive) return;
+        setRank(rankOf(data.books, RANK_COUNT));
+        setRankLoading(false);
       })
       .catch(() => {
-        if (!controller.signal.aborted) setRankLoading(false);
+        if (alive) setRankLoading(false);
       });
-    return () => controller.abort();
+    return () => {
+      alive = false;
+    };
   }, [category]);
 
   // 两块都没拿到就只留一行交代，别在主页上摆一块空白或者红色报错。
@@ -155,33 +158,40 @@ export function HomeStore({
           </button>
         </div>
 
-        <div className="home-store__subhead">
-          <small>为你推荐 · 微信读书按你的阅读记录挑的</small>
-          <button
-            type="button"
-            className="text-button"
-            disabled={feedLoading || feedFailed}
-            onClick={shuffle}
-          >
-            <RefreshCw size={13} aria-hidden="true" />
-            换一批
-          </button>
-        </div>
+        {/* 推荐要实时查接口，它挂了就只收起这一段，榜单读的是本地书目，照常显示。 */}
+        {feedFailed ? (
+          <p className="home-store__subhead home-store__quiet">推荐暂时取不到，先看看榜单</p>
+        ) : (
+          <>
+            <div className="home-store__subhead">
+              <small>为你推荐 · 微信读书按你的阅读记录挑的</small>
+              <button
+                type="button"
+                className="text-button"
+                disabled={feedLoading}
+                onClick={shuffle}
+              >
+                <RefreshCw size={13} aria-hidden="true" />
+                换一批
+              </button>
+            </div>
 
-        <div className="home-row__track" aria-busy={feedLoading}>
-          {feedLoading && !feed.length
-            ? Array.from({ length: 4 }, (_, index) => (
-                <div className="store-skeleton store-skeleton--card" key={index} />
-              ))
-            : feed.slice(0, FEED_SHOWN).map((book, index) => (
-                <StoreCard
-                  key={book.bookId}
-                  book={book}
-                  priority={index < 3}
-                  onOpen={(target) => onOpenBook(target.bookId)}
-                />
-              ))}
-        </div>
+            <div className="home-row__track" aria-busy={feedLoading}>
+              {feedLoading && !feed.length
+                ? Array.from({ length: 4 }, (_, index) => (
+                    <div className="store-skeleton store-skeleton--card" key={index} />
+                  ))
+                : feed.slice(0, FEED_SHOWN).map((book, index) => (
+                    <StoreCard
+                      key={book.bookId}
+                      book={book}
+                      priority={index < 3}
+                      onOpen={(target) => onOpenBook(target.bookId)}
+                    />
+                  ))}
+            </div>
+          </>
+        )}
       </section>
 
       {rankLoading || rank.length ? (

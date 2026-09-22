@@ -622,3 +622,15 @@
   aspect-ratio: 104 / 196;
   border-radius: 6px;
 }
+
+/* 推荐流挂了只留一行小字——榜单和分类读的是本地书目，那两块还好好的。 */
+.store-lane__more + .store-lane__track,
+.store-lane-down {
+  margin-top: 0;
+}
+
+.store-lane-down {
+  padding: 18px 2px;
+  font-size: 13px;
+  line-height: 1.7;
+}

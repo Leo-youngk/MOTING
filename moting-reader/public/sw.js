@@ -1,6 +1,6 @@
 // SHELL 里的文件名不带内容哈希，缓存又是 cache-first，
 // 改了 manifest 或图标就必须顺手把版本号加一，否则已装的 PWA 永远拿旧的。
-const CACHE_NAME = "moting-shell-v8";
+const CACHE_NAME = "moting-shell-v9";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -40,6 +40,28 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/")) return;
+
+  // 分类书目是会重抓更新的静态数据，不能跟图标一样 cache-first 钉死，
+  // 否则重抓之后已装的 PWA 永远读旧的那份。
+  // network-first：在线时永远最新，离线回落到上次缓存的。
+  if (url.pathname.startsWith("/catalog/")) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const copy = response.clone();
+            event.waitUntil(
+              caches.open(CACHE_NAME)
+                .then((cache) => cache.put(request, copy))
+                .catch(() => undefined)
+            );
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
 
   if (request.mode === "navigate") {
     event.respondWith(

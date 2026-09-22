@@ -1,7 +1,6 @@
 import type {
   WereadBookDetail,
   WereadFeed,
-  WereadRank,
   WereadSearchResult,
 } from "./weread-types";
 
@@ -35,16 +34,6 @@ export function wereadCoverUrl(
 ): string {
   const target = coverUrl.replace(COVER_VARIANT, `/${COVER_SIZES[size]}`);
   return `/api/weread/cover?u=${encodeURIComponent(target)}`;
-}
-
-export function fetchWereadRank(
-  category: string,
-  signal?: AbortSignal
-): Promise<WereadRank> {
-  return request<WereadRank>(
-    `/api/weread/rank?category=${encodeURIComponent(category)}`,
-    signal
-  );
 }
 
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {

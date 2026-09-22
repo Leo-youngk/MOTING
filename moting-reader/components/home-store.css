@@ -92,3 +92,11 @@
   font-size: 12px;
   line-height: 1.6;
 }
+
+/* 推荐取不到时顶替那一段的一行小字。 */
+.home-store__quiet {
+  margin: 0 20px 4px;
+  color: var(--subtle);
+  font-size: 12px;
+  line-height: 1.6;
+}
