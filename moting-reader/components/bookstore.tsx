@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowLeft, ArrowRight, BookOpen, ChevronRight, Search, Trophy, X } from "lucide-react";
+import { ArrowRight, BookOpen, ChevronLeft, ChevronRight, Search, Trophy, X } from "lucide-react";
 import {
   fetchWereadBook,
   fetchWereadRank,
@@ -30,7 +30,7 @@ const RANK_PREVIEW = 5;
 /** 打开的是哪一份完整列表。null 表示停在书城首页。 */
 type Expanded = { title: string; subtitle: string; books: WereadBook[] } | null;
 
-function Cover({
+export function Cover({
   book,
   size = "card",
   priority = false,
@@ -66,7 +66,7 @@ function Cover({
  * 推荐值徽章。这是整个书城存在的理由——一眼看出这本书别人读完觉得好不好。
  * 评分人数太少就只报人数不报百分比：三十个人打出的 96% 说明不了任何事。
  */
-function Rating({ book, compact = false }: { book: WereadBook; compact?: boolean }) {
+export function Rating({ book, compact = false }: { book: WereadBook; compact?: boolean }) {
   const percent = ratingPercent(book.rating);
   const people = formatRatingCount(book.ratingCount);
   const trusted = (book.ratingCount ?? 0) >= RATING_TRUSTWORTHY_COUNT;
@@ -87,7 +87,7 @@ function Rating({ book, compact = false }: { book: WereadBook; compact?: boolean
   );
 }
 
-function StoreCard({
+export function StoreCard({
   book,
   priority = false,
   onOpen,
@@ -106,7 +106,7 @@ function StoreCard({
   );
 }
 
-function StoreRow({
+export function StoreRow({
   book,
   rank,
   priority = false,
@@ -133,7 +133,7 @@ function StoreRow({
   );
 }
 
-function LaneSkeleton() {
+export function LaneSkeleton() {
   return (
     <div className="store-lane" role="status" aria-label="正在加载书城">
       <div className="store-lane__head">
@@ -148,7 +148,7 @@ function LaneSkeleton() {
   );
 }
 
-function RankSkeleton() {
+export function RankSkeleton() {
   return (
     <div className="store-ranklist" role="status" aria-label="正在加载榜单">
       {Array.from({ length: RANK_PREVIEW }, (_, index) => (
@@ -160,11 +160,16 @@ function RankSkeleton() {
 
 export function Bookstore({
   books,
+  onBack,
   onFindBook,
+  initialBookId = "",
 }: {
   /** 本地书库。最近读的那本会被当成「相似推荐」的种子。 */
   books: Book[];
+  onBack: () => void;
   onFindBook: (title: string) => void;
+  /** 从主页的书城条点进来时带的书，直接落在这本书的详情上。 */
+  initialBookId?: string;
 }) {
   const [lanes, setLanes] = useState<WereadLane[]>([]);
   const [loading, setLoading] = useState(true);
@@ -286,9 +291,10 @@ export function Bookstore({
   }, [category]);
 
   useEffect(() => {
-    if (!selected) return;
+    const bookId = selected?.bookId ?? initialBookId;
+    if (!bookId) return;
     const controller = new AbortController();
-    fetchWereadBook(selected.bookId, controller.signal)
+    fetchWereadBook(bookId, controller.signal)
       .then((data) => {
         if (!controller.signal.aborted) setDetail(data);
       })
@@ -298,7 +304,7 @@ export function Bookstore({
         }
       });
     return () => controller.abort();
-  }, [selected]);
+  }, [selected, initialBookId]);
 
   function openBook(book: WereadBook) {
     setDetail(null);
@@ -392,27 +398,44 @@ export function Bookstore({
     setError("");
   }
 
-  if (selected) {
+  if (selected || initialBookId) {
     const shown = detail ?? selected;
-    const percent = ratingPercent(shown.rating);
-    const people = formatRatingCount(shown.ratingCount);
+    const percent = ratingPercent(shown?.rating ?? null);
+    const people = formatRatingCount(shown?.ratingCount ?? null);
     const total =
       (detail?.ratingGood ?? 0) + (detail?.ratingFair ?? 0) + (detail?.ratingPoor ?? 0);
+    // 从书城列表点进来的，返回回书城；从主页直接点进来的，返回就是回主页。
+    const back = selected ? () => setSelected(null) : onBack;
     return (
       <section className="store store--detail" aria-label="书籍详情">
-        <button type="button" className="store-back" onClick={() => setSelected(null)}>
-          <ArrowLeft size={17} />
-          返回
-        </button>
+        <header className="ios-nav-bar">
+          <button type="button" className="ios-back" onClick={back}>
+            <ChevronLeft size={22} />
+            {selected ? "书城" : "主页"}
+          </button>
+          <span>{shown?.title ?? "书籍详情"}</span>
+        </header>
 
         <div className="store-detail__hero">
-          <Cover book={shown} size="large" />
-          <div>
-            <h2>{shown.title}</h2>
-            <p>{shown.author || "作者未提供"}</p>
-            {shown.translator ? <small>{shown.translator} 译</small> : null}
-            <Rating book={shown} />
-          </div>
+          {shown ? (
+            <>
+              <Cover book={shown} size="large" />
+              <div>
+                <h2>{shown.title}</h2>
+                <p>{shown.author || "作者未提供"}</p>
+                {shown.translator ? <small>{shown.translator} 译</small> : null}
+                <Rating book={shown} />
+              </div>
+            </>
+          ) : (
+            <>
+              <span className="store-skeleton store-skeleton--hero" />
+              <div className="store-detail__hero-lines">
+                <span className="store-skeleton store-skeleton--line" />
+                <span className="store-skeleton store-skeleton--line store-skeleton--short" />
+              </div>
+            </>
+          )}
         </div>
 
         {detail && total > 0 && percent ? (
@@ -438,7 +461,12 @@ export function Bookstore({
         ) : null}
 
         <div className="store-detail__actions">
-          <button type="button" className="primary-button" onClick={() => onFindBook(shown.title)}>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={!shown}
+            onClick={() => shown && onFindBook(shown.title)}
+          >
             去找这本书
             <ArrowRight size={17} />
           </button>
@@ -448,14 +476,14 @@ export function Bookstore({
           <h3>简介</h3>
           {detailError ? (
             <p className="store-error" role="alert">{detailError}</p>
-          ) : shown.intro ? (
+          ) : shown?.intro ? (
             <p>{shown.intro}</p>
           ) : detail ? (
             <p className="store-muted">这本书没有提供简介。</p>
           ) : (
             <p className="store-muted" role="status">正在读取简介…</p>
           )}
-          {shown.category ? <span className="store-tag">{shown.category}</span> : null}
+          {shown?.category ? <span className="store-tag">{shown.category}</span> : null}
         </div>
 
         <p className="store-credit">
@@ -468,18 +496,16 @@ export function Bookstore({
   if (expanded) {
     return (
       <section className="store" aria-label={expanded.title}>
-        <button type="button" className="store-back" onClick={() => setExpanded(null)}>
-          <ArrowLeft size={17} />
-          返回书城
-        </button>
-        <div className="store-lane__head">
-          <div>
-            <h3>{expanded.title}</h3>
-            <small>
-              {expanded.subtitle} · 共 {expanded.books.length} 本
-            </small>
-          </div>
-        </div>
+        <header className="ios-nav-bar">
+          <button type="button" className="ios-back" onClick={() => setExpanded(null)}>
+            <ChevronLeft size={22} />
+            书城
+          </button>
+          <span>{expanded.title}</span>
+        </header>
+        <p className="store-expanded__note">
+          {expanded.subtitle} · 共 {expanded.books.length} 本
+        </p>
         <div className="store-results">
           {expanded.books.map((book, index) => (
             <StoreRow key={book.bookId} book={book} priority={index < 4} onOpen={openBook} />
@@ -493,6 +519,14 @@ export function Bookstore({
 
   return (
     <section className="store" aria-label="书城">
+      <header className="ios-nav-bar">
+        <button type="button" className="ios-back" onClick={onBack}>
+          <ChevronLeft size={22} />
+          主页
+        </button>
+        <span>书城</span>
+      </header>
+
       <form className="store-search" role="search" onSubmit={submitSearch}>
         <label className="ios-search">
           <Search size={16} aria-hidden="true" />

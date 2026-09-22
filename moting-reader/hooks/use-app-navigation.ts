@@ -27,6 +27,10 @@ function parentOf(view: AppView): AppView {
       return { name: "listen" };
     case "book-notes":
       return { name: "notes" };
+    case "find":
+      return { name: "library" };
+    case "store":
+      return { name: "home" };
     case "history":
       return { name: "home" };
     default:

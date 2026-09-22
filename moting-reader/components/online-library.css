@@ -15,7 +15,9 @@
 .online-feedback { min-height: 52px; padding-block: 10px; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .online-feedback p { margin: 0; }
 .online-feedback .online-error { color: var(--danger); }
-.online-results { height: max(280px, calc(100svh - 400px)); overflow-y: auto; overflow-x: hidden; overscroll-behavior-y: none; touch-action: pan-y; scrollbar-width: thin; }
+/* 400 → 318：页头从「大标题 + 三段控件」换成了一条返回导航条，矮了 88px。
+   刘海那段也要减掉，否则真机上整页会比视口高出一截，能上下橡皮筋。 */
+.online-results { height: max(280px, calc(100svh - 318px - env(safe-area-inset-top))); overflow-y: auto; overflow-x: hidden; overscroll-behavior-y: none; touch-action: pan-y; scrollbar-width: thin; }
 .online-book { display: flex; gap: 14px; padding-block: 18px; border-top: 1px solid var(--line-soft); }
 .online-book__cover { flex: 0 0 72px; width: 72px; height: 106px; position: relative; border-radius: 5px 9px 9px 5px; overflow: hidden; background: var(--paper-deep); color: var(--muted); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
 .online-book__cover span { font-size: 10px; }

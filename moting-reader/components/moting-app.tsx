@@ -1,7 +1,6 @@
 "use client";
 
 import "./book-metadata.css";
-import "./library-segments.css";
 
 import {
   ArrowLeft,
@@ -167,6 +166,11 @@ const OnlineLibrary = lazy(() =>
 );
 const Bookstore = lazy(() =>
   import("./bookstore").then(({ Bookstore: Component }) => ({
+    default: Component,
+  }))
+);
+const HomeStore = lazy(() =>
+  import("./home-store").then(({ HomeStore: Component }) => ({
     default: Component,
   }))
 );
@@ -943,6 +947,7 @@ function HomeScreen({
   onImport,
   onOpenHistory,
   onOpenSettings,
+  onOpenStore,
 }: {
   books: Book[];
   stats: ReadingStats;
@@ -953,6 +958,8 @@ function HomeScreen({
   onImport: () => void;
   onOpenHistory: () => void;
   onOpenSettings: () => void;
+  /** 去书城。带 bookId 就直接落在那本书的详情上。 */
+  onOpenStore: (bookId?: string) => void;
 }) {
   // 一本书一张卡：以前「继续阅读」和「继续收听」各排一行，
   // 同一本书既读过又听过就会上下重复出现，主页因此显得又长又乱。
@@ -1041,10 +1048,23 @@ function HomeScreen({
             </section>
           ) : null}
 
+        </>
+      )}
+
+      {/* 书城接在「继续读」下面：逛新书比回看统计更常用，统计往下滚就是。 */}
+      <Suspense fallback={<div className="home-store__loading" aria-hidden="true" />}>
+        <HomeStore
+          onOpenStore={() => onOpenStore()}
+          onOpenBook={(bookId) => onOpenStore(bookId)}
+        />
+      </Suspense>
+
+      {books.length ? (
+        <>
           <ReadingBoard stats={stats} sessions={sessions} />
           <ReadingLog sessions={sessions} onOpenHistory={onOpenHistory} />
         </>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -1052,7 +1072,7 @@ function HomeScreen({
 function LibraryScreen({
   books,
   onImport,
-  onOnlineImport,
+  onFind,
   onOpen,
   onPlay,
   onOpenNotes,
@@ -1061,7 +1081,8 @@ function LibraryScreen({
 }: {
   books: Book[];
   onImport: () => void;
-  onOnlineImport: (file: File, sourceId: string, onProgress: (label: string) => void) => Promise<void>;
+  /** 去在线找书。带上关键词就进去直接搜。 */
+  onFind: (query: string) => void;
   onOpen: (book: Book) => void;
   onPlay: (book: Book) => void;
   onOpenNotes: (book: Book) => void;
@@ -1070,8 +1091,7 @@ function LibraryScreen({
 }) {
   const [query, setQuery] = useState("");
   const [sheetBook, setSheetBook] = useState<Book | null>(null);
-  const [libraryMode, setLibraryMode] = useState<"local" | "discover" | "online">("local");
-  const [onlineQuery, setOnlineQuery] = useState<string | null>(null);
+  const [showSources, setShowSources] = useState(false);
 
   const filtered = books.filter((book) =>
     `${book.title} ${book.author}`.toLowerCase().includes(query.toLowerCase())
@@ -1085,29 +1105,14 @@ function LibraryScreen({
           <button
             type="button"
             className="icon-button icon-button--filled"
-            aria-label="导入书籍"
-            onClick={onImport}
+            aria-label="添加书籍"
+            onClick={() => setShowSources(true)}
           >
             <Plus size={20} />
           </button>
         }
       />
 
-      <div className="library-segments" role="group" aria-label="书库来源">
-        <button type="button" aria-pressed={libraryMode === "local"} onClick={() => setLibraryMode("local")}>本地书库</button>
-        <button type="button" aria-pressed={libraryMode === "discover"} onClick={() => setLibraryMode("discover")}>书城</button>
-        <button type="button" aria-pressed={libraryMode === "online"} onClick={() => { setOnlineQuery(null); setLibraryMode("online"); }}>在线找书</button>
-      </div>
-
-      {libraryMode === "online" ? (
-        <Suspense fallback={<div className="online-loading">正在打开在线书库…</div>}>
-          <OnlineLibrary key={onlineQuery ?? "manual"} initialQuery={onlineQuery ?? ""} books={books} onImport={onOnlineImport} onOpen={onOpen} />
-        </Suspense>
-      ) : libraryMode === "discover" ? (
-        <Suspense fallback={<div className="online-loading">正在打开书城…</div>}>
-          <Bookstore books={books} onFindBook={(title) => { setOnlineQuery(title); setLibraryMode("online"); }} />
-        </Suspense>
-      ) : <>
       <label className="ios-search">
         <Search size={16} />
         <input
@@ -1126,12 +1131,18 @@ function LibraryScreen({
         <EmptyState
           icon={<Library size={28} />}
           title="书库还是空的"
-          description="导入的书会保存在这台设备上，不会上传。"
+          description="在线找一本，或者导入自己的文件。书都存在这台设备上，不会上传。"
           action={
-            <button type="button" className="primary-button" onClick={onImport}>
-              <Upload size={17} />
-              导入书籍
-            </button>
+            <div className="library-empty__actions">
+              <button type="button" className="primary-button" onClick={() => onFind("")}>
+                <Search size={17} />
+                在线找书
+              </button>
+              <button type="button" className="text-button" onClick={onImport}>
+                <Upload size={17} />
+                从文件导入
+              </button>
+            </div>
           }
         />
       ) : (
@@ -1177,12 +1188,51 @@ function LibraryScreen({
               })}
             </div>
           ) : (
-            <p className="no-results">没有匹配的书。</p>
+            <div className="library-miss">
+              <p>
+                书库里没有<strong>「{query.trim()}」</strong>。
+              </p>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => onFind(query.trim())}
+              >
+                <Search size={17} />
+                去在线找这本书
+              </button>
+            </div>
           )}
         </>
       )}
 
-      </>}
+      {showSources ? (
+        <Modal title="添加书籍" onClose={() => setShowSources(false)}>
+          <div className="book-actions">
+            <button
+              type="button"
+              className="book-action"
+              onClick={() => {
+                setShowSources(false);
+                onFind("");
+              }}
+            >
+              <Search size={19} />
+              <span>在线找书</span>
+            </button>
+            <button
+              type="button"
+              className="book-action"
+              onClick={() => {
+                setShowSources(false);
+                onImport();
+              }}
+            >
+              <Upload size={19} />
+              <span>从文件导入</span>
+            </button>
+          </div>
+        </Modal>
+      ) : null}
 
       {sheetBook ? (
         <Modal title={sheetBook.title} onClose={() => setSheetBook(null)}>
@@ -6578,13 +6628,13 @@ export default function MotingApp() {
   };
 
   const activeMainView: MainView =
-    view.name === "reader"
+    view.name === "reader" || view.name === "find"
       ? "library"
       : view.name === "player"
         ? "listen"
         : view.name === "book-notes"
           ? "notes"
-          : view.name === "history"
+          : view.name === "history" || view.name === "store"
             ? "home"
             : view.name;
 
@@ -6678,6 +6728,9 @@ export default function MotingApp() {
                 onImport={() => fileInputRef.current?.click()}
                 onOpenHistory={() => navigate({ name: "history" })}
                 onOpenSettings={() => setShowSettings(true)}
+                onOpenStore={(bookId) =>
+                  navigate(bookId ? { name: "store", bookId } : { name: "store" })
+                }
               />
             ) : view.name === "history" ? (
               <HistoryScreen
@@ -6688,7 +6741,7 @@ export default function MotingApp() {
               <LibraryScreen
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
-                onOnlineImport={handleOnlineImport}
+                onFind={(query) => navigate({ name: "find", query })}
                 onOpen={(book) => openReader(book)}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenNotes={(book) =>
@@ -6697,6 +6750,36 @@ export default function MotingApp() {
                 onOpenMetadata={setMetadataBook}
                 onDelete={setDeleteTarget}
               />
+            ) : view.name === "store" ? (
+              <div className="screen">
+                <Suspense
+                  fallback={<div className="online-loading">正在打开书城…</div>}
+                >
+                  <Bookstore
+                    books={books}
+                    initialBookId={view.bookId ?? ""}
+                    onBack={() => goBack({ name: "home" })}
+                    onFindBook={(title) => navigate({ name: "find", query: title })}
+                  />
+                </Suspense>
+              </div>
+            ) : view.name === "find" ? (
+              <Suspense
+                fallback={
+                  <div className="screen">
+                    <div className="online-loading">正在打开在线找书…</div>
+                  </div>
+                }
+              >
+                <OnlineLibrary
+                  key={view.query}
+                  initialQuery={view.query}
+                  books={books}
+                  onImport={handleOnlineImport}
+                  onOpen={(book) => openReader(book)}
+                  onBack={() => goBack({ name: "library" })}
+                />
+              </Suspense>
             ) : view.name === "listen" ? (
               <ListenScreen
                 books={books}

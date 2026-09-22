@@ -1,17 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { BookOpen, Check, Download, LoaderCircle, Search, UserRound, X } from "lucide-react";
+import { BookOpen, Check, ChevronLeft, Download, LoaderCircle, Search, UserRound, X } from "lucide-react";
 import { downloadZlibrary, getZlibrarySession, loginZlibrary, logoutZlibrary, searchZlibrary, ZlibraryError } from "../lib/zlibrary";
 import { MAX_BOOK_FILE_LABEL } from "../lib/file-limits";
 import { ONLINE_BOOK_FORMATS, ONLINE_BOOK_MAX_BYTES, type OnlineBook } from "../lib/zlibrary-types";
 import type { Book } from "../lib/types";
 import "./online-library.css";
 
-export function OnlineLibrary({ books, onImport, onOpen, initialQuery = "" }: {
+export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = "" }: {
   books: Book[];
   onImport: (file: File, sourceId: string, onProgress: (label: string) => void) => Promise<void>;
   onOpen: (book: Book) => void;
+  onBack: () => void;
+  /** 从书库搜不到、或从书城「去找这本书」进来时带的书名，进来就直接搜。 */
   initialQuery?: string;
 }) {
   const [query, setQuery] = useState(initialQuery);
@@ -183,7 +185,16 @@ export function OnlineLibrary({ books, onImport, onOpen, initialQuery = "" }: {
   }
 
   return (
-    <section className="online-library" aria-label="在线找书">
+    <div className="screen">
+      <header className="ios-nav-bar">
+        <button type="button" className="ios-back" onClick={onBack}>
+          <ChevronLeft size={22} />
+          返回
+        </button>
+        <span>在线找书</span>
+      </header>
+
+      <section className="online-library" aria-label="在线找书">
       <form className="online-search" onSubmit={(event) => { event.preventDefault(); (document.activeElement as HTMLElement)?.blur(); void search(); }}>
         <label className="ios-search">
           <Search size={16} aria-hidden="true" />
@@ -247,6 +258,7 @@ export function OnlineLibrary({ books, onImport, onOpen, initialQuery = "" }: {
         {!searching && !results.length ? <div className="online-empty"><BookOpen size={28} /><h3>{lastSearch ? "没有找到匹配的书" : "下一本想读什么？"}</h3><p>{lastSearch ? "换个书名、作者，或调整格式后再搜索。" : "输入书名或作者，找到后直接加入书库。"}</p></div> : null}
         {lastSearch && hasMore ? <button type="button" className="secondary-button online-more" disabled={searching || !!downloading} onClick={() => void search(lastSearch.page + 1)}>{searching ? "正在查找…" : "更多结果"}</button> : null}
       </div>
-    </section>
+      </section>
+    </div>
   );
 }

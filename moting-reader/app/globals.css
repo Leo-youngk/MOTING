@@ -1368,6 +1368,36 @@ button:disabled {
   text-align: center;
 }
 
+/* 本地搜不到时的去处。书库这个搜索框大多数时候本来就是在找还没有的书。 */
+.library-miss {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  margin: 36px 0;
+  color: var(--muted);
+  text-align: center;
+}
+
+.library-miss p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.library-miss strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.library-empty__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
 .empty-state {
   display: flex;
   min-height: 52vh;

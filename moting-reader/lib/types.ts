@@ -7,6 +7,8 @@ export type MainView = "home" | "library" | "listen" | "notes";
 export type AppView =
   | { name: MainView }
   | { name: "history" }
+  | { name: "store"; bookId?: string }
+  | { name: "find"; query: string }
   | { name: "book-notes"; bookId: string }
   | { name: "reader"; bookId: string }
   | { name: "player"; bookId: string };

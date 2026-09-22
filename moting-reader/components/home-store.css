@@ -1,0 +1,94 @@
+/*
+ * 主页的书城条。
+ * 标题与横滑轨道沿用主页 .home-row 那套出血留白（轨道要能贴到屏幕边缘），
+ * 卡片和榜单行直接复用书城页的零件，两处的手感必须是同一个。
+ */
+
+/* 懒加载这块时先占住位置，chunk 到了换成骨架屏，高度对得上就不会跳。 */
+.home-store__loading {
+  min-height: 560px;
+}
+
+.home-store__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 20px 4px;
+}
+
+.home-store__title {
+  margin: 0;
+}
+
+/* .text-button 自带 7px 内边距，右端要拉回来才能和 20px 的版心对齐。 */
+.home-store__head .text-button,
+.home-store__subhead .text-button {
+  flex: 0 0 auto;
+  gap: 2px;
+  margin-right: -7px;
+}
+
+.home-store__head .text-button {
+  font-size: 15px;
+}
+
+.home-store__subhead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 20px 12px;
+}
+
+.home-store__subhead small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.home-store__subhead .text-button {
+  gap: 4px;
+  font-size: 13px;
+}
+
+.home-store__subhead .text-button:disabled {
+  color: var(--subtle);
+}
+
+.home-store__rank {
+  margin-bottom: 26px;
+}
+
+.home-store__rank-head {
+  margin-bottom: 12px;
+}
+
+.home-store__rank-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.home-store__rank-head small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 书城整个取不到时只留一行交代，不在主页上摆空白，也不弹红色报错。 */
+.home-store__down {
+  margin-bottom: 26px;
+}
+
+.home-store__down p {
+  margin: 0;
+  color: var(--subtle);
+  font-size: 12px;
+  line-height: 1.6;
+}
