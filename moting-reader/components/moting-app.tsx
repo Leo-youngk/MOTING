@@ -1,5 +1,6 @@
 "use client";
 
+import "./book-metadata.css";
 import "./library-segments.css";
 
 import {
@@ -20,6 +21,7 @@ import {
   Headphones,
   Highlighter,
   Home,
+  Info,
   Layers,
   Library,
   List,
@@ -64,6 +66,23 @@ import { useViewportFill } from "../hooks/use-viewport-fill";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
 import { AiRequestError, fetchAiModels, streamAiChat } from "../lib/ai";
 import {
+  BookMetadataError,
+  cleanTitleText,
+  coverProxyUrl,
+  decideAutoApply,
+  fetchCoverDataUrl,
+  formatAuthors,
+  lookupBookMetadata,
+  lookupQuery,
+  needsMetadataLookup,
+} from "../lib/book-metadata";
+import {
+  BOOK_METADATA_SOURCE,
+  type AppliedBookMetadata,
+  type BookMetadataCandidate,
+  type BookMetadataPatch,
+} from "../lib/book-metadata-types";
+import {
   findSentence,
   flattenChapter,
   formatReadingTime,
@@ -83,6 +102,7 @@ import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "../lib/file-limits";
 import { springTo } from "../lib/motion";
 import {
   clearLibrary,
+  getAllBookMetadata,
   getAllBooks,
   getAllChats,
   getAllNotes,
@@ -92,8 +112,10 @@ import {
   getStats,
   saveSession,
   removeBook,
+  removeBookMetadata,
   writeNotes,
   saveBook,
+  saveBookMetadata,
   saveImportedBook,
   saveReadingPositions,
   saveChat,
@@ -1034,6 +1056,7 @@ function LibraryScreen({
   onOpen,
   onPlay,
   onOpenNotes,
+  onOpenMetadata,
   onDelete,
 }: {
   books: Book[];
@@ -1042,6 +1065,7 @@ function LibraryScreen({
   onOpen: (book: Book) => void;
   onPlay: (book: Book) => void;
   onOpenNotes: (book: Book) => void;
+  onOpenMetadata: (book: Book) => void;
   onDelete: (book: Book) => void;
 }) {
   const [query, setQuery] = useState("");
@@ -1202,6 +1226,18 @@ function LibraryScreen({
             </button>
             <button
               type="button"
+              className="book-action"
+              onClick={() => {
+                const book = sheetBook;
+                setSheetBook(null);
+                onOpenMetadata(book);
+              }}
+            >
+              <Info size={19} />
+              <span>书籍资料</span>
+            </button>
+            <button
+              type="button"
               className="book-action book-action--danger"
               onClick={() => {
                 const book = sheetBook;
@@ -1216,6 +1252,125 @@ function LibraryScreen({
         </Modal>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * 「书籍资料」弹层：看后台查到了什么、手动换一个版本、或者整个还原回导入时的样子。
+ * 只显示和改书名、作者、封面三项——正文、阅读进度、划线一律不碰。
+ */
+function BookMetadataSheet({
+  book,
+  patch,
+  busy,
+  onApply,
+  onRevert,
+  onRefresh,
+  onClose,
+}: {
+  book: Book;
+  patch: BookMetadataPatch | undefined;
+  busy: boolean;
+  onApply: (candidate: BookMetadataCandidate) => void;
+  onRevert: () => void;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  const applied = patch?.applied;
+  return (
+    <Modal title="书籍资料" onClose={onClose}>
+      <div className="book-metadata" aria-busy={busy}>
+        <div className="book-metadata__current">
+          <BookCover book={book} size="medium" />
+          <div>
+            <strong>{book.title}</strong>
+            <small>{book.author}</small>
+            <em>{applied ? "已套用线上资料" : "导入时的资料"}</em>
+          </div>
+        </div>
+
+        {busy ? (
+          <p className="book-metadata__hint" role="status">
+            正在查询 Google Books…
+          </p>
+        ) : patch?.failedReason ? (
+          <p className="book-metadata__error" role="alert">
+            {patch.failedReason}
+          </p>
+        ) : !patch ? (
+          <p className="book-metadata__hint">
+            这本书还没有查过。书名、作者和封面都齐全时不会自动查询。
+          </p>
+        ) : !patch.candidates.length ? (
+          <p className="book-metadata__hint">
+            Google Books 上没有找到「{patch.query}」。中文书的收录并不完整，查不到是常事。
+          </p>
+        ) : null}
+
+        {patch?.candidates.length ? (
+          <ul className="book-metadata__list">
+            {patch.candidates.map((candidate) => {
+              const active = applied?.volumeId === candidate.volumeId;
+              return (
+                <li key={candidate.volumeId}>
+                  <button
+                    type="button"
+                    aria-pressed={active}
+                    disabled={busy}
+                    onClick={() => onApply(candidate)}
+                  >
+                    <span className="book-metadata__thumb">
+                      <BookOpen size={17} aria-hidden="true" />
+                      {candidate.coverUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={coverProxyUrl(candidate.coverUrl)}
+                          alt=""
+                          loading="lazy"
+                          onError={(event) => {
+                            event.currentTarget.style.display = "none";
+                          }}
+                        />
+                      ) : null}
+                    </span>
+                    <span className="book-metadata__info">
+                      <strong>{candidate.title}</strong>
+                      <small>{formatAuthors(candidate.authors) || "作者未提供"}</small>
+                      <em>
+                        {[candidate.publishedDate, candidate.categories[0]]
+                          .filter(Boolean)
+                          .join(" · ") || "出版信息未提供"}
+                      </em>
+                    </span>
+                    {active ? <Check size={16} aria-label="已套用" /> : null}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
+
+        <div className="book-metadata__actions">
+          {applied ? (
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={busy}
+              onClick={onRevert}
+            >
+              还原成导入时的资料
+            </button>
+          ) : null}
+          <button type="button" className="text-button" disabled={busy} onClick={onRefresh}>
+            重新查询
+          </button>
+        </div>
+
+        <p className="book-metadata__credit">
+          资料来自 Google Books，只替换书名、作者和封面，不改正文、阅读进度和划线。
+        </p>
+      </div>
+    </Modal>
   );
 }
 
@@ -5362,6 +5517,9 @@ export default function MotingApp() {
   const [books, setBooks] = useState<Book[]>([]);
   const [notes, setNotes] = useState<BookNote[]>([]);
   const [chats, setChats] = useState<BookAiChat[]>([]);
+  // 线上补全的书籍资料。不并进 books，这样「还原」永远能拿回导入时的原始值。
+  const [bookMetadata, setBookMetadata] = useState<BookMetadataPatch[]>([]);
+  const [metadataBook, setMetadataBook] = useState<Book | null>(null);
   // 从「笔记」Tab 的历史入口点开的书，跟 view 无关，纯弹层状态。
   const [chatBook, setChatBook] = useState<Book | null>(null);
   const [settings, setSettings] =
@@ -5453,6 +5611,7 @@ export default function MotingApp() {
       getSettings(),
       getStats(),
       getAllSessions(),
+      getAllBookMetadata(),
     ])
       .then(async ([
         storedBooks,
@@ -5461,6 +5620,7 @@ export default function MotingApp() {
         storedSettings,
         storedStats,
         storedSessions,
+        storedMetadata,
       ]) => {
         if (cancelled) return;
         if (!storedBooks.length) {
@@ -5474,6 +5634,7 @@ export default function MotingApp() {
         setSettings(storedSettings);
         setStats(storedStats);
         setSessions(storedSessions);
+        setBookMetadata(storedMetadata);
       })
       .catch(() => {
         const demo = createDemoBook();
@@ -5648,6 +5809,247 @@ export default function MotingApp() {
     };
   }, [books.length, readingBookId, updateBook]);
 
+  const bookMetadataRef = useRef(bookMetadata);
+  useEffect(() => {
+    bookMetadataRef.current = bookMetadata;
+  }, [bookMetadata]);
+
+  /** 补全结果只落在补丁记录里，内存里的 books 要手动跟上——不能走 updateBook，那会把整本书重写一遍。 */
+  const applyPatchToBooks = useCallback((patch: BookMetadataPatch) => {
+    setBooks((current) =>
+      current.map((book) =>
+        book.id === patch.bookId
+          ? {
+              ...book,
+              title: patch.applied?.title ?? patch.original?.title ?? book.title,
+              author: patch.applied?.author ?? patch.original?.author ?? book.author,
+              coverDataUrl:
+                patch.applied?.coverDataUrl ??
+                patch.original?.coverDataUrl ??
+                book.coverDataUrl,
+            }
+          : book
+      )
+    );
+  }, []);
+
+  const commitMetadataPatch = useCallback(
+    async (patch: BookMetadataPatch) => {
+      await saveBookMetadata(patch).catch((error) => {
+        reportStorageError("book-metadata", error);
+        throw error;
+      });
+      setBookMetadata((current) => [
+        ...current.filter((item) => item.bookId !== patch.bookId),
+        patch,
+      ]);
+      applyPatchToBooks(patch);
+    },
+    [applyPatchToBooks, reportStorageError]
+  );
+
+  const buildMetadataPatch = useCallback(
+    async (book: Book, signal: AbortSignal): Promise<BookMetadataPatch | null> => {
+      const base: BookMetadataPatch = {
+        bookId: book.id,
+        source: BOOK_METADATA_SOURCE,
+        query: lookupQuery(book).title,
+        fetchedAt: Date.now(),
+        candidates: [],
+        applied: null,
+        original: null,
+        appliedBy: null,
+      };
+      let candidates: BookMetadataCandidate[];
+      try {
+        candidates = (await lookupBookMetadata(book, signal)).candidates;
+      } catch (error) {
+        if (signal.aborted) return null;
+        // 失败也记一笔：否则每次开机都会把同一批书重查一遍。
+        return {
+          ...base,
+          failedAt: Date.now(),
+          failedReason:
+            error instanceof BookMetadataError ? error.message : "书籍资料查询失败",
+        };
+      }
+      const decision = decideAutoApply(book, candidates);
+      if (!decision) return { ...base, candidates };
+
+      const coverDataUrl =
+        decision.wantCover && decision.candidate.coverUrl
+          ? await fetchCoverDataUrl(decision.candidate.coverUrl, signal)
+          : null;
+      if (signal.aborted) return null;
+
+      const applied: AppliedBookMetadata = { volumeId: decision.candidate.volumeId };
+      if (decision.title) applied.title = decision.title;
+      if (decision.author) applied.author = decision.author;
+      if (coverDataUrl) applied.coverDataUrl = coverDataUrl;
+      // 查到了候选却一个字段都没真补上，就当没套用，省得界面显示「已套用」但看不出差别。
+      if (!applied.title && !applied.author && !applied.coverDataUrl) {
+        return { ...base, candidates };
+      }
+      return {
+        ...base,
+        candidates,
+        applied,
+        appliedBy: "auto",
+        original: {
+          title: book.title,
+          author: book.author,
+          coverDataUrl: book.coverDataUrl,
+        },
+      };
+    },
+    []
+  );
+
+  /**
+   * 导入时的书名作者经常是脏的：解析不到标题就拿文件名顶上，作者直接写「未知作者」。
+   * 开机后在后台按本去 Google Books 查一次，只补明确缺失的字段（规则见 book-metadata.ts）。
+   *
+   * 跟上面的插图补量守同一条纪律：正在读书/听书、或正在导入时一律不跑——
+   * 取封面要在主线程解码再重编码图片，那是实打实会掉帧的活儿。
+   */
+  const metadataCheckedRef = useRef(new Set<string>());
+  const metadataBusyRef = useRef(false);
+  useEffect(() => {
+    if (!ready || readingBookId || importProgress || metadataBusyRef.current) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    metadataBusyRef.current = true;
+
+    const fillMetadata = async () => {
+      try {
+        for (const patch of bookMetadataRef.current) {
+          metadataCheckedRef.current.add(patch.bookId);
+        }
+        for (const book of booksRef.current) {
+          if (cancelled) return;
+          if (metadataCheckedRef.current.has(book.id)) continue;
+          metadataCheckedRef.current.add(book.id);
+          if (!needsMetadataLookup(book)) continue;
+          const patch = await buildMetadataPatch(book, controller.signal);
+          if (cancelled || !patch) return;
+          await commitMetadataPatch(patch).catch(() => undefined);
+        }
+      } finally {
+        if (!cancelled) metadataBusyRef.current = false;
+      }
+    };
+
+    let idleId: number | null = null;
+    let timeoutId: number | null = null;
+    const idleWindow = window as Window & {
+      requestIdleCallback?: Window["requestIdleCallback"];
+      cancelIdleCallback?: Window["cancelIdleCallback"];
+    };
+    if (typeof idleWindow.requestIdleCallback === "function") {
+      idleId = idleWindow.requestIdleCallback(() => void fillMetadata(), { timeout: 4000 });
+    } else {
+      timeoutId = window.setTimeout(() => void fillMetadata(), 1200);
+    }
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (idleId !== null) idleWindow.cancelIdleCallback?.(idleId);
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      metadataBusyRef.current = false;
+    };
+  }, [
+    ready,
+    readingBookId,
+    importProgress,
+    books.length,
+    buildMetadataPatch,
+    commitMetadataPatch,
+  ]);
+
+  const [metadataBusy, setMetadataBusy] = useState(false);
+
+  /** 用户在「书籍资料」里手选的，比后台那条规则宽：他自己认了，书名作者封面一起换。 */
+  const chooseMetadataCandidate = useCallback(
+    async (book: Book, candidate: BookMetadataCandidate) => {
+      const existing = bookMetadataRef.current.find((item) => item.bookId === book.id);
+      const original = existing?.original ?? {
+        title: book.title,
+        author: book.author,
+        coverDataUrl: book.coverDataUrl,
+      };
+      setMetadataBusy(true);
+      try {
+        const applied: AppliedBookMetadata = { volumeId: candidate.volumeId };
+        const title = cleanTitleText(candidate.title);
+        if (title) applied.title = title;
+        const author = formatAuthors(candidate.authors);
+        if (author) applied.author = author;
+        if (candidate.coverUrl) {
+          const cover = await fetchCoverDataUrl(candidate.coverUrl);
+          if (cover) applied.coverDataUrl = cover;
+        }
+        await commitMetadataPatch({
+          bookId: book.id,
+          source: BOOK_METADATA_SOURCE,
+          query: existing?.query ?? lookupQuery(book).title,
+          fetchedAt: existing?.fetchedAt ?? Date.now(),
+          candidates: existing?.candidates ?? [candidate],
+          applied,
+          original,
+          appliedBy: "user",
+        });
+        showToast("已套用线上书籍资料");
+      } catch {
+        // commitMetadataPatch 已经弹过存储失败的提示，这里不再重复。
+      } finally {
+        setMetadataBusy(false);
+      }
+    },
+    [commitMetadataPatch, showToast]
+  );
+
+  const revertMetadata = useCallback(
+    async (book: Book) => {
+      const existing = bookMetadataRef.current.find((item) => item.bookId === book.id);
+      if (!existing?.original) return;
+      setMetadataBusy(true);
+      try {
+        await commitMetadataPatch({ ...existing, applied: null, appliedBy: null });
+        showToast("已还原成导入时的资料");
+      } catch {
+        // 同上。
+      } finally {
+        setMetadataBusy(false);
+      }
+    },
+    [commitMetadataPatch, showToast]
+  );
+
+  const refreshMetadata = useCallback(
+    async (book: Book) => {
+      setMetadataBusy(true);
+      try {
+        const existing = bookMetadataRef.current.find((item) => item.bookId === book.id);
+        // 先退回原样再查，否则拿已经被替换过的书名去查，等于拿结果再查一次结果。
+        const source: Book = existing?.original
+          ? { ...book, ...existing.original }
+          : book;
+        const patch = await buildMetadataPatch(source, new AbortController().signal);
+        if (!patch) return;
+        await removeBookMetadata(book.id).catch(() => undefined);
+        metadataCheckedRef.current.add(book.id);
+        await commitMetadataPatch(
+          existing?.original ? { ...patch, original: existing.original } : patch
+        );
+      } catch {
+        // 同上。
+      } finally {
+        setMetadataBusy(false);
+      }
+    },
+    [buildMetadataPatch, commitMetadataPatch]
+  );
+
   const flushListeningProgress = useCallback(() => {
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
@@ -5728,6 +6130,14 @@ export default function MotingApp() {
     view.name === "book-notes"
       ? books.find((book) => book.id === view.bookId)
       : undefined;
+
+  // 套用资料之后 books 会换一份新对象，弹层里必须跟着拿最新的那本，否则改完还显示旧书名。
+  const metadataTarget = metadataBook
+    ? books.find((book) => book.id === metadataBook.id)
+    : undefined;
+  const metadataPatch = metadataTarget
+    ? bookMetadata.find((patch) => patch.bookId === metadataTarget.id)
+    : undefined;
 
   // 冷启动恢复出来的视图可能指着一本已经删掉的书。下钻页拿不到书就会一路掉进
   // 最后那个兜底分支、显示成笔记页，所以书加载完之后校一次，不对就退回所属板块。
@@ -6284,6 +6694,7 @@ export default function MotingApp() {
                 onOpenNotes={(book) =>
                   navigate({ name: "book-notes", bookId: book.id })
                 }
+                onOpenMetadata={setMetadataBook}
                 onDelete={setDeleteTarget}
               />
             ) : view.name === "listen" ? (
@@ -6381,6 +6792,18 @@ export default function MotingApp() {
             </button>
           </div>
         </Modal>
+      ) : null}
+
+      {metadataTarget ? (
+        <BookMetadataSheet
+          book={metadataTarget}
+          patch={metadataPatch}
+          busy={metadataBusy}
+          onApply={(candidate) => void chooseMetadataCandidate(metadataTarget, candidate)}
+          onRevert={() => void revertMetadata(metadataTarget)}
+          onRefresh={() => void refreshMetadata(metadataTarget)}
+          onClose={() => setMetadataBook(null)}
+        />
       ) : null}
 
       {deleteTarget ? (

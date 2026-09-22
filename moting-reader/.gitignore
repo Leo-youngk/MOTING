@@ -41,3 +41,6 @@ next-env.d.ts
 /.sites-runtime/
 /outputs/
 /work/
+
+# cloudflare worker local secrets
+.dev.vars*

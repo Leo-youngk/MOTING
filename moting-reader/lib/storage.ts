@@ -1,3 +1,4 @@
+import type { BookMetadataPatch } from "./book-metadata-types";
 import type {
   Book,
   BookAiChat,
@@ -19,6 +20,8 @@ const IMAGE_STORE = "images";
 const CHAT_STORE = "chats";
 const SESSION_STORE = "sessions";
 const READING_POSITION_PREFIX = "reading-position:";
+/** 线上补全的书籍资料。跟阅读位置一样单独存，不写回体积巨大的 Book 记录。 */
+const BOOK_METADATA_PREFIX = "book-metadata:";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -109,6 +112,10 @@ function readingPositionKey(bookId: string): string {
   return `${READING_POSITION_PREFIX}${bookId}`;
 }
 
+function bookMetadataKey(bookId: string): string {
+  return `${BOOK_METADATA_PREFIX}${bookId}`;
+}
+
 export async function getAllBooks(): Promise<Book[]> {
   const db = await openDatabase();
   const transaction = db.transaction([BOOK_STORE, SETTINGS_STORE], "readonly");
@@ -122,10 +129,19 @@ export async function getAllBooks(): Promise<Book[]> {
     requestToPromise(keysRequest),
   ]);
   const positions = new Map<string, StoredReadingPosition>();
+  const metadata = new Map<string, BookMetadataPatch>();
   keys.forEach((key, index) => {
-    if (typeof key !== "string" || !key.startsWith(READING_POSITION_PREFIX)) return;
+    if (typeof key !== "string") return;
     const value = settings[index];
     if (!value || typeof value !== "object") return;
+    if (key.startsWith(BOOK_METADATA_PREFIX)) {
+      metadata.set(
+        key.slice(BOOK_METADATA_PREFIX.length),
+        value as BookMetadataPatch
+      );
+      return;
+    }
+    if (!key.startsWith(READING_POSITION_PREFIX)) return;
     const record = value as Partial<StoredReadingPosition>;
     if (
       !record.position ||
@@ -139,15 +155,69 @@ export async function getAllBooks(): Promise<Book[]> {
   return books
     .map((book) => {
       const record = positions.get(book.id);
-      if (!record || record.savedAt <= book.updatedAt) return book;
-      return {
-        ...book,
-        readingPosition: record.position,
-        lastOpenedAt: Math.max(book.lastOpenedAt, record.lastOpenedAt),
-        updatedAt: record.savedAt,
-      };
+      const merged =
+        !record || record.savedAt <= book.updatedAt
+          ? book
+          : {
+              ...book,
+              readingPosition: record.position,
+              lastOpenedAt: Math.max(book.lastOpenedAt, record.lastOpenedAt),
+              updatedAt: record.savedAt,
+            };
+      return applyBookMetadata(merged, metadata.get(book.id));
     })
     .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
+}
+
+/**
+ * 线上补全的书名/作者/封面只在读出来的这一刻盖上去，Book 记录本身保持导入时的原样。
+ * 删掉补丁记录，书就恢复原貌——这也是「还原成导入时的资料」能成立的前提。
+ */
+function applyBookMetadata(
+  book: Book,
+  patch: BookMetadataPatch | undefined
+): Book {
+  const applied = patch?.applied;
+  if (!applied) return book;
+  return {
+    ...book,
+    title: applied.title ?? book.title,
+    author: applied.author ?? book.author,
+    coverDataUrl: applied.coverDataUrl ?? book.coverDataUrl,
+  };
+}
+
+export async function getAllBookMetadata(): Promise<BookMetadataPatch[]> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readonly");
+  const store = transaction.objectStore(SETTINGS_STORE);
+  const [values, keys] = await Promise.all([
+    requestToPromise(store.getAll() as IDBRequest<unknown[]>),
+    requestToPromise(store.getAllKeys()),
+  ]);
+  const patches: BookMetadataPatch[] = [];
+  keys.forEach((key, index) => {
+    if (typeof key !== "string" || !key.startsWith(BOOK_METADATA_PREFIX)) return;
+    const value = values[index];
+    if (value && typeof value === "object") patches.push(value as BookMetadataPatch);
+  });
+  return patches;
+}
+
+export async function saveBookMetadata(patch: BookMetadataPatch): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readwrite");
+  transaction
+    .objectStore(SETTINGS_STORE)
+    .put(patch, bookMetadataKey(patch.bookId));
+  await transactionDone(transaction);
+}
+
+export async function removeBookMetadata(bookId: string): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readwrite");
+  transaction.objectStore(SETTINGS_STORE).delete(bookMetadataKey(bookId));
+  await transactionDone(transaction);
 }
 
 export async function saveBook(book: Book): Promise<void> {
@@ -179,6 +249,8 @@ export async function removeBook(bookId: string): Promise<void> {
   deleteByBookId(transaction.objectStore(IMAGE_STORE), bookId);
   transaction.objectStore(CHAT_STORE).delete(bookId);
   transaction.objectStore(SETTINGS_STORE).delete(readingPositionKey(bookId));
+  // 补丁必须跟着删：留着的话重新导入同一本书、复用到同一个 id 时会串到旧资料上。
+  transaction.objectStore(SETTINGS_STORE).delete(bookMetadataKey(bookId));
   await transactionDone(transaction);
 }
 

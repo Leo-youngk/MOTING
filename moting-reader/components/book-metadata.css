@@ -1,0 +1,156 @@
+.book-metadata {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 4px;
+}
+
+.book-metadata__current {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.book-metadata__current > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+}
+
+.book-metadata__current strong {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+}
+
+.book-metadata__current small {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.book-metadata__current em {
+  margin-top: 2px;
+  color: var(--accent);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.book-metadata__hint,
+.book-metadata__error {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.book-metadata__error {
+  color: #c0392b;
+}
+
+.book-metadata__list {
+  display: flex;
+  max-height: 46vh;
+  flex-direction: column;
+  padding: 0;
+  margin: 0;
+  gap: 6px;
+  overflow-y: auto;
+  list-style: none;
+  overscroll-behavior: contain;
+}
+
+.book-metadata__list button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--glass-tint);
+  text-align: left;
+}
+
+.book-metadata__list button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.book-metadata__list button:disabled {
+  opacity: 0.5;
+}
+
+/* 缩略图尺寸写死：候选一条条异步载入，不锁住高度整个列表会跳。 */
+.book-metadata__thumb {
+  position: relative;
+  display: flex;
+  width: 38px;
+  height: 56px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #e8e1d5;
+  color: #9a9288;
+}
+
+.book-metadata__thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.book-metadata__info {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.book-metadata__info strong {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  display: -webkit-box;
+}
+
+.book-metadata__info small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.book-metadata__info em {
+  color: var(--subtle);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.book-metadata__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.book-metadata__actions .secondary-button {
+  flex: 1;
+}
+
+.book-metadata__credit {
+  margin: 0;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.6;
+}
