@@ -3,6 +3,8 @@ import type {
   BookMetadataLookup,
 } from "./book-metadata-types";
 import type { Book } from "./types";
+import { searchWeread, wereadCoverUrl, WereadError } from "./weread.ts";
+import type { WereadBook, WereadSearchResult } from "./weread-types";
 
 /** 压缩后封面的长边上限。书库最大的封面是 148×219 CSS px，3 倍屏也只要 ~440。 */
 const COVER_MAX_EDGE = 440;
@@ -70,13 +72,19 @@ export function titleLooksLikeFileName(book: Book): boolean {
   return Boolean(fromFile) && fromFile === normalizeTitleKey(book.title);
 }
 
-/** 上游的作者字段很脏：会带「(翻译 )」后缀、重复、繁简混排。最多留两个。 */
+/**
+ * 作者字段要剥的只有圆括号里的角色标注（「(翻译 )」「（评）」）。
+ * 方括号不能一起剥：微信读书用「[哥]加西亚•马尔克斯」标国别，那是真信息不是噪声。
+ */
+const AUTHOR_ROLE = /[（(][^）)]*[）)]/g;
+
+/** 上游的作者字段很脏：会带角色后缀、重复、繁简混排。最多留两个。 */
 export function formatAuthors(authors: string[]): string {
   const cleaned = authors
     .map((name) =>
       name
         .normalize("NFKC")
-        .replace(BRACKETED, " ")
+        .replace(AUTHOR_ROLE, " ")
         .replace(/\s+/g, " ")
         .trim()
     )
@@ -157,44 +165,48 @@ export function decideAutoApply(
 
 export class BookMetadataError extends Error {}
 
+/**
+ * 候选一律来自微信读书。早先用过 Google Books，中文书的封面收录几乎为零
+ * （围城、人类简史返回 0 封面），换源之后 8/8 命中且全部有封面，就没有再保留它的理由。
+ */
 export async function lookupBookMetadata(
   book: Book,
   signal?: AbortSignal
 ): Promise<BookMetadataLookup> {
-  const { title, author } = lookupQuery(book);
+  const { title } = lookupQuery(book);
   if (!title) return { candidates: [] };
-  const params = new URLSearchParams({ title });
-  if (author) params.set("author", author);
-
-  let response: Response;
+  let result: WereadSearchResult;
   try {
-    response = await fetch(`/api/metadata/lookup?${params}`, {
-      signal,
-      cache: "no-store",
-    });
+    result = await searchWeread(title, 0, 5, signal);
   } catch (error) {
     if (signal?.aborted) throw error;
-    throw new BookMetadataError("网络不可用，无法读取书籍资料");
+    throw new BookMetadataError(
+      error instanceof WereadError ? error.message : "书籍资料查询失败"
+    );
   }
-  const data: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const message =
-      data && typeof data === "object" && "error" in data && typeof data.error === "string"
-        ? data.error
-        : `书籍资料服务返回 ${response.status}`;
-    throw new BookMetadataError(message);
-  }
-  const candidates =
-    data && typeof data === "object" && "candidates" in data && Array.isArray(data.candidates)
-      ? (data.candidates as BookMetadataCandidate[])
-      : [];
-  return { candidates };
+  return { candidates: result.books.map(toCandidate) };
 }
 
-/** 封面必须经 Worker 转发：books.google.com 不给 CORS 头，直接取会把 canvas 污染掉。 */
-export function coverProxyUrl(coverUrl: string): string {
-  return `/api/metadata/cover?u=${encodeURIComponent(coverUrl)}`;
+function toCandidate(book: WereadBook): BookMetadataCandidate {
+  return {
+    volumeId: book.bookId,
+    title: book.title,
+    // 微信读书的作者是一个字符串（有时含「/」分隔的多作者），拆开交给 formatAuthors 统一清洗。
+    authors: book.author ? book.author.split(/[\/、,，]/).map((name) => name.trim()).filter(Boolean) : [],
+    publishedDate: null,
+    description: book.intro,
+    categories: book.category ? [book.category] : [],
+    coverUrl: book.coverUrl,
+    language: null,
+    infoLink: null,
+    rating: book.rating,
+    ratingCount: book.ratingCount,
+    ratingLabel: book.ratingLabel,
+  };
 }
+
+/** 封面转发统一走书城那一条，不再单独留一个 metadata 的代理口。 */
+export const coverProxyUrl = wereadCoverUrl;
 
 /**
  * 取回封面并压到 440px webp。

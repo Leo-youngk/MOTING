@@ -11,7 +11,6 @@ import {
   titleLooksLikeFileName,
 } from "../lib/book-metadata.ts";
 import type { BookMetadataCandidate } from "../lib/book-metadata-types.ts";
-import { handleBookMetadata } from "../worker/book-metadata.ts";
 import type { Book } from "../lib/types.ts";
 
 function book(overrides: Partial<Book> = {}): Book {
@@ -38,29 +37,18 @@ function candidate(overrides: Partial<BookMetadataCandidate> = {}): BookMetadata
     volumeId: "vol_1",
     title: "三国演义",
     authors: ["罗贯中"],
-    publishedDate: "2019-01-01",
+    publishedDate: null,
     description: null,
     categories: [],
     coverUrl: null,
-    language: "zh-CN",
+    language: null,
     infoLink: null,
+    rating: 890,
+    ratingCount: 12000,
+    ratingLabel: "好评如潮",
     ...overrides,
   };
 }
-
-function request(path: string, method = "GET") {
-  return new Request(`https://reader.example${path}`, { method });
-}
-
-function fetcher(fn: (url: URL, init?: RequestInit) => Response | Promise<Response>): typeof fetch {
-  return async (url, init) => fn(new URL(String(url)), init);
-}
-
-const unused = fetcher(() => {
-  throw new Error("Unexpected upstream request");
-});
-
-const env = { GOOGLE_BOOKS_API_KEY: "test-key" };
 
 test("书名指纹抹掉盗版噪声，但不会把不同的书抹成同一本", () => {
   assert.equal(normalizeTitleKey("三国演义(完整版)@某某书屋"), "三国演义");
@@ -68,6 +56,8 @@ test("书名指纹抹掉盗版噪声，但不会把不同的书抹成同一本",
   assert.equal(normalizeTitleKey("三国演义.epub"), "三国演义");
   assert.notEqual(normalizeTitleKey("三国演义"), normalizeTitleKey("水浒传"));
   assert.equal(cleanTitleText("活着【精校版】"), "活着");
+  // 微信读书常见的版本后缀，清洗后要能跟本地书名对上。
+  assert.equal(normalizeTitleKey("三国演义（人民文学版）"), "三国演义");
 });
 
 test("占位作者与文件名书名能被认出来", () => {
@@ -88,6 +78,8 @@ test("上游脏作者字段被清理成一行可读的署名", () => {
   assert.equal(formatAuthors(["加西亚. 马克斯", "于娜 (翻译 )"]), "加西亚. 马克斯 · 于娜");
   assert.equal(formatAuthors(["刘慈欣", "刘慈欣"]), "刘慈欣");
   assert.equal(formatAuthors([]), "");
+  // 微信读书的作者带国别方括号，方括号不是我们要剥的噪声，得原样留着。
+  assert.equal(formatAuthors(["[哥]加西亚•马尔克斯"]), "[哥]加西亚•马尔克斯");
 });
 
 test("资料齐全的书不查询，缺封面或缺作者的才查", () => {
@@ -130,7 +122,9 @@ test("只补脏字段：EPUB 里正确的书名作者封面一律不碰", () => 
     author: "未知作者",
     fileName: "三国演义(完整版)@某某书屋.txt",
   });
-  const decision = decideAutoApply(dirty, [candidate({ coverUrl: "https://books.google.com/x" })]);
+  const decision = decideAutoApply(dirty, [
+    candidate({ coverUrl: "https://cdn.weread.qq.com/x.jpg" }),
+  ]);
   assert.ok(decision);
   assert.equal(decision.title, "三国演义");
   assert.equal(decision.author, "罗贯中");
@@ -147,7 +141,7 @@ test("候选没有作者时不拿它的封面——上游有一批标题对、�
     volumeId: "vol_bad",
     title: "三体",
     authors: [],
-    coverUrl: "https://books.google.com/bad-cover",
+    coverUrl: "https://cdn.weread.qq.com/bad.jpg",
   });
   const decision = decideAutoApply(dirty, [noAuthor]);
   assert.ok(decision);
@@ -158,7 +152,7 @@ test("候选没有作者时不拿它的封面——上游有一批标题对、�
   const withAuthor = candidate({
     title: "三体",
     authors: ["刘慈欣"],
-    coverUrl: "https://books.google.com/good-cover",
+    coverUrl: "https://cdn.weread.qq.com/good.jpg",
   });
   assert.equal(decideAutoApply(dirty, [withAuthor])?.wantCover, true);
 });
@@ -186,130 +180,4 @@ test("查询词去掉噪声，作者是占位值时不参与查询", () => {
     title: "活着",
     author: "余华",
   });
-});
-
-test("查询必须走 intitle:/inauthor: 字段算子，并带上 country", async () => {
-  const response = await handleBookMetadata(
-    request("/api/metadata/lookup?title=%E6%B4%BB%E7%9D%80&author=%E4%BD%99%E5%8D%8E"),
-    env,
-    undefined,
-    fetcher((url) => {
-      assert.equal(url.origin, "https://www.googleapis.com");
-      assert.equal(url.pathname, "/books/v1/volumes");
-      assert.equal(url.searchParams.get("q"), 'intitle:"活着" inauthor:"余华"');
-      assert.equal(url.searchParams.get("country"), "US");
-      assert.equal(url.searchParams.get("key"), "test-key");
-      return Response.json({
-        items: [
-          {
-            id: "vol_a",
-            volumeInfo: {
-              title: "活着",
-              subtitle: "余华作品",
-              authors: ["余华"],
-              publishedDate: "2012-08",
-              description: "小说",
-              categories: ["Fiction"],
-              language: "zh-CN",
-              imageLinks: {
-                thumbnail: "http://books.google.com/books/content?id=a&edge=curl&zoom=1",
-              },
-            },
-          },
-          { id: "vol_b", volumeInfo: {} },
-        ],
-      });
-    })
-  );
-  assert.equal(response.status, 200);
-  const data = (await response.json()) as { candidates: BookMetadataCandidate[] };
-  assert.equal(data.candidates.length, 1, "缺标题的条目要丢掉，不要凑数");
-  assert.deepEqual(data.candidates[0], {
-    volumeId: "vol_a",
-    title: "活着：余华作品",
-    authors: ["余华"],
-    publishedDate: "2012-08",
-    description: "小说",
-    categories: ["Fiction"],
-    coverUrl: "https://books.google.com/books/content?id=a&zoom=1",
-    language: "zh-CN",
-    infoLink: null,
-  });
-});
-
-test("没有结果时返回空列表而不是报错", async () => {
-  const response = await handleBookMetadata(
-    request("/api/metadata/lookup?title=%E4%B8%8D%E5%AD%98%E5%9C%A8%E7%9A%84%E4%B9%A6"),
-    env,
-    undefined,
-    fetcher(() => Response.json({ totalItems: 0 }))
-  );
-  assert.deepEqual(await response.json(), { candidates: [] });
-});
-
-test("没配密钥就说没配，不能返回空列表假装查不到", async () => {
-  const response = await handleBookMetadata(
-    request("/api/metadata/lookup?title=%E6%B4%BB%E7%9D%80"),
-    {},
-    undefined,
-    unused
-  );
-  assert.equal(response.status, 503);
-  assert.match((await response.json() as { error: string }).error, /未配置/);
-});
-
-test("无效输入不会打到上游", async () => {
-  for (const path of [
-    "/api/metadata/lookup",
-    "/api/metadata/lookup?title=",
-    `/api/metadata/lookup?title=${"x".repeat(201)}`,
-    "/api/metadata/lookup?title=%E6%B4%BB%E7%9D%80&author=%00",
-  ]) {
-    const response = await handleBookMetadata(request(path), env, undefined, unused);
-    assert.equal(response.status, 400, path);
-  }
-  const post = await handleBookMetadata(
-    request("/api/metadata/lookup?title=%E6%B4%BB%E7%9D%80", "POST"),
-    env,
-    undefined,
-    unused
-  );
-  assert.equal(post.status, 405);
-});
-
-test("封面转发只放行 Google 自己的图床", async () => {
-  const blocked = await handleBookMetadata(
-    request(`/api/metadata/cover?u=${encodeURIComponent("https://evil.example/x.png")}`),
-    env,
-    undefined,
-    unused
-  );
-  assert.equal(blocked.status, 400);
-
-  const insecure = await handleBookMetadata(
-    request(`/api/metadata/cover?u=${encodeURIComponent("http://books.google.com/x.png")}`),
-    env,
-    undefined,
-    unused
-  );
-  assert.equal(insecure.status, 400);
-
-  const ok = await handleBookMetadata(
-    request(`/api/metadata/cover?u=${encodeURIComponent("https://books.google.com/x.png")}`),
-    env,
-    undefined,
-    fetcher(() => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/jpeg" } }))
-  );
-  assert.equal(ok.status, 200);
-  assert.equal(ok.headers.get("content-type"), "image/jpeg");
-});
-
-test("上游返回网页而不是图片时不当封面用", async () => {
-  const response = await handleBookMetadata(
-    request(`/api/metadata/cover?u=${encodeURIComponent("https://books.google.com/x.png")}`),
-    env,
-    undefined,
-    fetcher(() => new Response("<html></html>", { headers: { "content-type": "text/html" } }))
-  );
-  assert.equal(response.status, 502);
 });

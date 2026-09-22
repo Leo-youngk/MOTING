@@ -3,8 +3,7 @@ import handler from "vinext/server/app-router-entry";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
 import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
 import { synthesizeSpeech } from "./edge-tts";
-import { handleBookMetadata } from "./book-metadata";
-import { handleDiscovery } from "./discovery";
+import { handleWeread } from "./weread";
 import { handleZlibrary } from "./zlibrary";
 
 const MAX_TTS_TEXT_LENGTH = 5000;
@@ -437,8 +436,7 @@ const worker = {
     ctx: ExecutionContext
   ): Promise<Response> {
     const pathname = new URL(request.url).pathname;
-    if (pathname.startsWith("/api/metadata/")) return handleBookMetadata(request, env, ctx);
-    if (pathname.startsWith("/api/discovery/")) return handleDiscovery(request, ctx);
+    if (pathname.startsWith("/api/weread/")) return handleWeread(request, env, ctx);
     if (pathname.startsWith("/api/zlibrary/")) return handleZlibrary(request);
     if (pathname === "/api/tts") {
       return handleSpeech(request, ctx);

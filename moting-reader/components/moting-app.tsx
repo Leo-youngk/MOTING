@@ -165,8 +165,8 @@ const OnlineLibrary = lazy(() =>
     default: Component,
   }))
 );
-const Discovery = lazy(() =>
-  import("./discovery").then(({ Discovery: Component }) => ({
+const Bookstore = lazy(() =>
+  import("./bookstore").then(({ Bookstore: Component }) => ({
     default: Component,
   }))
 );
@@ -1095,7 +1095,7 @@ function LibraryScreen({
 
       <div className="library-segments" role="group" aria-label="书库来源">
         <button type="button" aria-pressed={libraryMode === "local"} onClick={() => setLibraryMode("local")}>本地书库</button>
-        <button type="button" aria-pressed={libraryMode === "discover"} onClick={() => setLibraryMode("discover")}>发现书籍</button>
+        <button type="button" aria-pressed={libraryMode === "discover"} onClick={() => setLibraryMode("discover")}>书城</button>
         <button type="button" aria-pressed={libraryMode === "online"} onClick={() => { setOnlineQuery(null); setLibraryMode("online"); }}>在线找书</button>
       </div>
 
@@ -1104,8 +1104,8 @@ function LibraryScreen({
           <OnlineLibrary key={onlineQuery ?? "manual"} initialQuery={onlineQuery ?? ""} books={books} onImport={onOnlineImport} onOpen={onOpen} />
         </Suspense>
       ) : libraryMode === "discover" ? (
-        <Suspense fallback={<div className="online-loading">正在打开书籍发现…</div>}>
-          <Discovery onFindBook={(title) => { setOnlineQuery(title); setLibraryMode("online"); }} />
+        <Suspense fallback={<div className="online-loading">正在打开书城…</div>}>
+          <Bookstore books={books} onFindBook={(title) => { setOnlineQuery(title); setLibraryMode("online"); }} />
         </Suspense>
       ) : <>
       <label className="ios-search">

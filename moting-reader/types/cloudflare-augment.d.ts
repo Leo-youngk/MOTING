@@ -7,5 +7,5 @@ interface CacheStorage {
 // Worker 密钥是用 `wrangler secret put` 设的，不出现在 wrangler.jsonc 里，
 // 所以 wrangler 生成的 Env 类型不认识它，只能在这里补声明。
 interface Env {
-  GOOGLE_BOOKS_API_KEY?: string;
+  WEREAD_API_KEY?: string;
 }

@@ -1,0 +1,428 @@
+.store {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 12px;
+}
+
+.store-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.store-search .ios-search {
+  flex: 1;
+  margin: 0;
+}
+
+.store-lane {
+  margin-bottom: 26px;
+}
+
+.store-lane__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.store-lane__head h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.store-lane__head small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 横滑轨道。书城每条流都用它，跟主页「继续」那一行保持同一套手感。 */
+.store-lane__track {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  /* iOS Safari 不认 overscroll-behavior，横向只能靠 touch-action 拦。 */
+  touch-action: pan-x;
+}
+
+.store-lane__track::-webkit-scrollbar {
+  display: none;
+}
+
+/* 卡片宽度写死：推荐值是异步补上来的，不锁宽整条轨道会在数据到位时抖一下。 */
+.store-card {
+  display: flex;
+  width: 104px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  scroll-snap-align: start;
+  text-align: left;
+}
+
+.store-card:active .store-cover {
+  transform: scale(0.97);
+}
+
+.store-card__title {
+  overflow: hidden;
+  margin-top: 3px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  display: -webkit-box;
+}
+
+.store-card__author {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.store-cover {
+  position: relative;
+  display: flex;
+  width: 104px;
+  height: 148px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 3px 6px 6px 3px;
+  background: #e8e1d5;
+  box-shadow: 0 2px 5px rgb(0 0 0 / 14%), 0 10px 22px rgb(0 0 0 / 14%);
+  color: #9a9288;
+  transition: transform 160ms ease;
+}
+
+.store-cover img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.store-cover--large {
+  width: 128px;
+  height: 182px;
+}
+
+/* 推荐值徽章 */
+.store-rating {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.store-rating b {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.store-rating strong {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.store-rating small {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.store-rating--thin {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+/* 搜索结果用行式布局，信息给得比卡片全 */
+.store-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.store-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 13px;
+  padding: 10px;
+  border-radius: 14px;
+  background: var(--glass-tint);
+  text-align: left;
+}
+
+.store-row .store-cover {
+  width: 50px;
+  height: 72px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 16%);
+}
+
+.store-row__info {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.store-row__info strong {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  display: -webkit-box;
+}
+
+.store-row__info small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 详情页 */
+.store-back {
+  align-self: flex-start;
+  padding: 6px 2px;
+  margin-bottom: 14px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 15px;
+}
+
+.store-back,
+.store-detail__actions .primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.store-detail__hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.store-detail__hero > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 4px;
+}
+
+.store-detail__hero h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+
+.store-detail__hero p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.store-detail__hero small {
+  color: var(--subtle);
+  font-size: 12px;
+}
+
+.store-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px;
+  border-radius: 14px;
+  margin-bottom: 18px;
+  background: var(--glass-tint);
+}
+
+.store-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.store-bar__label {
+  width: 30px;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.store-bar__track {
+  position: relative;
+  height: 6px;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+.store-bar__fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+}
+
+.store-bar__fill--good { background: var(--accent); }
+.store-bar__fill--fair { background: color-mix(in srgb, var(--accent) 40%, var(--subtle)); }
+.store-bar__fill--poor { background: var(--subtle); }
+
+.store-bar__value {
+  width: 34px;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+.store-bars__note {
+  margin: 3px 0 0;
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.store-detail__actions {
+  margin-bottom: 22px;
+}
+
+.store-detail__actions .primary-button {
+  width: 100%;
+  justify-content: center;
+}
+
+.store-detail__body h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.store-detail__body p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+
+.store-tag {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 8px;
+  margin-top: 12px;
+  background: var(--glass-tint);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.store-muted {
+  color: var(--muted);
+}
+
+.store-error {
+  padding: 10px 12px;
+  border-radius: 12px;
+  margin: 0 0 14px;
+  background: color-mix(in srgb, #c0392b 10%, transparent);
+  color: #c0392b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.store-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 46px 20px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.store-empty h3 {
+  margin: 6px 0 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.store-empty p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.store-credit {
+  margin: 8px 0 0;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* 骨架屏尺寸必须跟真实卡片一致，否则数据一到布局就跳。 */
+.store-skeleton {
+  border-radius: 6px;
+  background: linear-gradient(
+    100deg,
+    var(--glass-tint) 30%,
+    color-mix(in srgb, var(--ink) 6%, transparent) 50%,
+    var(--glass-tint) 70%
+  );
+  background-size: 260% 100%;
+  animation: store-shimmer 1.4s ease-in-out infinite;
+}
+
+.store-skeleton--title {
+  width: 140px;
+  height: 22px;
+}
+
+.store-skeleton--card {
+  width: 104px;
+  height: 148px;
+  flex: 0 0 auto;
+}
+
+@keyframes store-shimmer {
+  from { background-position: 140% 0; }
+  to { background-position: -40% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .store-skeleton { animation: none; }
+}

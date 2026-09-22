@@ -1,5 +1,8 @@
-/** 元数据补全目前只有 Google Books 一个来源，记在补丁里便于以后换源时区分老数据。 */
-export const BOOK_METADATA_SOURCE = "google-books";
+/**
+ * 来源记在补丁里，便于区分老数据。
+ * 早先是 "google-books"，2026-09 换成微信读书——中文书的封面它几乎一张都给不出来。
+ */
+export const BOOK_METADATA_SOURCE = "weread";
 
 /** 一个候选版本，已经裁成书库真正用得上的字段。 */
 export interface BookMetadataCandidate {
@@ -9,10 +12,14 @@ export interface BookMetadataCandidate {
   publishedDate: string | null;
   description: string | null;
   categories: string[];
-  /** Google 的封面直链（已强制 https）。中文书大多为 null，实测见 docs/BOOK_METADATA.md。 */
   coverUrl: string | null;
   language: string | null;
   infoLink: string | null;
+  /** 千分制推荐值，拿不到就是 null。挑版本时它比出版年份有用得多。 */
+  rating: number | null;
+  ratingCount: number | null;
+  /** 神作 / 好评如潮 这类档位标签。 */
+  ratingLabel: string | null;
 }
 
 export interface BookMetadataLookup {
