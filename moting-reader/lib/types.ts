@@ -126,7 +126,13 @@ export interface BookNote {
   groupId?: string;
 }
 
-export type ReaderTheme = "paper" | "white" | "night";
+export type ReaderTheme =
+  | "original"
+  | "paper"
+  | "bold"
+  | "calm"
+  | "focus"
+  | "quiet";
 
 /** 外壳（主页 / 书库 / tab bar）的底色，跟阅读器主题完全独立：
  *  换书架不动阅读器，换阅读器不动书架。 */
@@ -216,7 +222,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   lineHeight: 1.9,
   contentWidth: 720,
   fontFamily: "serif",
-  theme: "paper",
+  theme: "original",
   shellTheme: "white",
   readingMode: "scroll",
   highlightColor: "yellow",

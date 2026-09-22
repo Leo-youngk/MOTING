@@ -312,7 +312,16 @@ export async function getSettings(): Promise<ReaderSettings> {
   const settings = await requestToPromise(
     transaction.objectStore(SETTINGS_STORE).get("reader")
   );
-  return { ...DEFAULT_SETTINGS, ...(settings ?? {}) };
+  const merged = { ...DEFAULT_SETTINGS, ...(settings ?? {}) } as ReaderSettings;
+  // 旧版三主题（paper/white/night）迁移到对齐 Apple Books 的六主题。
+  const legacyTheme: Partial<Record<string, ReaderSettings["theme"]>> = {
+    paper: "calm",
+    white: "original",
+    night: "quiet",
+  };
+  const mapped = legacyTheme[merged.theme as string];
+  if (mapped) merged.theme = mapped;
+  return merged;
 }
 
 export async function saveSettings(
