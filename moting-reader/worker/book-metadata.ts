@@ -175,7 +175,8 @@ async function handleLookup(
   if (author.length > MAX_AUTHOR_LENGTH) return errorResponse("作者名过长", 400);
   if (/[\u0000-\u001f\u007f]/.test(title + author)) return errorResponse("书名或作者含有无效字符", 400);
 
-  const apiKey = env.GOOGLE_BOOKS_API_KEY;
+  // trim 不能省：secret 很容易在写入时被管道带上尾随换行，Google 会直接判成无效密钥。
+  const apiKey = env.GOOGLE_BOOKS_API_KEY?.trim();
   if (!apiKey) {
     // 没配密钥就老实说没配，不要返回空列表假装「这本书查不到」。
     return errorResponse("服务器未配置 Google Books 密钥，书籍资料补全暂不可用", 503);
@@ -215,8 +216,27 @@ async function handleLookup(
     return errorResponse("暂时连接不上 Google Books，请稍后重试", 502);
   }
   if (upstream.status === 429) return errorResponse("Google Books 请求过于频繁，请稍后重试", 503);
-  if (upstream.status === 403) return errorResponse("Google Books 拒绝了请求，请检查密钥配额与限制", 502);
-  if (!upstream.ok) return errorResponse(`Google Books 暂时不可用（${upstream.status}）`, 502);
+  if (!upstream.ok) {
+    // 上游的原因带上：4xx 基本都是密钥限制或参数问题，只报一个状态码没法排查。
+    const detail = await upstream
+      .text()
+      .then((body) => {
+        const parsed: unknown = JSON.parse(body);
+        const error = record(record(parsed)?.error);
+        return string(error?.message, 200);
+      })
+      .catch(() => null);
+    if (upstream.status === 403) {
+      return errorResponse(
+        `Google Books 拒绝了请求，请检查密钥配额与限制${detail ? `：${detail}` : ""}`,
+        502
+      );
+    }
+    return errorResponse(
+      `Google Books 暂时不可用（${upstream.status}${detail ? ` ${detail}` : ""}）`,
+      502
+    );
+  }
 
   try {
     const result = normalizeLookup(await readJson(upstream, MAX_LOOKUP_BYTES));

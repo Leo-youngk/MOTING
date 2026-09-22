@@ -137,6 +137,32 @@ test("只补脏字段：EPUB 里正确的书名作者封面一律不碰", () => 
   assert.equal(decision.wantCover, true);
 });
 
+test("候选没有作者时不拿它的封面——上游有一批标题对、封面错的记录", () => {
+  const dirty = book({
+    title: "三体(精校版)",
+    author: "未知作者",
+    fileName: "三体(精校版).txt",
+  });
+  const noAuthor = candidate({
+    volumeId: "vol_bad",
+    title: "三体",
+    authors: [],
+    coverUrl: "https://books.google.com/bad-cover",
+  });
+  const decision = decideAutoApply(dirty, [noAuthor]);
+  assert.ok(decision);
+  assert.equal(decision.title, "三体");
+  assert.equal(decision.author, undefined);
+  assert.equal(decision.wantCover, false, "没有作者背书的记录，封面不能信");
+
+  const withAuthor = candidate({
+    title: "三体",
+    authors: ["刘慈欣"],
+    coverUrl: "https://books.google.com/good-cover",
+  });
+  assert.equal(decideAutoApply(dirty, [withAuthor])?.wantCover, true);
+});
+
 test("书名脏但作者本来就对时，只换书名不动作者", () => {
   const dirty = book({
     title: "三国演义(完整版)",

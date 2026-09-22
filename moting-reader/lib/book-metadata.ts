@@ -143,7 +143,12 @@ export function decideAutoApply(
   }
   const author = formatAuthors(candidate.authors);
   if (isPlaceholderAuthor(book.author) && author) decision.author = author;
-  if (!book.coverDataUrl && candidate.coverUrl) decision.wantCover = true;
+  // 封面要比书名多一道门槛：候选必须带作者。
+  //
+  // 上游有一批「标题对、封面错」的记录——实测查《三体》会返回一条标题就叫「三体」、
+  // 但封面图是《三体II 黑暗森林·上》的条目，而它恰好没有作者字段。标题指纹管不住
+  // 这种脏源，没有作者可以当作「这条记录本身不规范」的信号，宁可不补封面。
+  if (!book.coverDataUrl && candidate.coverUrl && author) decision.wantCover = true;
 
   return decision.title || decision.author || decision.wantCover
     ? decision
