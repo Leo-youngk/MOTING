@@ -39,3 +39,7 @@
 ## 当前外部联调限制
 
 2026-09-22 在本机通过真实 Worker 路由请求 Open Library 得到连接失败；直接 `curl` 到 Open Library 也超时，本机 DNS 将 `openlibrary.org` 解析为异常地址。该结果只能说明本机网络无法完成真实上游联调，不能代替 Cloudflare 生产环境测试。
+
+同日功能提交 `d9355cf` 已推送至 `origin/master`。原账户因本地 `CLOUDFLARE_ACCOUNT_ID` 与 Token 所属账户不一致而拒绝发布；按用户后续指示，改在该 Token 所属账户创建 `moting-reader` Worker。Cloudflare 确认 100% 流量运行版本 `25142c62-c498-445d-8192-9444238f6415`，地址为 https://moting-reader.if5v.workers.dev 。原账户的 Worker 未被修改。
+
+当前设备对 `workers.dev` 的 DNS 也返回异常地址，访问新域名超时；Cloudflare 远程预览本地通道同样超时。因此线上页面和真实 Open Library 搜索尚未完成实际操作验收。后续可在正常网络中检查「发现书籍 → 分类 → 详情 → 找这本书」及书目接口响应。
