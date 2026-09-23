@@ -12,9 +12,9 @@ import {
   titleLooksLikeFileName,
 } from "../lib/book-metadata.ts";
 import type { BookMetadataCandidate } from "../lib/book-metadata-types.ts";
-import type { Book } from "../lib/types.ts";
+import type { BookMeta } from "../lib/types.ts";
 
-function book(overrides: Partial<Book> = {}): Book {
+function book(overrides: Partial<BookMeta> = {}): BookMeta {
   return {
     id: "book_1",
     title: "三国演义",
@@ -26,7 +26,7 @@ function book(overrides: Partial<Book> = {}): Book {
     createdAt: 0,
     updatedAt: 0,
     lastOpenedAt: 0,
-    chapters: [],
+    chapterOutline: [],
     sentenceCount: 0,
     characterCount: 0,
     ...overrides,

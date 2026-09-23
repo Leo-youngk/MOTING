@@ -95,10 +95,29 @@
 
 .store-card__author {
   overflow: hidden;
+  min-height: 1.4em;
   color: var(--muted);
   font-size: 11px;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * 卡片里每一行文字的高度都固定：书名两行、作者一行、推荐值一行。
+ * 书名长短不一时卡片也一样高，骨架和成品同尺寸，数据到了不会把下面的内容往下推。
+ */
+.store-card__title {
+  min-height: calc(1.35em * 2);
+}
+
+.store-card--dense .store-card__title {
+  min-height: 1.35em;
+}
+
+.store-card__rating {
+  display: block;
+  min-height: 20px;
 }
 
 .store-cover {
@@ -111,9 +130,10 @@
   justify-content: center;
   overflow: hidden;
   border-radius: 3px 6px 6px 3px;
-  background: #e8e1d5;
+  /* 封面没到时的底色跟着书架配色走，墨夜下不能是一块浅米色。 */
+  background: color-mix(in srgb, var(--ink) 7%, var(--surface));
   box-shadow: 0 2px 5px rgb(0 0 0 / 14%), 0 10px 22px rgb(0 0 0 / 14%);
-  color: #9a9288;
+  color: var(--subtle);
   transition: transform 160ms ease;
 }
 
@@ -123,6 +143,13 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+  /* 封面到了淡入，不是一张张蹦出来；已经在缓存里的由组件直接标成已加载。 */
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+.store-cover img[data-loaded] {
+  opacity: 1;
 }
 
 .store-cover--large {
@@ -197,13 +224,14 @@
   gap: 3px;
 }
 
+/* 书名只占一行：每一行都是封面那么高，榜单整齐，骨架也对得上。 */
 .store-row__info strong {
   overflow: hidden;
   font-size: 15px;
   font-weight: 600;
   line-height: 1.35;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   display: -webkit-box;
 }
 
@@ -412,12 +440,6 @@
   height: 22px;
 }
 
-.store-skeleton--card {
-  width: 104px;
-  height: 148px;
-  flex: 0 0 auto;
-}
-
 .store-skeleton--hero {
   width: 128px;
   height: 182px;
@@ -526,11 +548,6 @@
   margin-top: 12px;
 }
 
-.store-skeleton--row {
-  width: 100%;
-  height: 72px;
-  border-radius: 14px;
-}
 
 
 /* 榜单 / 全部 —— 分类下的两种看法 */
@@ -617,10 +634,47 @@
   -webkit-line-clamp: 1;
 }
 
-.store-skeleton--tile {
-  width: 100%;
-  aspect-ratio: 104 / 196;
-  border-radius: 6px;
+/* 骨架卡片/骨架行：跟成品同一套结构，文字的位置换成灰条。 */
+.store-card--skeleton,
+.store-row--skeleton {
+  pointer-events: none;
+}
+
+.store-card--skeleton .store-cover,
+.store-row--skeleton .store-cover {
+  box-shadow: none;
+}
+
+.store-card--skeleton i,
+.store-row--skeleton i {
+  display: block;
+  height: 0.9em;
+  margin-top: 0.22em;
+  border-radius: 4px;
+}
+
+.store-card--skeleton .store-card__title i {
+  width: 88px;
+}
+
+.store-card--skeleton .store-card__author i {
+  width: 56px;
+}
+
+.store-card--skeleton .store-card__rating i {
+  width: 44px;
+}
+
+.store-row--skeleton strong i {
+  width: 140px;
+}
+
+.store-row--skeleton small i {
+  width: 80px;
+}
+
+.store-row--skeleton .store-rating i {
+  width: 60px;
 }
 
 /* 推荐流挂了只留一行小字——榜单和分类读的是本地书目，那两块还好好的。 */

@@ -1,10 +1,13 @@
 import type { BookMetadataPatch } from "./book-metadata-types";
+import { outlineOf } from "./content";
 import type {
   Book,
   BookAiChat,
   BookImage,
+  BookMeta,
   BookNote,
   BookPosition,
+  Chapter,
   ReaderSettings,
   ReadingSession,
   ReadingStats,
@@ -12,8 +15,11 @@ import type {
 import { DEFAULT_SETTINGS, DEFAULT_STATS } from "./types";
 
 const DB_NAME = "moting-reader";
-const DB_VERSION = 4;
+/** 5：正文从书目记录里拆到 contents 表。 */
+const DB_VERSION = 5;
 const BOOK_STORE = "books";
+/** 书的正文，一本书一条，主键 bookId。书目在 books 表里，打开这本书时才读这里。 */
+const CONTENT_STORE = "contents";
 const NOTE_STORE = "notes";
 const SETTINGS_STORE = "settings";
 const IMAGE_STORE = "images";
@@ -34,8 +40,10 @@ interface StoredReadingPosition {
   savedAt: number;
 }
 
-/** 书籍元数据:不含正文 chapters 的 Book,同步时只传这部分。 */
-export type BookMeta = Omit<Book, "chapters">;
+interface StoredContent {
+  bookId: string;
+  chapters: Chapter[];
+}
 
 /** 已删除书/划线的墓碑。push 被服务端接受后清理。 */
 export interface SyncTombstones {
@@ -88,6 +96,42 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
+/** 旧库升级（把正文从书目里搬出去）的进行状态。只在老用户第一次打开新版时出现一次。 */
+const upgradeListeners = new Set<(upgrading: boolean) => void>();
+
+export function onStorageUpgrade(listener: (upgrading: boolean) => void): () => void {
+  upgradeListeners.add(listener);
+  return () => {
+    upgradeListeners.delete(listener);
+  };
+}
+
+function notifyUpgrade(upgrading: boolean): void {
+  upgradeListeners.forEach((listener) => listener(upgrading));
+}
+
+/**
+ * v4 → v5：书目记录里的 chapters 搬进 contents 表，书目留一份目录。
+ *
+ * 就在升级事务里逐本做：游标一次只拿一本，内存峰值是一本书；
+ * 中途任何一步失败整个事务回滚，库停在 v4 原样，下次打开再来。
+ */
+function moveContentsOutOfBooks(transaction: IDBTransaction): void {
+  const contents = transaction.objectStore(CONTENT_STORE);
+  const request = transaction.objectStore(BOOK_STORE).openCursor();
+  request.onsuccess = () => {
+    const cursor = request.result;
+    if (!cursor) return;
+    const record = cursor.value as Partial<Book> & { id: string };
+    if (Array.isArray(record.chapters)) {
+      const { chapters, ...meta } = record;
+      contents.put({ bookId: record.id, chapters } satisfies StoredContent);
+      cursor.update({ ...meta, chapterOutline: outlineOf(chapters) });
+    }
+    cursor.continue();
+  };
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   if (typeof indexedDB === "undefined") {
     return Promise.reject(new Error("当前浏览器不支持本地书库"));
@@ -96,8 +140,17 @@ function openDatabase(): Promise<IDBDatabase> {
 
   const promise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    let upgrading = false;
+    request.onupgradeneeded = (event) => {
       const db = request.result;
+      if (!db.objectStoreNames.contains(CONTENT_STORE)) {
+        db.createObjectStore(CONTENT_STORE, { keyPath: "bookId" });
+      }
+      if (event.oldVersion > 0 && event.oldVersion < 5 && request.transaction) {
+        upgrading = true;
+        notifyUpgrade(true);
+        moveContentsOutOfBooks(request.transaction);
+      }
       if (!db.objectStoreNames.contains(BOOK_STORE)) {
         db.createObjectStore(BOOK_STORE, { keyPath: "id" });
       }
@@ -123,6 +176,7 @@ function openDatabase(): Promise<IDBDatabase> {
     };
     request.onsuccess = () => {
       const db = request.result;
+      if (upgrading) notifyUpgrade(false);
       // 别的页面要升级数据库时让出连接，否则它会一直卡在 blocked。
       db.onversionchange = () => {
         db.close();
@@ -134,6 +188,7 @@ function openDatabase(): Promise<IDBDatabase> {
       resolve(db);
     };
     request.onerror = () => {
+      if (upgrading) notifyUpgrade(false);
       if (dbPromise === promise) dbPromise = null;
       reject(request.error ?? new Error("无法打开浏览器本地书库"));
     };
@@ -155,67 +210,75 @@ function bookMetadataKey(bookId: string): string {
   return `${BOOK_METADATA_PREFIX}${bookId}`;
 }
 
-export async function getAllBooks(): Promise<Book[]> {
+/** settings 表里某一类前缀的全部键。只读这一段，不把整张表连同别的大记录一起捞出来。 */
+function prefixRange(prefix: string): IDBKeyRange {
+  return IDBKeyRange.bound(prefix, `${prefix}￿`);
+}
+
+async function readPrefixed(
+  store: IDBObjectStore,
+  prefix: string
+): Promise<Array<[string, unknown]>> {
+  const range = prefixRange(prefix);
+  const [values, keys] = await Promise.all([
+    requestToPromise(store.getAll(range) as IDBRequest<unknown[]>),
+    requestToPromise(store.getAllKeys(range)),
+  ]);
+  return keys.map((key, index) => [String(key).slice(prefix.length), values[index]]);
+}
+
+function validPosition(value: unknown): value is StoredReadingPosition {
+  const record = value as Partial<StoredReadingPosition> | undefined;
+  return Boolean(
+    record?.position &&
+      typeof record.savedAt === "number" &&
+      Number.isFinite(record.savedAt) &&
+      typeof record.lastOpenedAt === "number" &&
+      Number.isFinite(record.lastOpenedAt)
+  );
+}
+
+/** 书库要显示的书目：叠上阅读位置和线上补全的资料，不含正文。 */
+export async function getAllBooks(): Promise<BookMeta[]> {
   const db = await openDatabase();
   const transaction = db.transaction([BOOK_STORE, SETTINGS_STORE], "readonly");
-  const booksRequest = transaction.objectStore(BOOK_STORE).getAll() as IDBRequest<Book[]>;
-  const settingsStore = transaction.objectStore(SETTINGS_STORE);
-  const settingsRequest = settingsStore.getAll() as IDBRequest<unknown[]>;
-  const keysRequest = settingsStore.getAllKeys();
-  const [books, settings, keys] = await Promise.all([
-    requestToPromise(booksRequest),
-    requestToPromise(settingsRequest),
-    requestToPromise(keysRequest),
+  const settings = transaction.objectStore(SETTINGS_STORE);
+  const [metas, positions, patches] = await Promise.all([
+    requestToPromise(transaction.objectStore(BOOK_STORE).getAll() as IDBRequest<BookMeta[]>),
+    readPrefixed(settings, READING_POSITION_PREFIX),
+    readPrefixed(settings, BOOK_METADATA_PREFIX),
   ]);
-  const positions = new Map<string, StoredReadingPosition>();
-  const metadata = new Map<string, BookMetadataPatch>();
-  keys.forEach((key, index) => {
-    if (typeof key !== "string") return;
-    const value = settings[index];
-    if (!value || typeof value !== "object") return;
-    if (key.startsWith(BOOK_METADATA_PREFIX)) {
-      metadata.set(
-        key.slice(BOOK_METADATA_PREFIX.length),
-        value as BookMetadataPatch
-      );
-      return;
-    }
-    if (!key.startsWith(READING_POSITION_PREFIX)) return;
-    const record = value as Partial<StoredReadingPosition>;
-    if (
-      !record.position ||
-      typeof record.savedAt !== "number" ||
-      !Number.isFinite(record.savedAt) ||
-      typeof record.lastOpenedAt !== "number" ||
-      !Number.isFinite(record.lastOpenedAt)
-    ) return;
-    positions.set(key.slice(READING_POSITION_PREFIX.length), record as StoredReadingPosition);
-  });
-  return books
-    .map((book) => {
-      const record = positions.get(book.id);
+  const positionById = new Map(
+    positions.filter((entry): entry is [string, StoredReadingPosition] => validPosition(entry[1]))
+  );
+  const patchById = new Map(
+    patches.filter((entry): entry is [string, BookMetadataPatch] => Boolean(entry[1] && typeof entry[1] === "object"))
+  );
+  return metas
+    .map((meta) => {
+      const record = positionById.get(meta.id);
       const merged =
-        !record || record.savedAt <= book.updatedAt
-          ? book
+        !record || record.savedAt <= meta.updatedAt
+          ? meta
           : {
-              ...book,
+              ...meta,
               readingPosition: record.position,
-              lastOpenedAt: Math.max(book.lastOpenedAt, record.lastOpenedAt),
+              lastOpenedAt: Math.max(meta.lastOpenedAt, record.lastOpenedAt),
               updatedAt: record.savedAt,
             };
-      return applyBookMetadata(merged, metadata.get(book.id));
+      return applyBookMetadata(merged, patchById.get(meta.id));
     })
     .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
 }
 
 /**
- * 线上补全的书名/作者/封面只在读出来的这一刻盖上去，Book 记录本身保持导入时的原样。
+ * 线上补全的书名/作者/封面只在读出来的这一刻盖上去，书目记录本身保持导入时的原样。
  * 删掉补丁记录，书就恢复原貌——这也是「还原成导入时的资料」能成立的前提。
  */
 function applyBookMetadata(
-  book: Book,
+  book: BookMeta,
   patch: BookMetadataPatch | undefined
-): Book {
+): BookMeta {
   const applied = patch?.applied;
   if (!applied) return book;
   return {
@@ -229,18 +292,10 @@ function applyBookMetadata(
 export async function getAllBookMetadata(): Promise<BookMetadataPatch[]> {
   const db = await openDatabase();
   const transaction = db.transaction(SETTINGS_STORE, "readonly");
-  const store = transaction.objectStore(SETTINGS_STORE);
-  const [values, keys] = await Promise.all([
-    requestToPromise(store.getAll() as IDBRequest<unknown[]>),
-    requestToPromise(store.getAllKeys()),
-  ]);
-  const patches: BookMetadataPatch[] = [];
-  keys.forEach((key, index) => {
-    if (typeof key !== "string" || !key.startsWith(BOOK_METADATA_PREFIX)) return;
-    const value = values[index];
-    if (value && typeof value === "object") patches.push(value as BookMetadataPatch);
-  });
-  return patches;
+  const patches = await readPrefixed(transaction.objectStore(SETTINGS_STORE), BOOK_METADATA_PREFIX);
+  return patches
+    .map(([, value]) => value)
+    .filter((value): value is BookMetadataPatch => Boolean(value && typeof value === "object"));
 }
 
 export async function saveBookMetadata(patch: BookMetadataPatch): Promise<void> {
@@ -259,20 +314,82 @@ export async function removeBookMetadata(bookId: string): Promise<void> {
   await transactionDone(transaction);
 }
 
+/** 书目和正文分两张表写；目录每次都从正文重算，两边不会对不上。 */
+function putBook(transaction: IDBTransaction, book: Book): void {
+  const { chapters, ...meta } = book;
+  transaction.objectStore(BOOK_STORE).put({ ...meta, chapterOutline: outlineOf(chapters) });
+  transaction.objectStore(CONTENT_STORE).put({ bookId: book.id, chapters } satisfies StoredContent);
+}
+
+/** 写整本书（书目 + 正文）。只有导入、同步下载、生成示例书这类「正文本身变了」的场合用。 */
 export async function saveBook(book: Book): Promise<void> {
   const db = await openDatabase();
-  const transaction = db.transaction(BOOK_STORE, "readwrite");
-  transaction.objectStore(BOOK_STORE).put(book);
+  const transaction = db.transaction([BOOK_STORE, CONTENT_STORE], "readwrite");
+  putBook(transaction, book);
   await transactionDone(transaction);
 }
 
-/** 同步下载正文时按 id 取整本;内存里同时只有这一本。 */
-export async function getBook(bookId: string): Promise<Book | undefined> {
+/** 整条覆盖书目。同步合并远端书目时用：那边给的是完整一条。 */
+export async function saveBookMeta(meta: BookMeta): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(BOOK_STORE, "readwrite");
+  const { chapters: _chapters, ...clean } = meta as BookMeta & { chapters?: unknown };
+  transaction.objectStore(BOOK_STORE).put(clean);
+  await transactionDone(transaction);
+}
+
+/**
+ * 改书目里的几个字段，在同一个事务里读出库里那条再合并写回。
+ *
+ * 不拿内存里的书整条写回：内存里那份叠过线上补全的书名封面，
+ * 写回去就等于把补丁焊死进了原始记录，「还原成导入时的资料」从此失效。
+ */
+export async function updateBookMeta(
+  bookId: string,
+  changes: Partial<Omit<BookMeta, "id">>
+): Promise<BookMeta | undefined> {
+  const db = await openDatabase();
+  const transaction = db.transaction(BOOK_STORE, "readwrite");
+  const store = transaction.objectStore(BOOK_STORE);
+  let updated: BookMeta | undefined;
+  const request = store.get(bookId);
+  request.onsuccess = () => {
+    const current = request.result as BookMeta | undefined;
+    if (!current) return;
+    updated = { ...current, ...changes, id: current.id };
+    store.put(updated);
+  };
+  await transactionDone(transaction);
+  return updated;
+}
+
+export async function getBookMeta(bookId: string): Promise<BookMeta | undefined> {
   const db = await openDatabase();
   const transaction = db.transaction(BOOK_STORE, "readonly");
   return requestToPromise(
-    transaction.objectStore(BOOK_STORE).get(bookId) as IDBRequest<Book | undefined>
+    transaction.objectStore(BOOK_STORE).get(bookId) as IDBRequest<BookMeta | undefined>
   );
+}
+
+/** 一本书的正文。打开阅读器、播放器、单书笔记时才读。 */
+export async function getBookContent(bookId: string): Promise<Chapter[] | undefined> {
+  const db = await openDatabase();
+  const transaction = db.transaction(CONTENT_STORE, "readonly");
+  const record = await requestToPromise(
+    transaction.objectStore(CONTENT_STORE).get(bookId) as IDBRequest<StoredContent | undefined>
+  );
+  return record?.chapters;
+}
+
+/** 库里原样的整本书（不叠补丁）。同步上传正文时用，内存里同时只有这一本。 */
+export async function getBook(bookId: string): Promise<Book | undefined> {
+  const db = await openDatabase();
+  const transaction = db.transaction([BOOK_STORE, CONTENT_STORE], "readonly");
+  const [meta, content] = await Promise.all([
+    requestToPromise(transaction.objectStore(BOOK_STORE).get(bookId) as IDBRequest<BookMeta | undefined>),
+    requestToPromise(transaction.objectStore(CONTENT_STORE).get(bookId) as IDBRequest<StoredContent | undefined>),
+  ]);
+  return meta && content ? { ...meta, chapters: content.chapters } : undefined;
 }
 
 function deleteByBookId(store: IDBObjectStore, bookId: string): void {
@@ -285,28 +402,14 @@ function deleteByBookId(store: IDBObjectStore, bookId: string): void {
   };
 }
 
-/** 书籍 meta 的轻量读:逐本游标读、当场丢掉 chapters,内存峰值只有一本。 */
+/** 库里原样的全部书目（不叠补丁、不叠阅读位置），同步用。 */
 export async function getBookMetas(): Promise<BookMeta[]> {
   const db = await openDatabase();
   const transaction = db.transaction(BOOK_STORE, "readonly");
-  return new Promise((resolve, reject) => {
-    const metas: BookMeta[] = [];
-    const request = transaction.objectStore(BOOK_STORE).openCursor();
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) {
-        resolve(metas.sort((a, b) => b.lastOpenedAt - a.lastOpenedAt));
-        return;
-      }
-      const book = cursor.value as Book;
-      if (book && typeof book === "object") {
-        const { chapters: _chapters, ...meta } = book;
-        metas.push(meta);
-      }
-      cursor.continue();
-    };
-    request.onerror = () => reject(request.error ?? new Error("无法读取书库"));
-  });
+  const metas = await requestToPromise(
+    transaction.objectStore(BOOK_STORE).getAll() as IDBRequest<BookMeta[]>
+  );
+  return metas.sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
 }
 
 /** 全部阅读/听书位置,同步用。 */
@@ -315,24 +418,15 @@ export async function getAllReadingPositions(): Promise<
 > {
   const db = await openDatabase();
   const transaction = db.transaction(SETTINGS_STORE, "readonly");
-  const store = transaction.objectStore(SETTINGS_STORE);
-  const [values, keys] = await Promise.all([
-    requestToPromise(store.getAll() as IDBRequest<unknown[]>),
-    requestToPromise(store.getAllKeys()),
-  ]);
-  const positions: Array<{ bookId: string; position: BookPosition; lastOpenedAt: number; savedAt: number }> = [];
-  keys.forEach((key, index) => {
-    if (typeof key !== "string" || !key.startsWith(READING_POSITION_PREFIX)) return;
-    const record = values[index] as Partial<StoredReadingPosition> | undefined;
-    if (!record?.position || typeof record.savedAt !== "number" || typeof record.lastOpenedAt !== "number") return;
-    positions.push({
-      bookId: key.slice(READING_POSITION_PREFIX.length),
+  const positions = await readPrefixed(transaction.objectStore(SETTINGS_STORE), READING_POSITION_PREFIX);
+  return positions
+    .filter((entry): entry is [string, StoredReadingPosition] => validPosition(entry[1]))
+    .map(([bookId, record]) => ({
+      bookId,
       position: record.position,
       lastOpenedAt: record.lastOpenedAt,
       savedAt: record.savedAt,
-    });
-  });
-  return positions;
+    }));
 }
 
 export async function getSyncState(): Promise<SyncState> {
@@ -404,10 +498,11 @@ function editTombstones(
 export async function removeBook(bookId: string, { tombstone = true }: SyncWriteOptions = {}): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(
-    [BOOK_STORE, NOTE_STORE, IMAGE_STORE, CHAT_STORE, SETTINGS_STORE],
+    [BOOK_STORE, CONTENT_STORE, NOTE_STORE, IMAGE_STORE, CHAT_STORE, SETTINGS_STORE],
     "readwrite"
   );
   transaction.objectStore(BOOK_STORE).delete(bookId);
+  transaction.objectStore(CONTENT_STORE).delete(bookId);
   deleteByBookId(transaction.objectStore(NOTE_STORE), bookId);
   deleteByBookId(transaction.objectStore(IMAGE_STORE), bookId);
   transaction.objectStore(CHAT_STORE).delete(bookId);
@@ -445,11 +540,11 @@ export async function saveReadingPositions(
   await transactionDone(transaction);
 }
 
-/** 在线导入将正文与插图放在同一个事务，存储失败时不留下半本书。 */
+/** 书目、正文与插图放在同一个事务，存储失败时不留下半本书。 */
 export async function saveImportedBook(book: Book, images: BookImage[]): Promise<void> {
   const db = await openDatabase();
-  const transaction = db.transaction([BOOK_STORE, IMAGE_STORE], "readwrite");
-  transaction.objectStore(BOOK_STORE).put(book);
+  const transaction = db.transaction([BOOK_STORE, CONTENT_STORE, IMAGE_STORE], "readwrite");
+  putBook(transaction, book);
   for (const image of images) transaction.objectStore(IMAGE_STORE).put(image);
   await transactionDone(transaction);
 }
@@ -556,6 +651,31 @@ export async function saveSession(session: ReadingSession): Promise<void> {
   await transactionDone(transaction);
 }
 
+/**
+ * 同步拉回来的阅读记录：本地没有、或远端那条更晚结束才写。返回真正写了几条。
+ *
+ * 本机刚推上去的记录，下一次拉取会原样回来一遍。以前不分青红皂白整批写、
+ * 再通知界面「有变化」，于是每轮同步都要把整个书库重读一遍。
+ */
+export async function saveSessionsIfNewer(sessions: ReadingSession[]): Promise<number> {
+  if (!sessions.length) return 0;
+  const db = await openDatabase();
+  const transaction = db.transaction(SESSION_STORE, "readwrite");
+  const store = transaction.objectStore(SESSION_STORE);
+  let written = 0;
+  for (const session of sessions) {
+    const request = store.get(session.id);
+    request.onsuccess = () => {
+      const local = request.result as ReadingSession | undefined;
+      if (local && local.endedAt >= session.endedAt) return;
+      store.put(session);
+      written += 1;
+    };
+  }
+  await transactionDone(transaction);
+  return written;
+}
+
 export async function getSettings(): Promise<ReaderSettings> {
   const db = await openDatabase();
   const transaction = db.transaction(SETTINGS_STORE, "readonly");
@@ -637,6 +757,7 @@ export async function clearLibrary(): Promise<void> {
   const transaction = db.transaction(
     [
       BOOK_STORE,
+      CONTENT_STORE,
       NOTE_STORE,
       SETTINGS_STORE,
       IMAGE_STORE,
@@ -646,6 +767,7 @@ export async function clearLibrary(): Promise<void> {
     "readwrite"
   );
   transaction.objectStore(BOOK_STORE).clear();
+  transaction.objectStore(CONTENT_STORE).clear();
   transaction.objectStore(NOTE_STORE).clear();
   transaction.objectStore(SETTINGS_STORE).clear();
   transaction.objectStore(IMAGE_STORE).clear();

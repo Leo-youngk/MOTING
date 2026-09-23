@@ -43,7 +43,7 @@ export interface Paragraph {
   sentences: Sentence[];
 }
 
-/** 插图单独存一张表：书本身每次开机全量读出来，图片则按需取。 */
+/** 插图单独存一张表，渲染到哪张才取哪张。 */
 export interface BookImage {
   id: string;
   bookId: string;
@@ -75,7 +75,21 @@ export interface BookPosition {
   anchorOffset?: number;
 }
 
-export interface Book {
+/** 一章的目录信息。书库、目录、剩余时长只要这些，不必把整章正文读出来。 */
+export interface ChapterOutline {
+  id: string;
+  title: string;
+  sentenceCount: number;
+  characterCount: number;
+}
+
+/**
+ * 书目：书库、主页、同步用的那部分，不含正文。
+ *
+ * 正文单独存一张表、打开这本书时才读。两者以前存在同一条记录里，
+ * 本地库没法只读记录的一部分，于是开机、每轮同步都得把几十本书的全文整个读一遍。
+ */
+export interface BookMeta {
   id: string;
   title: string;
   author: string;
@@ -92,11 +106,16 @@ export interface Book {
   createdAt: number;
   updatedAt: number;
   lastOpenedAt: number;
-  chapters: Chapter[];
+  chapterOutline: ChapterOutline[];
   sentenceCount: number;
   characterCount: number;
   readingPosition?: BookPosition;
   listeningPosition?: BookPosition;
+}
+
+/** 打开着的一本书：书目 + 正文。 */
+export interface Book extends BookMeta {
+  chapters: Chapter[];
 }
 
 export type NoteKind = "highlight" | "listening-mark";

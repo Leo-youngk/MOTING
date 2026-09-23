@@ -43,6 +43,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  createContext,
   Fragment,
   lazy,
   memo,
@@ -55,6 +56,7 @@ import {
   type ReactNode,
   type RefObject,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -90,7 +92,6 @@ import {
   flattenChapter,
   formatReadingTime,
   formatRemaining,
-  imageSize,
   initialPosition,
   makeId,
   estimatePagination,
@@ -98,7 +99,6 @@ import {
   pageAt,
   positionFor,
   remainingCharacters,
-  withImageSizes,
 } from "../lib/content";
 import { createDemoBook } from "../lib/demo";
 import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "../lib/file-limits";
@@ -109,6 +109,7 @@ import {
   logoutSync,
   runSync,
   SyncError,
+  type SyncAppliedKind,
 } from "../lib/sync";
 import {
   clearLibrary,
@@ -117,10 +118,12 @@ import {
   getAllChats,
   getAllNotes,
   getAllSessions,
+  getBookContent,
   getBookImage,
   getSettings,
   getStats,
   getSyncState,
+  onStorageUpgrade,
   saveSession,
   removeBook,
   removeBookMetadata,
@@ -132,14 +135,17 @@ import {
   saveChat,
   saveNote,
   saveSettings,
+  updateBookMeta,
 } from "../lib/storage";
 import {
   DEFAULT_SETTINGS,
   DEFAULT_STATS,
   dayKey,
+  type AppView,
   type AiChatTurn,
   type Book,
   type BookAiChat,
+  type BookMeta,
   type BookNote,
   type BookPosition,
   type Chapter,
@@ -152,6 +158,7 @@ import {
   type ReaderTheme,
   type ReadingSession,
   type ReadingStats,
+  type ShellTheme,
 } from "../lib/types";
 import {
   dailyBookEntries,
@@ -171,31 +178,97 @@ import {
   type Rect,
 } from "../lib/popover-placement";
 import { EDGE_VOICES } from "../lib/edge-voices";
+import { HomeStore } from "./home-store";
 
+/**
+ * 发了新版之后，还开着的旧页面去取自己那一版的分片会 404（Workers 只留最新一版的文件）。
+ * 这时候刷新一次拿新版，别让 React 抛错把整页弄白；一分钟内只刷一次，免得来回转。
+ */
+function freshImport<T>(load: () => Promise<T>): Promise<T> {
+  return load().catch((error: unknown) => {
+    let last = 0;
+    try {
+      last = Number(window.sessionStorage.getItem("moting:reloaded-at") ?? 0);
+      if (Date.now() - last > 60_000) {
+        window.sessionStorage.setItem("moting:reloaded-at", String(Date.now()));
+      }
+    } catch {
+      // 存不了就当没刷过。
+    }
+    if (Date.now() - last <= 60_000) throw error;
+    console.warn("[moting] 分片加载失败，刷新到新版本", error);
+    window.location.reload();
+    return new Promise<T>(() => {});
+  });
+}
+
+// 不在首屏的几块按需下载，开机闲下来再顺手取回来（见 MotingApp 里的预取），
+// 点进去时就不会先闪一行加载字样。主页的书城条首屏就要，直接打进主包。
+const loadOnlineLibrary = () => freshImport(() => import("./online-library"));
+const loadBookstore = () => freshImport(() => import("./bookstore"));
+const loadAiMarkdown = () => freshImport(() => import("./ai-markdown"));
 const OnlineLibrary = lazy(() =>
-  import("./online-library").then(({ OnlineLibrary: Component }) => ({
+  loadOnlineLibrary().then(({ OnlineLibrary: Component }) => ({
     default: Component,
   }))
 );
 const Bookstore = lazy(() =>
-  import("./bookstore").then(({ Bookstore: Component }) => ({
-    default: Component,
-  }))
-);
-// 主页首屏就要用书城这一块。等 React 渲染到它才开始下载，首屏会多等一个来回；
-// 模块一加载就先发请求，lazy 再取时直接命中同一个 Promise。
-const loadHomeStore = () => import("./home-store");
-if (typeof window !== "undefined") void loadHomeStore();
-const HomeStore = lazy(() =>
-  loadHomeStore().then(({ HomeStore: Component }) => ({
+  loadBookstore().then(({ Bookstore: Component }) => ({
     default: Component,
   }))
 );
 const LazyAiMarkdown = lazy(() =>
-  import("./ai-markdown").then(({ AiMarkdown: Component }) => ({
+  loadAiMarkdown().then(({ AiMarkdown: Component }) => ({
     default: Component,
   }))
 );
+
+/** 导入用的解析器很大，按需下载。发版后旧页面取不到旧分片时给一句人话，别甩一串英文报错。 */
+async function loadParsers() {
+  try {
+    return await import("../lib/parsers");
+  } catch {
+    throw new Error("墨听刚更新过，关掉重新打开后再导入");
+  }
+}
+
+/** 内存里最多留几本书的正文。长篇一本就是几十 MB 的对象。 */
+const CONTENT_CACHE_BOOKS = 3;
+/** 提示条退场动画的时长，和 CSS 里 .toast.is-leaving 对齐。 */
+const TOAST_EXIT_MS = 180;
+/** layout 里的开机脚本读这个键：上次的书架配色、阅读配色，和两者的底色。 */
+const THEME_KEY = "moting:theme";
+
+/** 记下这次的配色，下次开机第一帧就用它，不必等设置从本地库读出来。 */
+function rememberTheme(shell: ShellTheme, reader: ReaderTheme) {
+  try {
+    const style = getComputedStyle(document.documentElement);
+    window.localStorage.setItem(
+      THEME_KEY,
+      JSON.stringify({
+        shell,
+        reader,
+        paper: style.getPropertyValue("--paper").trim(),
+        readerBackground: style.getPropertyValue("--reader-background").trim(),
+      })
+    );
+  } catch {
+    // 存不了就下次按默认配色起，读到设置后再换，只是首帧会闪一下。
+  }
+}
+
+type ContentView = Extract<AppView, { name: "reader" | "player" | "book-notes" }>;
+
+/** 这几页要整本书（书目 + 正文），进页面之前得先把正文读进来。 */
+function viewNeedsContent(view: AppView): view is ContentView {
+  return view.name === "reader" || view.name === "player" || view.name === "book-notes";
+}
+
+/** 整本书去掉正文，就是书库里的那份书目。 */
+function metaOf(book: Book): BookMeta {
+  const { chapters: _chapters, ...meta } = book;
+  return meta;
+}
 
 function AiMarkdown({ content }: { content: string }) {
   return (
@@ -325,7 +398,7 @@ function BookCover({
   book,
   size = "medium",
 }: {
-  book: Book;
+  book: BookMeta;
   size?: "small" | "medium" | "large";
 }) {
   const style = {
@@ -448,6 +521,18 @@ function useScrollLock() {
   }, []);
 }
 
+/** 弹层里的按钮（比如「取消」）要走弹层自己的关闭：滑下去再卸掉。 */
+const ModalCloseContext = createContext<() => void>(() => {});
+
+function SheetCancelButton({ children }: { children: ReactNode }) {
+  const close = useContext(ModalCloseContext);
+  return (
+    <button type="button" className="secondary-button" onClick={close}>
+      {children}
+    </button>
+  );
+}
+
 function Modal({
   title,
   children,
@@ -461,16 +546,31 @@ function Modal({
   wide?: boolean;
   className?: string;
 }) {
+  // 关闭先走退场动画（面板滑下去、遮罩淡掉），放完再真正卸掉。
+  // 以前一关就啪地消失，跟滑上来的进场一对比，像是被硬拔掉的。
+  const [closing, setClosing] = useState(false);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+  const requestClose = useCallback(() => setClosing(true), []);
+  useEffect(() => {
+    if (!closing) return;
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const timer = window.setTimeout(() => onCloseRef.current(), reduced ? 0 : SHEET_EXIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [closing]);
+
   useScrollLock();
-  useEscapeToClose(onClose);
-  const drag = useSheetDrag(onClose);
+  useEscapeToClose(requestClose);
+  const drag = useSheetDrag(requestClose);
   // 按下就关会误伤：手指落在面板边缘想滑动、稍微移出去一点就把面板关掉了。
   // 记住这一下是不是从遮罩上按下的，抬手仍在遮罩上才算「点空白关闭」。
   const fromBackdrop = useRef(false);
 
   return createPortal(
     <div
-      className="modal-backdrop"
+      className={`modal-backdrop${closing ? " is-closing" : ""}`}
       role="presentation"
       onPointerDown={(event) => {
         fromBackdrop.current = event.target === event.currentTarget;
@@ -479,13 +579,13 @@ function Modal({
         const outside =
           fromBackdrop.current && event.target === event.currentTarget;
         fromBackdrop.current = false;
-        if (outside) onClose();
+        if (outside) requestClose();
       }}
     >
       <section
         className={`modal-sheet ${wide ? "modal-sheet--wide" : ""} ${
           drag.dragging ? "is-dragging" : ""
-        } ${className}`}
+        } ${closing ? "is-closing" : ""} ${className}`}
         style={drag.offset ? { transform: `translateY(${drag.offset}px)` } : undefined}
         role="dialog"
         aria-modal="true"
@@ -505,12 +605,12 @@ function Modal({
             className="icon-button"
             aria-label="关闭"
             onPointerDown={(event) => event.stopPropagation()}
-            onClick={onClose}
+            onClick={requestClose}
           >
             <X size={20} />
           </button>
         </header>
-        {children}
+        <ModalCloseContext.Provider value={requestClose}>{children}</ModalCloseContext.Provider>
       </section>
     </div>,
     document.body
@@ -547,6 +647,8 @@ function useEscapeToClose(onClose: () => void) {
 
 /** 往下拖到这么多像素就松手关闭，没到就弹回去。 */
 const SHEET_DISMISS_PX = 96;
+/** 面板退场动画的时长，和 CSS 里 .modal-sheet.is-closing 对齐。 */
+const SHEET_EXIT_MS = 300;
 
 /**
  * 底部面板的下拉关闭。
@@ -584,8 +686,9 @@ function useSheetDrag(onClose: () => void) {
       const travelled = event.clientY - start.y;
       startRef.current = null;
       setDragging(false);
-      setOffset(0);
+      // 拖过了阈值：面板停在手指松开的位置，由退场动画从这里接着滑下去，不先弹回原位。
       if (travelled > SHEET_DISMISS_PX) onClose();
+      else setOffset(0);
     };
     document.addEventListener("pointermove", onMove, { passive: false });
     document.addEventListener("pointerup", onUp);
@@ -657,10 +760,10 @@ function ShelfCard({
   onOpen,
   onPlay,
 }: {
-  book: Book;
+  book: BookMeta;
   size: "large" | "medium";
-  onOpen: (book: Book) => void;
-  onPlay?: (book: Book) => void;
+  onOpen: (book: BookMeta) => void;
+  onPlay?: (book: BookMeta) => void;
 }) {
   const position = book.readingPosition ?? book.listeningPosition;
 
@@ -705,10 +808,10 @@ function HomeCard({
   onOpen,
   onPlay,
 }: {
-  book: Book;
+  book: BookMeta;
   meta: string;
-  onOpen: (book: Book) => void;
-  onPlay?: (book: Book) => void;
+  onOpen: (book: BookMeta) => void;
+  onPlay?: (book: BookMeta) => void;
 }) {
   return (
     <article
@@ -975,12 +1078,12 @@ function HomeScreen({
   onOpenSettings,
   onOpenStore,
 }: {
-  books: Book[];
+  books: BookMeta[];
   stats: ReadingStats;
   sessions: ReadingSession[];
-  onOpenReader: (book: Book) => void;
-  onPlay: (book: Book) => void;
-  onOpenPlayer: (book: Book) => void;
+  onOpenReader: (book: BookMeta) => void;
+  onPlay: (book: BookMeta) => void;
+  onOpenPlayer: (book: BookMeta) => void;
   onImport: () => void;
   onOpenHistory: () => void;
   onOpenSettings: () => void;
@@ -1078,12 +1181,10 @@ function HomeScreen({
       )}
 
       {/* 书城接在「继续读」下面：逛新书比回看统计更常用，统计往下滚就是。 */}
-      <Suspense fallback={<div className="home-store__loading" aria-hidden="true" />}>
-        <HomeStore
-          onOpenStore={() => onOpenStore()}
-          onOpenBook={(bookId) => onOpenStore(bookId)}
-        />
-      </Suspense>
+      <HomeStore
+        onOpenStore={() => onOpenStore()}
+        onOpenBook={(bookId) => onOpenStore(bookId)}
+      />
 
       {books.length ? (
         <>
@@ -1105,18 +1206,18 @@ function LibraryScreen({
   onOpenMetadata,
   onDelete,
 }: {
-  books: Book[];
+  books: BookMeta[];
   onImport: () => void;
   /** 去在线找书。带上关键词就进去直接搜。 */
   onFind: (query: string) => void;
-  onOpen: (book: Book) => void;
-  onPlay: (book: Book) => void;
-  onOpenNotes: (book: Book) => void;
-  onOpenMetadata: (book: Book) => void;
-  onDelete: (book: Book) => void;
+  onOpen: (book: BookMeta) => void;
+  onPlay: (book: BookMeta) => void;
+  onOpenNotes: (book: BookMeta) => void;
+  onOpenMetadata: (book: BookMeta) => void;
+  onDelete: (book: BookMeta) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [sheetBook, setSheetBook] = useState<Book | null>(null);
+  const [sheetBook, setSheetBook] = useState<BookMeta | null>(null);
   const [showSources, setShowSources] = useState(false);
 
   const filtered = books.filter((book) =>
@@ -1344,7 +1445,7 @@ function BookMetadataSheet({
   onRefresh,
   onClose,
 }: {
-  book: Book;
+  book: BookMeta;
   patch: BookMetadataPatch | undefined;
   busy: boolean;
   onApply: (candidate: BookMetadataCandidate) => void;
@@ -1462,9 +1563,9 @@ function ListenScreen({
   onPlay,
   onOpenPlayer,
 }: {
-  books: Book[];
-  onPlay: (book: Book) => void;
-  onOpenPlayer: (book: Book) => void;
+  books: BookMeta[];
+  onPlay: (book: BookMeta) => void;
+  onOpenPlayer: (book: BookMeta) => void;
 }) {
   const [query, setQuery] = useState("");
   const started = books
@@ -1720,10 +1821,10 @@ function NotesScreen({
   onOpenChat,
 }: {
   notes: BookNote[];
-  books: Book[];
+  books: BookMeta[];
   chats: BookAiChat[];
-  onOpenBook: (book: Book) => void;
-  onOpenChat: (book: Book) => void;
+  onOpenBook: (book: BookMeta) => void;
+  onOpenChat: (book: BookMeta) => void;
 }) {
   const [tab, setTab] = useState<"notes" | "chat">("notes");
   const [query, setQuery] = useState("");
@@ -1753,13 +1854,13 @@ function NotesScreen({
       chats
         .filter((chat) => chat.turns.length)
         .map((chat) => ({ chat, book: books.find((b) => b.id === chat.bookId) }))
-        .filter((entry): entry is { chat: BookAiChat; book: Book } => Boolean(entry.book))
+        .filter((entry): entry is { chat: BookAiChat; book: BookMeta } => Boolean(entry.book))
         .sort((a, b) => b.chat.updatedAt - a.chat.updatedAt),
     [chats, books]
   );
 
   const needle = query.trim().toLowerCase();
-  const matches = (book: Book) => !needle || `${book.title} ${book.author}`.toLowerCase().includes(needle);
+  const matches = (book: BookMeta) => !needle || `${book.title} ${book.author}`.toLowerCase().includes(needle);
   const visibleShelves = shelves.filter(({ book }) => matches(book));
   const visibleChats = chatShelves.filter(({ book }) => matches(book));
   const totalNotes = shelves.reduce((sum, entry) => sum + entry.count, 0);
@@ -2254,7 +2355,7 @@ function SettingsPanel({
 }: {
   settings: ReaderSettings;
   voices: PlayerVoice[];
-  books: Book[];
+  books: BookMeta[];
   onChange: (settings: ReaderSettings) => void;
   onClear: () => void;
   sync: {
@@ -3066,7 +3167,7 @@ const BAR_HIDE_AFTER = 48;
 
 /** 起手提问：拿真实的书名和章节标题拼，只是把常问的几件事摆出来，不编造内容。 */
 function starterPrompts(
-  book: Book,
+  book: BookMeta,
   chapter: Chapter | undefined,
   hasQuote: boolean
 ) {
@@ -3090,7 +3191,7 @@ async function askAi({
   brief = false,
   onDelta,
 }: {
-  book: Book;
+  book: BookMeta;
   chapter: Chapter | undefined;
   settings: ReaderSettings;
   history: AiChatTurn[];
@@ -3099,7 +3200,7 @@ async function askAi({
   brief?: boolean;
   onDelta: (delta: { content?: string; reasoning?: string }) => void;
 }) {
-  const toc = book.chapters.map((c, i) => `${i + 1}. ${c.title}`).join("\n");
+  const toc = book.chapterOutline.map((c, i) => `${i + 1}. ${c.title}`).join("\n");
   const chapterTitle = chapter?.title ?? "正文";
   const chapterText = chapter
     ? flattenChapter(chapter)
@@ -3147,7 +3248,7 @@ function AiAskPanel({
   text: string;
   initialTurns: AiChatTurn[];
   onTurnsChange: (turns: AiChatTurn[]) => void;
-  book: Book;
+  book: BookMeta;
   chapter: Chapter | undefined;
   settings: ReaderSettings;
   onClose: () => void;
@@ -3486,7 +3587,7 @@ function AiInlineAsk({
   onClose,
 }: {
   text: string;
-  book: Book;
+  book: BookMeta;
   chapter: Chapter | undefined;
   settings: ReaderSettings;
   turns: AiChatTurn[];
@@ -3689,7 +3790,7 @@ function rememberPosition(bookId: string, position: BookPosition) {
 }
 
 /** 取 IndexedDB 和同步兜底里较新的那个位置。 */
-function latestPosition(book: Book): BookPosition | undefined {
+function latestPosition(book: BookMeta): BookPosition | undefined {
   const stored = book.readingPosition;
   try {
     const raw = window.localStorage.getItem(POSITION_KEY + book.id);
@@ -5689,7 +5790,7 @@ function MiniPlayer({
   onOpen,
   onStop,
 }: {
-  book: Book;
+  book: BookMeta;
   chapterTitle: string;
   isPlaying: boolean;
   isBuffering: boolean;
@@ -5735,14 +5836,15 @@ function MiniPlayer({
 export default function MotingApp() {
   useKeyboardInset();
   useViewportFill();
-  const [books, setBooks] = useState<Book[]>([]);
+  // 书库里只有书目；正文在 contentRef 里，打开哪本读哪本。
+  const [books, setBooks] = useState<BookMeta[]>([]);
   const [notes, setNotes] = useState<BookNote[]>([]);
   const [chats, setChats] = useState<BookAiChat[]>([]);
   // 线上补全的书籍资料。不并进 books，这样「还原」永远能拿回导入时的原始值。
   const [bookMetadata, setBookMetadata] = useState<BookMetadataPatch[]>([]);
-  const [metadataBook, setMetadataBook] = useState<Book | null>(null);
+  const [metadataBook, setMetadataBook] = useState<BookMeta | null>(null);
   // 从「笔记」Tab 的历史入口点开的书，跟 view 无关，纯弹层状态。
-  const [chatBook, setChatBook] = useState<Book | null>(null);
+  const [chatBook, setChatBook] = useState<BookMeta | null>(null);
   const [settings, setSettings] =
     useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [stats, setStats] = useState<ReadingStats>(DEFAULT_STATS);
@@ -5753,55 +5855,63 @@ export default function MotingApp() {
     useAppNavigation();
   const [showSettings, setShowSettings] = useState(false);
   const [ready, setReady] = useState(false);
+  // 老用户第一次打开新版时，本地库要把正文从书目里搬出去，这一次会多等几秒。
+  const [upgrading, setUpgrading] = useState(false);
   const [importProgress, setImportProgress] =
     useState<ImportProgress | null>(null);
   const [importFileName, setImportFileName] = useState("");
   const [importError, setImportError] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<BookMeta | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [thoughtTarget, setThoughtTarget] = useState<BookNote | null>(null);
   const [thoughtDraft, setThoughtDraft] = useState("");
   const [toast, setToast] = useState<{
+    id: number;
     message: string;
     undo?: () => void;
+    /** 正在退场。提示条要滑下去再消失，不能一到时间就凭空没了。 */
+    leaving?: boolean;
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const toastIdRef = useRef(0);
   const storageErrorRef = useRef(0);
 
-  const dismissToast = useCallback(() => {
-    if (toastTimerRef.current !== null) {
-      window.clearTimeout(toastTimerRef.current);
-      toastTimerRef.current = null;
-    }
-    setToast(null);
-  }, []);
-
-  const showToast = useCallback((message: string) => {
-    if (toastTimerRef.current !== null) {
-      window.clearTimeout(toastTimerRef.current);
-    }
-    setToast({ message });
+  /** 让提示条走完退场动画再卸掉。 */
+  const hideToast = useCallback(() => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    setToast((current) => (current ? { ...current, leaving: true } : null));
     toastTimerRef.current = window.setTimeout(() => {
       toastTimerRef.current = null;
       setToast(null);
-    }, 2600);
+    }, TOAST_EXIT_MS);
   }, []);
+
+  const dismissToast = hideToast;
+
+  const presentToast = useCallback(
+    (message: string, undo: (() => void) | undefined, duration: number) => {
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+      toastIdRef.current += 1;
+      setToast({ id: toastIdRef.current, message, undo });
+      toastTimerRef.current = window.setTimeout(hideToast, duration);
+    },
+    [hideToast]
+  );
+
+  const showToast = useCallback(
+    (message: string) => presentToast(message, undefined, 2600),
+    [presentToast]
+  );
 
   /**
    * 删除这类操作不拦在前面问「确定吗」，改成先执行、再给一段撤销时间。
    * 常用操作快了一步，真误删也救得回来；确认框只留给删整本书那种不可逆的。
    */
-  const showUndoToast = useCallback((message: string, undo: () => void) => {
-    if (toastTimerRef.current !== null) {
-      window.clearTimeout(toastTimerRef.current);
-    }
-    setToast({ message, undo });
-    toastTimerRef.current = window.setTimeout(() => {
-      toastTimerRef.current = null;
-      setToast(null);
-    }, 5200);
-  }, []);
+  const showUndoToast = useCallback(
+    (message: string, undo: () => void) => presentToast(message, undo, 5200),
+    [presentToast]
+  );
 
   const reportStorageError = useCallback(
     (operation: string, error: unknown) => {
@@ -5815,6 +5925,58 @@ export default function MotingApp() {
   );
 
   // ----------------------------------------------------------------------
+  // 正文按需读。书库、主页、同步只碰书目；阅读器、播放器、单书笔记要整本书时，
+  // 先把那一本的正文读进来再进页面，画面一次到位，不先出一个空页面再填字。
+  // contents 给渲染用；contentRef 是同一份的同步镜像，给播放器这类在事件里取书的地方用
+  // （state 要等下一次渲染才更新，刚读进来就要开播时等不起）。
+  const [contents, setContents] = useState<ReadonlyMap<string, Chapter[]>>(() => new Map());
+  const contentRef = useRef<ReadonlyMap<string, Chapter[]>>(contents);
+  const commitContents = useCallback((next: Map<string, Chapter[]>) => {
+    contentRef.current = next;
+    setContents(next);
+  }, []);
+  const booksRef = useRef(books);
+  useEffect(() => {
+    booksRef.current = books;
+  }, [books]);
+  /** 正在听的那本、当前页面上的那本：内存再紧也不能把它们的正文挤掉，否则听书到下一段就断了。 */
+  const pinnedContentRef = useRef(new Set<string>());
+
+  const loadContent = useCallback(
+    async (bookId: string): Promise<Chapter[] | null> => {
+      const cached = contentRef.current.get(bookId);
+      if (cached) return cached;
+      const chapters = await getBookContent(bookId).catch(() => undefined);
+      if (!chapters?.length) return null;
+      const next = new Map(contentRef.current);
+      next.set(bookId, chapters);
+      // 最多留几本在内存里：长篇一本就是几十 MB 的对象。先进先出，正在用的那本刚刚才放进来。
+      for (const id of next.keys()) {
+        if (next.size <= CONTENT_CACHE_BOOKS) break;
+        if (id !== bookId && !pinnedContentRef.current.has(id)) next.delete(id);
+      }
+      commitContents(next);
+      return chapters;
+    },
+    [commitContents]
+  );
+
+  const dropContent = useCallback(
+    (keep: (bookId: string) => boolean) => {
+      const next = new Map([...contentRef.current].filter(([id]) => keep(id)));
+      if (next.size !== contentRef.current.size) commitContents(next);
+    },
+    [commitContents]
+  );
+
+  /** 书目 + 已读进来的正文，拼成整本书。正文没读进来就是 undefined。 */
+  const getFullBook = useCallback((bookId: string): Book | undefined => {
+    const meta = booksRef.current.find((book) => book.id === bookId);
+    const chapters = contentRef.current.get(bookId);
+    return meta && chapters ? { ...meta, chapters } : undefined;
+  }, []);
+
+  // ----------------------------------------------------------------------
   // 云端同步:登录后自动跑,不登录时应用行为与原来完全一致。
   const [syncEnabled, setSyncEnabled] = useState(true);
   const [syncConnected, setSyncConnected] = useState(false);
@@ -5824,49 +5986,56 @@ export default function MotingApp() {
   const [lastSyncAt, setLastSyncAt] = useState(0);
   const syncControllerRef = useRef<AbortController | null>(null);
   const syncReloadTimerRef = useRef<number | null>(null);
+  /** 这一轮同步真正写进本地的数据类别；只重读这几类。 */
+  const syncChangedRef = useRef(new Set<SyncAppliedKind>());
   // 同步把云端数据刷回本地时置位,让下面的「写操作后 30s debounce」跳过这一轮,
   // 免得「同步→重读→又排一个同步」空转。
   const syncQuietRef = useRef(false);
 
-  /** 同步把云端记录写进本地后,稍等片刻重读一次本地数据。 */
-  const reloadFromStorage = useCallback(async () => {
+  /**
+   * 同步把云端记录写进本地后,只重读变了的那几类。
+   * 以前不管变了什么都把七张表整个重读、整个替换，每轮同步界面都要重来一遍。
+   */
+  const reloadFromStorage = useCallback(async (kinds: Set<SyncAppliedKind>) => {
     try {
-      const [
-        storedBooks,
-        storedNotes,
-        storedChats,
-        storedSettings,
-        storedStats,
-        storedSessions,
-        storedMetadata,
-      ] = await Promise.all([
-        getAllBooks(),
-        getAllNotes(),
-        getAllChats(),
-        getSettings(),
-        getStats(),
-        getAllSessions(),
-        getAllBookMetadata(),
-      ]);
+      const has = (...names: SyncAppliedKind[]) => names.some((name) => kinds.has(name));
+      const [storedBooks, storedNotes, storedChats, storedSettings, storedStats, storedSessions, storedMetadata] =
+        await Promise.all([
+          has("books", "positions", "patches") ? getAllBooks() : null,
+          has("notes") ? getAllNotes() : null,
+          has("chats") ? getAllChats() : null,
+          has("settings") ? getSettings() : null,
+          has("sessions") ? getStats() : null,
+          has("sessions") ? getAllSessions() : null,
+          has("patches") ? getAllBookMetadata() : null,
+        ]);
       syncQuietRef.current = true;
-      setBooks(storedBooks);
-      setNotes(storedNotes);
-      setChats(storedChats);
-      setSettings(storedSettings);
-      setStats(storedStats);
-      setSessions(storedSessions);
-      setBookMetadata(storedMetadata);
+      if (storedBooks) {
+        setBooks(storedBooks);
+        // 远端删掉的书，内存里那份正文也别留着。
+        const alive = new Set(storedBooks.map((book) => book.id));
+        dropContent((id) => alive.has(id));
+      }
+      if (storedNotes) setNotes(storedNotes);
+      if (storedChats) setChats(storedChats);
+      if (storedSettings) setSettings(storedSettings);
+      if (storedStats) setStats(storedStats);
+      if (storedSessions) setSessions(storedSessions);
+      if (storedMetadata) setBookMetadata(storedMetadata);
     } catch {
       // 重读失败不打断应用;下一轮同步或刷新还能拉回。
     }
-  }, []);
+  }, [dropContent]);
 
   const scheduleSyncReload = useCallback(
-    () => {
+    (kind: SyncAppliedKind) => {
+      syncChangedRef.current.add(kind);
       if (syncReloadTimerRef.current !== null) return;
       syncReloadTimerRef.current = window.setTimeout(() => {
         syncReloadTimerRef.current = null;
-        void reloadFromStorage();
+        const kinds = syncChangedRef.current;
+        syncChangedRef.current = new Set();
+        void reloadFromStorage(kinds);
       }, 400);
     },
     [reloadFromStorage]
@@ -5950,6 +6119,14 @@ export default function MotingApp() {
     []
   );
 
+  // 升级旧库的提示要在第一次读库之前就订阅上。
+  useEffect(() => onStorageUpgrade(setUpgrading), []);
+
+  const viewRef = useRef(view);
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
   useEffect(() => {
     let cancelled = false;
     Promise.all([
@@ -5971,12 +6148,19 @@ export default function MotingApp() {
         storedMetadata,
       ]) => {
         if (cancelled) return;
-        if (!storedBooks.length) {
+        let metas = storedBooks;
+        if (!metas.length) {
           const demo = createDemoBook();
           await saveBook(demo);
-          storedBooks = [demo];
+          metas = [metaOf(demo)];
         }
-        setBooks(storedBooks);
+        booksRef.current = metas;
+        // 冷启动落在阅读器、播放器或单书笔记时，先把那本书的正文读进来：
+        // 第一帧就是整页，而不是先出一个空页面再把字填进去。
+        const restored = viewRef.current;
+        if (viewNeedsContent(restored)) await loadContent(restored.bookId);
+        if (cancelled) return;
+        setBooks(metas);
         setNotes(storedNotes);
         setChats(storedChats);
         setSettings(storedSettings);
@@ -5986,7 +6170,9 @@ export default function MotingApp() {
       })
       .catch(() => {
         const demo = createDemoBook();
-        setBooks([demo]);
+        commitContents(new Map([[demo.id, demo.chapters]]));
+        booksRef.current = [metaOf(demo)];
+        setBooks([metaOf(demo)]);
         setImportError("本地存储暂时不可用，当前内容只在本次打开期间保留");
       })
       .finally(() => {
@@ -6017,7 +6203,28 @@ export default function MotingApp() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [commitContents, loadContent]);
+
+  // 书城、在线找书、AI 回答的排版这几块不在首屏，开机闲下来先把代码取回来，
+  // 点进去就不会先闪一行「正在打开…」。取失败无所谓，真点进去时还会再取。
+  useEffect(() => {
+    if (!ready) return;
+    const prefetch = () => {
+      void import("./bookstore").catch(() => undefined);
+      void import("./online-library").catch(() => undefined);
+      void import("./ai-markdown").catch(() => undefined);
+    };
+    const idleWindow = window as Window & {
+      requestIdleCallback?: Window["requestIdleCallback"];
+      cancelIdleCallback?: Window["cancelIdleCallback"];
+    };
+    if (typeof idleWindow.requestIdleCallback === "function") {
+      const id = idleWindow.requestIdleCallback(prefetch, { timeout: 4000 });
+      return () => idleWindow.cancelIdleCallback?.(id);
+    }
+    const timer = window.setTimeout(prefetch, 1500);
+    return () => window.clearTimeout(timer);
+  }, [ready]);
 
   // 启动时读同步会话;已登录的设备开机就同步一轮。
   useEffect(() => {
@@ -6067,32 +6274,34 @@ export default function MotingApp() {
     return () => window.clearTimeout(timer);
   }, [books, notes, chats, settings, sessions, syncConnected, triggerSync]);
 
+  // 配色只在读到真实设置之后才动。之前挂载那一刻就按默认设置把书架刷成「霜白」，
+  // 设置读出来再翻成用户的颜色——每次打开都闪一次。首帧的颜色由 layout 里的
+  // 开机脚本按上次记下的配色提前套好，这里记下这次的，供下次开机用。
   useEffect(() => {
-    document.documentElement.dataset.readerTheme = settings.theme;
-  }, [settings.theme]);
+    if (!ready) return;
+    const root = document.documentElement;
+    root.dataset.readerTheme = settings.theme;
+    root.dataset.shell = settings.shellTheme;
+    rememberTheme(settings.shellTheme, settings.theme);
+  }, [ready, settings.theme, settings.shellTheme]);
 
-  useEffect(() => {
-    document.documentElement.dataset.shell = settings.shellTheme;
-  }, [settings.shellTheme]);
+  /** 改书目里的几个字段：内存立刻改，库里只写这几个字段（见 updateBookMeta）。 */
+  const patchBookMeta = useCallback(
+    (bookId: string, changes: Partial<Omit<BookMeta, "id">>) => {
+      setBooks((current) =>
+        current
+          .map((book) => (book.id === bookId ? { ...book, ...changes } : book))
+          .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
+      );
+      void updateBookMeta(bookId, changes).catch((error) => reportStorageError("book", error));
+    },
+    [reportStorageError]
+  );
 
-  const updateBook = useCallback((updated: Book) => {
-    setBooks((current) =>
-      current
-        .map((book) => (book.id === updated.id ? updated : book))
-        .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
-    );
-    void saveBook(updated).catch((error) => reportStorageError("book", error));
-  }, [reportStorageError]);
-
-  // 听书每读一句就回调一次。以前这里直接把整本书 put 回 IndexedDB 并重排书库，
-  // 长篇小说等于每几秒克隆上万个句子对象再重渲染整个列表，手机上是肉眼可见的卡顿。
-  // 现在内存里立刻更新（高亮要跟上），落盘攒到 20 秒一次，停止/切后台时补写。
-  const pendingBookRef = useRef<Book | null>(null);
+  // 听书每读一句就回调一次。内存里立刻更新（高亮要跟上），
+  // 落盘攒到 20 秒一次、只写书目里的听书位置，停止/切后台时补写。
+  const pendingListeningRef = useRef(new Map<string, BookPosition>());
   const flushTimerRef = useRef<number | null>(null);
-  const booksRef = useRef(books);
-  useEffect(() => {
-    booksRef.current = books;
-  }, [books]);
 
   const pendingReadingProgressRef = useRef(
     new Map<
@@ -6149,61 +6358,9 @@ export default function MotingApp() {
     }, 2500);
   }, [flushReadingProgress]);
 
-  // 这次改动之前导入的书没记插图尺寸，正文里就没法预留位置，图片一加载就把下文推走。
-  // 开机后在后台按本补量一次，量到就写回书里，之后再打开这本书版面就是稳的。
-  // 补量只在没开着书的时候做：正读着的书突然多出一批插图占位，同样会把正文推走。
-  const sizedBooksRef = useRef(new Set<string>());
-  const sizingRef = useRef(false);
+  // 正在读书/听书时，后台的资料补全这类要在主线程解码图片的活儿一律不跑。
   const readingBookId =
     view.name === "reader" || view.name === "player" ? view.bookId : "";
-  useEffect(() => {
-    if (readingBookId || sizingRef.current) return;
-    let cancelled = false;
-    sizingRef.current = true;
-    const sizeImages = async () => {
-      try {
-        for (const book of booksRef.current) {
-          if (sizedBooksRef.current.has(book.id)) continue;
-          const sizes = new Map<string, { width: number; height: number }>();
-          for (const chapter of book.chapters) {
-            for (const paragraph of chapter.paragraphs) {
-              const id = paragraph.imageId;
-              if (paragraph.kind !== "image" || !id) continue;
-              if (paragraph.imageHeight || sizes.has(id)) continue;
-              const image = await getBookImage(id).catch(() => undefined);
-              const size = image ? await imageSize(image.blob) : null;
-              if (cancelled) return;
-              if (size) sizes.set(id, size);
-            }
-          }
-          sizedBooksRef.current.add(book.id);
-          if (!sizes.size) continue;
-          // 量图期间阅读进度可能已经写过一轮，要拿最新的那份来补，别把进度盖回去。
-          const latest = booksRef.current.find((item) => item.id === book.id);
-          if (latest) updateBook(withImageSizes(latest, sizes));
-        }
-      } finally {
-        if (!cancelled) sizingRef.current = false;
-      }
-    };
-    let idleId: number | null = null;
-    let timeoutId: number | null = null;
-    const idleWindow = window as Window & {
-      requestIdleCallback?: Window["requestIdleCallback"];
-      cancelIdleCallback?: Window["cancelIdleCallback"];
-    };
-    if (typeof idleWindow.requestIdleCallback === "function") {
-      idleId = idleWindow.requestIdleCallback(() => void sizeImages(), { timeout: 2000 });
-    } else {
-      timeoutId = window.setTimeout(() => void sizeImages(), 0);
-    }
-    return () => {
-      cancelled = true;
-      if (idleId !== null) idleWindow.cancelIdleCallback?.(idleId);
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-      sizingRef.current = false;
-    };
-  }, [books.length, readingBookId, updateBook]);
 
   const bookMetadataRef = useRef(bookMetadata);
   useEffect(() => {
@@ -6245,7 +6402,7 @@ export default function MotingApp() {
   );
 
   const buildMetadataPatch = useCallback(
-    async (book: Book, signal: AbortSignal): Promise<BookMetadataPatch | null> => {
+    async (book: BookMeta, signal: AbortSignal): Promise<BookMetadataPatch | null> => {
       const base: BookMetadataPatch = {
         bookId: book.id,
         source: BOOK_METADATA_SOURCE,
@@ -6366,7 +6523,7 @@ export default function MotingApp() {
 
   /** 用户在「书籍资料」里手选的，比后台那条规则宽：他自己认了，书名作者封面一起换。 */
   const chooseMetadataCandidate = useCallback(
-    async (book: Book, candidate: BookMetadataCandidate) => {
+    async (book: BookMeta, candidate: BookMetadataCandidate) => {
       const existing = bookMetadataRef.current.find((item) => item.bookId === book.id);
       const original = existing?.original ?? {
         title: book.title,
@@ -6405,7 +6562,7 @@ export default function MotingApp() {
   );
 
   const revertMetadata = useCallback(
-    async (book: Book) => {
+    async (book: BookMeta) => {
       const existing = bookMetadataRef.current.find((item) => item.bookId === book.id);
       if (!existing?.original) return;
       setMetadataBusy(true);
@@ -6422,12 +6579,12 @@ export default function MotingApp() {
   );
 
   const refreshMetadata = useCallback(
-    async (book: Book) => {
+    async (book: BookMeta) => {
       setMetadataBusy(true);
       try {
         const existing = bookMetadataRef.current.find((item) => item.bookId === book.id);
         // 先退回原样再查，否则拿已经被替换过的书名去查，等于拿结果再查一次结果。
-        const source: Book = existing?.original
+        const source: BookMeta = existing?.original
           ? { ...book, ...existing.original }
           : book;
         const patch = await buildMetadataPatch(source, new AbortController().signal);
@@ -6446,43 +6603,42 @@ export default function MotingApp() {
     [buildMetadataPatch, commitMetadataPatch]
   );
 
+  /** 把攒着的听书位置写进书目；只写这两个字段，不碰正文。 */
+  const writeListeningProgress = useCallback(() => {
+    const pending = [...pendingListeningRef.current];
+    pendingListeningRef.current.clear();
+    for (const [bookId, position] of pending) {
+      void updateBookMeta(bookId, { listeningPosition: position, updatedAt: position.updatedAt })
+        .catch((error) => reportStorageError("listening-position", error));
+    }
+  }, [reportStorageError]);
+
   const flushListeningProgress = useCallback(() => {
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
-    const pending = pendingBookRef.current;
-    pendingBookRef.current = null;
-    if (pending) {
-      void saveBook(pending).catch((error) => reportStorageError("listening-position", error));
-    }
-  }, [reportStorageError]);
+    writeListeningProgress();
+  }, [writeListeningProgress]);
 
   const updateListeningProgress = useCallback(
     (bookId: string, position: BookPosition) => {
-      const target = booksRef.current.find((book) => book.id === bookId);
-      if (!target) return;
-      const updated: Book = {
-        ...target,
-        listeningPosition: position,
-        updatedAt: Date.now(),
-      };
-      pendingBookRef.current = updated;
+      pendingListeningRef.current.set(bookId, position);
       setBooks((current) =>
-        current.map((book) => (book.id === bookId ? updated : book))
+        current.map((book) =>
+          book.id === bookId
+            ? { ...book, listeningPosition: position, updatedAt: position.updatedAt }
+            : book
+        )
       );
       if (flushTimerRef.current === null) {
         flushTimerRef.current = window.setTimeout(() => {
           flushTimerRef.current = null;
-          const pending = pendingBookRef.current;
-          pendingBookRef.current = null;
-          if (pending) {
-            void saveBook(pending).catch((error) => reportStorageError("listening-position", error));
-          }
+          writeListeningProgress();
         }, 20000);
       }
     },
-    [reportStorageError]
+    [writeListeningProgress]
   );
 
   useEffect(() => {
@@ -6507,7 +6663,7 @@ export default function MotingApp() {
   }, [flushListeningProgress, flushReadingProgress]);
 
   const player = useSpeechPlayer({
-    books,
+    getBook: getFullBook,
     settings,
     onProgress: updateListeningProgress,
   });
@@ -6520,12 +6676,34 @@ export default function MotingApp() {
   const activeBook = player.location
     ? books.find((book) => book.id === player.location?.bookId)
     : undefined;
-  const selectedBook =
-    view.name === "reader" ||
-    view.name === "player" ||
-    view.name === "book-notes"
-      ? books.find((book) => book.id === view.bookId)
-      : undefined;
+  const selectedMeta = viewNeedsContent(view)
+    ? books.find((book) => book.id === view.bookId)
+    : undefined;
+  const playingBookId = player.location?.bookId ?? "";
+  const viewBookId = viewNeedsContent(view) ? view.bookId : "";
+  useEffect(() => {
+    pinnedContentRef.current = new Set([playingBookId, viewBookId].filter(Boolean));
+  }, [playingBookId, viewBookId]);
+  // 整本书：书目 + 已经读进来的正文。正文还没到就是 undefined，那一页先不画。
+  const selectedBook = useMemo<Book | undefined>(() => {
+    const chapters = selectedMeta ? contents.get(selectedMeta.id) : undefined;
+    return selectedMeta && chapters ? { ...selectedMeta, chapters } : undefined;
+  }, [selectedMeta, contents]);
+
+  // 返回、前进、冷启动恢复都可能落到一本正文还没读进来的书上：补读，读不出来就退回去。
+  useEffect(() => {
+    if (!ready || !viewNeedsContent(view) || contentRef.current.has(view.bookId)) return;
+    if (!booksRef.current.some((book) => book.id === view.bookId)) return;
+    let cancelled = false;
+    void loadContent(view.bookId).then((chapters) => {
+      if (cancelled || chapters) return;
+      showToast("这本书的正文读不出来了");
+      replaceView({ name: view.name === "player" ? "listen" : view.name === "book-notes" ? "notes" : "library" });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, view, loadContent, replaceView, showToast]);
 
   // 套用资料之后 books 会换一份新对象，弹层里必须跟着拿最新的那本，否则改完还显示旧书名。
   const metadataTarget = metadataBook
@@ -6538,14 +6716,7 @@ export default function MotingApp() {
   // 冷启动恢复出来的视图可能指着一本已经删掉的书。下钻页拿不到书就会一路掉进
   // 最后那个兜底分支、显示成笔记页，所以书加载完之后校一次，不对就退回所属板块。
   useEffect(() => {
-    if (!ready) return;
-    if (
-      view.name !== "reader" &&
-      view.name !== "player" &&
-      view.name !== "book-notes"
-    ) {
-      return;
-    }
+    if (!ready || !viewNeedsContent(view)) return;
     if (books.some((book) => book.id === view.bookId)) return;
     replaceView({
       name:
@@ -6556,16 +6727,14 @@ export default function MotingApp() {
             : "library",
     });
   }, [ready, books, view, replaceView]);
+  const selectedBookId = selectedMeta?.id ?? "";
   const selectedBookNotes = useMemo(
-    () =>
-      selectedBook
-        ? notes.filter((note) => note.bookId === selectedBook.id)
-        : [],
-    [notes, selectedBook]
+    () => (selectedBookId ? notes.filter((note) => note.bookId === selectedBookId) : []),
+    [notes, selectedBookId]
   );
   const selectedBookChat = useMemo(
-    () => (selectedBook ? chats.find((c) => c.bookId === selectedBook.id) : undefined),
-    [chats, selectedBook]
+    () => (selectedBookId ? chats.find((c) => c.bookId === selectedBookId) : undefined),
+    [chats, selectedBookId]
   );
 
   const updateChat = useCallback((bookId: string, turns: AiChatTurn[]) => {
@@ -6620,6 +6789,8 @@ export default function MotingApp() {
   // PWA 全屏时 iOS 用 theme-color 给状态栏那条填色。写死一个值的话，
   // 换书架或翻开书后状态栏和页面就裂成两块颜色，看着像没做全屏。
   useEffect(() => {
+    // 设置读出来之前别动：首帧的底色和状态栏颜色由开机脚本按上次的配色套好了。
+    if (!ready) return;
     const root = document.documentElement;
     if (isReading) root.dataset.inReader = "";
     else delete root.dataset.inReader;
@@ -6652,7 +6823,7 @@ export default function MotingApp() {
       window.removeEventListener("pageshow", apply);
       window.removeEventListener("focus", apply);
     };
-  }, [isReading, settings.theme, settings.shellTheme]);
+  }, [ready, isReading, settings.theme, settings.shellTheme]);
 
   const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -6670,7 +6841,7 @@ export default function MotingApp() {
       });
       try {
         if (file.size > MAX_BOOK_FILE_BYTES) throw new Error(MAX_BOOK_FILE_ERROR);
-        const { parseBookFile } = await import("../lib/parsers");
+        const { parseBookFile } = await loadParsers();
         const { book, images } = await parseBookFile(file, setImportProgress);
         setImportProgress({
           stage: "saving",
@@ -6678,7 +6849,7 @@ export default function MotingApp() {
           percent: 94,
         });
         await saveImportedBook(book, images);
-        setBooks((current) => [book, ...current]);
+        setBooks((current) => [metaOf(book), ...current]);
         setImportProgress({
           stage: "saving",
           label: "导入完成",
@@ -6700,31 +6871,46 @@ export default function MotingApp() {
   const handleOnlineImport = async (file: File, sourceId: string, onProgress: (label: string) => void) => {
     if (books.some((book) => book.onlineSourceId === sourceId)) return;
     if (file.size > MAX_BOOK_FILE_BYTES) throw new Error(MAX_BOOK_FILE_ERROR);
-    const { parseBookFile } = await import("../lib/parsers");
+    const { parseBookFile } = await loadParsers();
     const { book, images } = await parseBookFile(file, (progress) => onProgress(progress.label));
     book.onlineSourceId = sourceId;
     onProgress("正在保存到本地书库…");
     await saveImportedBook(book, images);
-    setBooks((current) => [book, ...current]);
+    setBooks((current) => [metaOf(book), ...current]);
   };
 
-  const openReader = (book: Book, position?: BookPosition) => {
+  /** 连点，或者点了 A 马上又点 B：只认最后一次，前面那次读完正文也不跳。 */
+  const openTokenRef = useRef(0);
+
+  /** 先把这本书的正文读进来，再进页面；页面第一帧就是完整的。 */
+  const withContent = async (bookId: string): Promise<Book | null> => {
+    const token = ++openTokenRef.current;
+    const chapters = await loadContent(bookId);
+    if (token !== openTokenRef.current) return null;
+    const meta = booksRef.current.find((book) => book.id === bookId);
+    if (!chapters || !meta) {
+      showToast("这本书的正文读不出来了");
+      return null;
+    }
+    return { ...meta, chapters };
+  };
+
+  const openReader = async (meta: BookMeta, position?: BookPosition) => {
+    const book = await withContent(meta.id);
+    if (!book) return;
+    const now = Date.now();
     const nextPosition =
       position ??
       pendingReadingProgressRef.current.get(book.id)?.position ??
       book.readingPosition ??
       initialPosition(book);
-    const updated: Book = {
-      ...book,
-      readingPosition: nextPosition,
-      lastOpenedAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    updateBook(updated);
+    patchBookMeta(book.id, { readingPosition: nextPosition, lastOpenedAt: now, updatedAt: now });
     navigate({ name: "reader", bookId: book.id });
   };
 
-  const openPlayer = (book: Book, startPlaying = false) => {
+  const openPlayer = async (meta: BookMeta, startPlaying = false) => {
+    const book = await withContent(meta.id);
+    if (!book) return;
     navigate({ name: "player", bookId: book.id });
     if (startPlaying) {
       player.start(
@@ -6734,8 +6920,13 @@ export default function MotingApp() {
     }
   };
 
+  const openBookNotes = async (meta: BookMeta) => {
+    const book = await withContent(meta.id);
+    if (book) navigate({ name: "book-notes", bookId: book.id });
+  };
+
   const addListeningMark = async (
-    book: Book,
+    book: BookMeta,
     position: BookPosition,
     excerpt: string
   ) => {
@@ -6835,7 +7026,7 @@ export default function MotingApp() {
   };
 
   const handleReadProgress = useCallback(
-    (book: Book, position: BookPosition) => {
+    (book: BookMeta, position: BookPosition) => {
       const now = Date.now();
       const nextPosition = { ...position, updatedAt: now };
       pendingReadingProgressRef.current.set(book.id, {
@@ -6880,6 +7071,7 @@ export default function MotingApp() {
     setBooks((current) =>
       current.filter((book) => book.id !== deleteTarget.id)
     );
+    dropContent((id) => id !== deleteTarget.id);
     setNotes((current) =>
       current.filter((note) => note.bookId !== deleteTarget.id)
     );
@@ -6928,19 +7120,15 @@ export default function MotingApp() {
     return true;
   };
 
-  const openNote = (note: BookNote) => {
-    const book = books.find((item) => item.id === note.bookId);
+  const openNote = async (note: BookNote) => {
+    const meta = books.find((item) => item.id === note.bookId);
+    const book = meta ? await withContent(meta.id) : null;
     const found = book ? findSentence(book, note.sentenceId) : null;
-    if (!book || !found) {
+    if (!meta || !book || !found) {
       showToast("这条标记对应的正文已经不存在");
       return;
     }
-    const position = positionFor(
-      book,
-      found.chapterIndex,
-      found.sentenceIndex
-    );
-    openReader(book, position);
+    await openReader(meta, positionFor(book, found.chapterIndex, found.sentenceIndex));
   };
 
   const clearEverything = async () => {
@@ -6957,7 +7145,7 @@ export default function MotingApp() {
       window.clearTimeout(readingProgressTimerRef.current);
       readingProgressTimerRef.current = null;
     }
-    pendingBookRef.current = null;
+    pendingListeningRef.current.clear();
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
@@ -6968,7 +7156,8 @@ export default function MotingApp() {
     } catch (error) {
       reportStorageError("save-demo", error);
     }
-    setBooks([demo]);
+    commitContents(new Map());
+    setBooks([metaOf(demo)]);
     setNotes([]);
     setSettings(DEFAULT_SETTINGS);
     setStats(DEFAULT_STATS);
@@ -6995,21 +7184,22 @@ export default function MotingApp() {
             : view.name;
 
   if (!ready) {
+    // 书目读出来之前只有底色，颜色由 layout 里的开机脚本按上次的配色提前套好。
+    // 书目几十毫秒就读完，不再摆「正在打开你的书架」那种闪屏：
+    // 它让每次打开都多闪一个跟正文不一样的画面（Apple 的启动规范也明确不要这么做）。
     return (
-      <main className="app-loading">
-        <div className="app-mark">
-          <BookOpen size={25} />
-        </div>
-        <h1>墨听</h1>
-        <p>正在打开你的书架</p>
-        <span />
+      <main className="app-shell app-shell--booting" aria-busy="true">
+        {upgrading ? (
+          <p className="app-booting__note">正在整理本地书库，只需要这一次…</p>
+        ) : null}
       </main>
     );
   }
 
   return (
     <main className="app-shell">
-      {view.name === "reader" && selectedBook ? (
+      {view.name === "reader" ? (
+        selectedBook ? (
         <ReaderScreen
           key={selectedBook.id}
           book={selectedBook}
@@ -7041,18 +7231,21 @@ export default function MotingApp() {
           onSettingsChange={changeSettings}
           onToast={showToast}
         />
-      ) : view.name === "player" && selectedBook ? (
+        ) : null
+      ) : view.name === "player" ? (
+        selectedBook ? (
         <PlayerScreen
           book={selectedBook}
           settings={settings}
           player={player}
           onBack={() => goBack({ name: "listen" })}
-          onOpenReader={(position) => openReader(selectedBook, position)}
+          onOpenReader={(position) => void openReader(selectedBook, position)}
           onAddNote={(position, excerpt) =>
             addListeningMark(selectedBook, position, excerpt)
           }
           onSettingsChange={changeSettings}
         />
+        ) : null
       ) : (
         <div className="app-frame">
           <div className="desktop-brand">
@@ -7100,17 +7293,14 @@ export default function MotingApp() {
                 onFind={(query) => navigate({ name: "find", query })}
                 onOpen={(book) => openReader(book)}
                 onPlay={(book) => openPlayer(book, true)}
-                onOpenNotes={(book) =>
-                  navigate({ name: "book-notes", bookId: book.id })
-                }
+                onOpenNotes={(book) => void openBookNotes(book)}
                 onOpenMetadata={setMetadataBook}
                 onDelete={setDeleteTarget}
               />
             ) : view.name === "store" ? (
               <div className="screen">
-                <Suspense
-                  fallback={<div className="online-loading">正在打开书城…</div>}
-                >
+                {/* 代码开机后已经预取过，这里几乎不会等；真等的那一下留空，不闪一行加载字样。 */}
+                <Suspense fallback={null}>
                   <Bookstore
                     books={books}
                     initialBookId={view.bookId ?? ""}
@@ -7122,13 +7312,7 @@ export default function MotingApp() {
                 </Suspense>
               </div>
             ) : view.name === "find" ? (
-              <Suspense
-                fallback={
-                  <div className="screen">
-                    <div className="online-loading">正在打开在线找书…</div>
-                  </div>
-                }
-              >
+              <Suspense fallback={<div className="screen" />}>
                 <OnlineLibrary
                   key={view.query}
                   initialQuery={view.query}
@@ -7144,36 +7328,36 @@ export default function MotingApp() {
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}
               />
-            ) : view.name === "book-notes" && selectedBook ? (
-              <BookNotesScreen
-                book={selectedBook}
-                notes={selectedBookNotes}
-                onBack={() => goBack({ name: "library" })}
-                onOpen={openNote}
-                onDelete={deleteBookNote}
-                onEditThought={(note) => {
-                  setThoughtTarget(note);
-                  setThoughtDraft(note.thought ?? "");
-                }}
-              />
+            ) : view.name === "book-notes" ? (
+              selectedBook ? (
+                <BookNotesScreen
+                  book={selectedBook}
+                  notes={selectedBookNotes}
+                  onBack={() => goBack({ name: "library" })}
+                  onOpen={(note) => void openNote(note)}
+                  onDelete={deleteBookNote}
+                  onEditThought={(note) => {
+                    setThoughtTarget(note);
+                    setThoughtDraft(note.thought ?? "");
+                  }}
+                />
+              ) : null
             ) : (
               <NotesScreen
                 notes={notes}
                 books={books}
                 chats={chats}
-                onOpenBook={(book) =>
-                  navigate({ name: "book-notes", bookId: book.id })
-                }
+                onOpenBook={(book) => void openBookNotes(book)}
                 onOpenChat={setChatBook}
               />
             )}
           </section>
 
-          {activeBook && view.name !== "player" ? (
+          {activeBook ? (
             <MiniPlayer
               book={activeBook}
               chapterTitle={
-                activeBook.chapters[player.location?.chapterIndex ?? 0]?.title ??
+                activeBook.chapterOutline[player.location?.chapterIndex ?? 0]?.title ??
                 "正文"
               }
               isPlaying={player.isPlaying}
@@ -7249,13 +7433,7 @@ export default function MotingApp() {
               《{deleteTarget.title}》的正文、阅读进度和全部标记都会从当前设备删除。
             </p>
             <div>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => setDeleteTarget(null)}
-              >
-                取消
-              </button>
+              <SheetCancelButton>取消</SheetCancelButton>
               <button
                 type="button"
                 className="danger-button"
@@ -7287,13 +7465,7 @@ export default function MotingApp() {
               所有导入书籍、阅读进度和标记都会删除。操作完成后只保留内置使用指南。
             </p>
             <div>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => setConfirmClear(false)}
-              >
-                取消
-              </button>
+              <SheetCancelButton>取消</SheetCancelButton>
               <button
                 type="button"
                 className="danger-button"
@@ -7359,7 +7531,7 @@ export default function MotingApp() {
       ) : null}
 
       {toast ? (
-        <div className="toast">
+        <div key={toast.id} className={`toast${toast.leaving ? " is-leaving" : ""}`}>
           <span>{toast.message}</span>
           {toast.undo ? (
             <button

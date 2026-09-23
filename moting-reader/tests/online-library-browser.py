@@ -130,7 +130,7 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="已加入 · 阅读").click()
     expect(page.get_by_text("这是一段明确标注的自动化测试正文。", exact=False).first).to_be_visible()
     # Verify the EPUB was actually persisted, with exactly one online source record.
-    saved = page.evaluate("""() => new Promise((resolve, reject) => {const r=indexedDB.open('moting-reader');r.onsuccess=()=>{const db=r.result;const q=db.transaction('books').objectStore('books').getAll();q.onsuccess=()=>{resolve(q.result.filter(b=>b.onlineSourceId).map(b=>({title:b.title,source:b.onlineSourceId,chapters:b.chapters.length})));db.close()};q.onerror=()=>reject(q.error)}})""")
+    saved = page.evaluate("""() => new Promise((resolve, reject) => {const r=indexedDB.open('moting-reader');r.onsuccess=()=>{const db=r.result;const t=db.transaction(['books','contents']);const q=t.objectStore('books').getAll();const c=t.objectStore('contents').getAll();t.oncomplete=()=>{const len=(id)=>c.result.find(x=>x.bookId===id)?.chapters?.length??0;resolve(q.result.filter(b=>b.onlineSourceId).map(b=>({title:b.title,source:b.onlineSourceId,chapters:len(b.id)})));db.close()};t.onerror=()=>reject(t.error)}})""")
     assert saved == [{"title": "在线导入测试", "source": "zlibrary:17:aabbcc", "chapters": 1}], saved
     # Cold start restores the reader; go back to its library parent while keeping the same database.
     page.reload()

@@ -7,6 +7,11 @@
 :root {
   /* 软键盘挡住的高度，由 useKeyboardInset 量出来写进来。 */
   --keyboard-inset: 0px;
+  /* 底部面板（sheet）的动效：iOS 的 sheet 手感，进出同一条曲线。退场时长和组件里的
+     SHEET_EXIT_MS 对齐，组件等退场放完才卸载。 */
+  --ease-sheet: cubic-bezier(0.32, 0.72, 0, 1);
+  --sheet-enter: 420ms;
+  --sheet-exit: 300ms;
   --paper: #f3f4f7;
   --paper-deep: #e7e8ef;
   --surface: #ffffff;
@@ -184,21 +189,99 @@ html[data-in-reader] body {
 body {
   min-height: 100%;
   margin: 0;
-  /* 顶部一层贴住视口的柔光，滚动时不跟着走，页面才不像一块平涂色板。 */
-  background:
-    radial-gradient(
-      130% 52% at 50% 0%,
-      var(--paper-wash),
-      transparent 68%
-    )
-    fixed,
-    var(--paper);
+  /* 底色由 html 铺；顶部那层柔光挂在下面的 body::before 上。 */
+  background: transparent;
   color: var(--ink);
   font-family: var(--font-sans);
   /* 不写 -webkit-font-smoothing: antialiased：它会把笔画削细一档，
      系统 App 都用默认值，加了反而不像原生。 */
   text-rendering: optimizeLegibility;
   overscroll-behavior-y: none;
+}
+
+/*
+ * 顶部一层贴住视口的柔光，滚动时不跟着走，页面才不像一块平涂色板。
+ * 不用 background-attachment: fixed：iOS 不支持，会退化成按整页长度拉伸——
+ * 长页面和短页面柔光大小不一样，内容加载变长时底色也跟着变。钉在视口上的一层才稳。
+ */
+body::before {
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  background: radial-gradient(130% 52% at 50% 0%, var(--paper-wash), transparent 68%);
+  content: "";
+  pointer-events: none;
+}
+
+html[data-in-reader] body::before {
+  display: none;
+}
+
+/*
+ * 外壳是界面，不是文章：长按不选中文字、长按封面不弹 iOS 的「存储图像 / 拷贝 / 共享」菜单、
+ * 图片拖不走。要能选字的地方单独放开（输入框、AI 的回答、笔记里的原文和想法）。
+ * 阅读正文不在这里，它有自己的选区规则（.reader-article）。
+ */
+.app-frame,
+.player-screen,
+.modal-backdrop,
+.ai-chat,
+.toast {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* 祖先上的 user-select: none 在 iOS 上会连带让输入框打不了字，必须显式放开。 */
+:is(.app-frame, .player-screen, .modal-backdrop, .ai-chat) :is(input, textarea, [contenteditable="true"]),
+.ai-ask__answer,
+.ai-ask__question,
+.ink-note__text,
+.ink-note__thought {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+img {
+  -webkit-user-drag: none;
+}
+
+/*
+ * 按下反馈：按下立刻变淡（iOS 系统按钮的做法）。以前只有书的卡片会缩一下，
+ * 底部 tab、分段、标签、文字按钮按下去没有任何反应，点没点中全靠猜。
+ */
+:is(
+    .text-button,
+    .ios-back,
+    .toast__undo,
+    .zen-log__all,
+    .ai-setup__reload,
+    .ai-ask__reasoning-toggle,
+    .reader-popover__back,
+    .toc__close,
+    .view-current-text,
+    .player-controls__text,
+    .bottom-nav button,
+    .ios-segmented button,
+    .store-chips button,
+    .store-modes button,
+    .notes-day-chip,
+    .skip-control,
+    .player-primary-control,
+    .shelf-card__play,
+    .ios-play-button,
+    .swatch,
+    .font-picker__item,
+    .notes-calendar__day,
+    .ink-note__body,
+    .mini-player__main,
+    .shelf-card__text,
+    .store-row,
+    .toc__item,
+    .ios-row__main
+  ):active:not(:disabled) {
+  opacity: 0.45;
 }
 
 /* 浮层开着时把正文钉死。top 由脚本按当前滚动位置写进来，关掉再滚回去。 */
@@ -346,8 +429,11 @@ button:disabled {
     transform 160ms ease;
 }
 
-.icon-button:hover {
-  background: color-mix(in srgb, var(--ink) 6%, transparent);
+/* 悬停样式只给有鼠标的设备。触屏上点过的按钮会一直停在悬停态，直到点别处。 */
+@media (hover: hover) {
+  .icon-button:hover {
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
+  }
 }
 
 .icon-button:active {
@@ -365,8 +451,10 @@ button:disabled {
     inset 0 -0.5px 0 var(--glass-shade);
 }
 
-.icon-button--filled:hover {
-  background: var(--glass-tint-strong);
+@media (hover: hover) {
+  .icon-button--filled:hover {
+    background: var(--glass-tint-strong);
+  }
 }
 
 .primary-button,
@@ -393,8 +481,10 @@ button:disabled {
   color: white;
 }
 
-.primary-button:hover {
-  background: var(--accent-deep);
+@media (hover: hover) {
+  .primary-button:hover {
+    background: var(--accent-deep);
+  }
 }
 
 .secondary-button {
@@ -407,8 +497,10 @@ button:disabled {
   color: var(--ink);
 }
 
-.secondary-button:hover {
-  background: var(--glass-tint-strong);
+@media (hover: hover) {
+  .secondary-button:hover {
+    background: var(--glass-tint-strong);
+  }
 }
 
 .danger-button {
@@ -873,6 +965,8 @@ button:disabled {
   gap: 14px;
   overflow-x: auto;
   padding: 2px 20px;
+  /* 没有这一行，吸附会把第一张卡对齐到屏幕边上，跟上面的标题错开 20px。 */
+  scroll-padding-inline: 20px;
   scroll-snap-type: x proximity;
   scrollbar-width: none;
 }
@@ -4260,7 +4354,13 @@ html[data-keyboard-open] .bottom-bar {
   padding-top: 40px;
   background: rgb(25 23 20 / 34%);
   backdrop-filter: blur(5px);
-  animation: fade-in 150ms ease both;
+  animation: fade-in 240ms ease;
+  transition: opacity var(--sheet-exit) ease;
+}
+
+.modal-backdrop.is-closing {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .modal-sheet {
@@ -4277,9 +4377,23 @@ html[data-keyboard-open] .bottom-bar {
   box-shadow:
     inset 0 0.5px 0 var(--glass-sheen),
     0 -18px 50px rgb(29 25 20 / 18%);
-  animation: slide-up 220ms cubic-bezier(0.22, 0.85, 0.35, 1) both;
+  /* 照 iOS 的 sheet：整块从屏幕底边滑上来、滑下去，用同一条曲线。
+     不写 fill-mode：动画放完就回到元素自己的 transform，拖拽和退场才接得上。 */
+  animation: sheet-in var(--sheet-enter) var(--ease-sheet);
   /* 没拖到阈值时松手，面板要顺滑地弹回去，而不是啪一下跳回原位。 */
-  transition: transform 220ms cubic-bezier(0.22, 0.85, 0.35, 1);
+  transition: transform var(--sheet-exit) var(--ease-sheet);
+}
+
+/* 退场从当前位置（可能是手指拖到一半的地方）接着滑出屏幕。
+   拖拽时的位移写在行内 style 上，这里要压过它。 */
+.modal-sheet.is-closing {
+  transform: translateY(100%) !important;
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateY(100%);
+  }
 }
 
 /* 40px 是 backdrop 的 padding-top。键盘弹起时 safe-area-inset-bottom 在 standalone
@@ -4322,8 +4436,8 @@ html[data-keyboard-open] .modal-sheet {
   touch-action: none;
 }
 
+/* 拖的时候跟手，不要过渡。也别在这里关掉进场动画：动画名一变就会从头再放一遍。 */
 .modal-sheet.is-dragging {
-  animation: none;
   transition: none;
   cursor: grabbing;
 }
@@ -5004,54 +5118,18 @@ html[data-keyboard-open] .modal-sheet {
   cursor: pointer;
 }
 
-.app-loading {
+/* 书目读出来之前只有底色（几十毫秒）。老用户第一次打开新版要整理一次本地库，才会露出这一行字。 */
+.app-shell--booting {
   display: flex;
   min-height: 100dvh;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: var(--paper);
 }
 
-.app-loading h1 {
-  margin: 17px 0 5px;
-  font-family: var(--font-serif);
-  font-size: 31px;
-  letter-spacing: 0.08em;
-}
-
-.app-loading p {
+.app-booting__note {
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
-}
-
-.app-loading > span {
-  width: 90px;
-  height: 2px;
-  margin-top: 22px;
-  overflow: hidden;
-  border-radius: 99px;
-  background: var(--line);
-}
-
-.app-loading > span::after {
-  display: block;
-  width: 45%;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--accent);
-  content: "";
-  animation: loading 1s ease-in-out infinite alternate;
-}
-
-@keyframes loading {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(120%);
-  }
+  font-size: 13px;
 }
 
 @keyframes fade-in {
@@ -5069,6 +5147,18 @@ html[data-keyboard-open] .modal-sheet {
 
 @keyframes toast-in {
   from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+}
+
+/* 退场和进场走同一条路径，提示条是「滑回去」而不是凭空消失。 */
+.toast.is-leaving {
+  animation: toast-out 180ms ease forwards;
+}
+
+@keyframes toast-out {
+  to {
     transform: translateY(8px);
     opacity: 0;
   }

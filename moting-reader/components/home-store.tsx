@@ -4,8 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronRight, RefreshCw, Trophy } from "lucide-react";
 import { fetchWereadRecommend } from "../lib/weread";
 import { loadCatalog, rankOf } from "../lib/store-catalog";
+import { keepFeedForNextLaunch, keepRank, readFeed, readRank, showFeed } from "../lib/store-snapshot";
 import { preferredCategory, type WereadBook } from "../lib/weread-types";
-import { StoreCard, StoreRow } from "./bookstore";
+import { StoreCard, StoreCardSkeleton, StoreRow, StoreRowSkeleton } from "./bookstore";
 import "./home-store.css";
 
 /**
@@ -18,11 +19,17 @@ const FEED_COUNT = 20;
 const FEED_SHOWN = 8;
 const RANK_COUNT = 3;
 
+/** 后台给下次打开备一份新推荐，一次打开 App 只做一回。 */
+let refreshedThisLaunch = false;
+
 /**
  * 主页的书城条：为你推荐一条横滑 + 一个榜的前三名。
  *
  * 这里是「逛」的入口，不是书城本身——所有要挑、要筛、要搜的动作都在书城页里，
  * 主页只负责让人一眼看见有什么新东西，以及一个「全部」的去处。
+ *
+ * 打开 App、切回主页都直接画上一次的结果（见 lib/store-snapshot）：
+ * 以前每次都现取、先出骨架，取回来把下面的榜单往下推约 90px。
  */
 export function HomeStore({
   onOpenStore,
@@ -31,9 +38,10 @@ export function HomeStore({
   onOpenStore: () => void;
   onOpenBook: (bookId: string) => void;
 }) {
-  const [feed, setFeed] = useState<WereadBook[]>([]);
-  const [feedIdx, setFeedIdx] = useState(0);
-  const [feedLoading, setFeedLoading] = useState(true);
+  const [initialFeed] = useState(() => readFeed());
+  const [feed, setFeed] = useState<WereadBook[]>(initialFeed?.books ?? []);
+  const [feedIdx, setFeedIdx] = useState(initialFeed?.nextIdx ?? 0);
+  const [feedLoading, setFeedLoading] = useState(!initialFeed);
   const [feedFailed, setFeedFailed] = useState(false);
   const feedController = useRef<AbortController | null>(null);
   /** 后台先取好的下一批。「换一批」点下去时直接换上，不用现场等网络。 */
@@ -41,8 +49,8 @@ export function HomeStore({
   const aheadController = useRef<AbortController | null>(null);
 
   const [category] = useState(() => preferredCategory());
-  const [rank, setRank] = useState<WereadBook[]>([]);
-  const [rankLoading, setRankLoading] = useState(true);
+  const [rank, setRank] = useState<WereadBook[]>(() => readRank(category) ?? []);
+  const [rankLoading, setRankLoading] = useState(() => !readRank(category));
 
   /**
    * 预取下一批。
@@ -86,6 +94,7 @@ export function HomeStore({
             setFeedIdx(next);
             setFeedFailed(false);
             setFeedLoading(false);
+            if (data.books.length) showFeed({ books: data.books, nextIdx: next });
             prefetch(next);
           })
           .catch(() => {
@@ -106,6 +115,7 @@ export function HomeStore({
       ahead.current = null;
       setFeed(ready.books);
       setFeedIdx(ready.next);
+      showFeed({ books: ready.books, nextIdx: ready.next });
       prefetch(ready.next);
       return;
     }
@@ -114,20 +124,37 @@ export function HomeStore({
   }
 
   useEffect(() => {
-    loadFeed(0);
+    if (!initialFeed) {
+      loadFeed(0);
+    } else {
+      prefetch(initialFeed.nextIdx);
+      // 屏幕上这一批不动；取一份新的存起来，下次打开换上。
+      if (!refreshedThisLaunch) {
+        refreshedThisLaunch = true;
+        fetchWereadRecommend(0, FEED_COUNT)
+          .then((data) => {
+            if (data.books.length) {
+              keepFeedForNextLaunch({ books: data.books, nextIdx: data.hasMore ? data.nextIdx : 0 });
+            }
+          })
+          .catch(() => undefined);
+      }
+    }
     return () => {
       feedController.current?.abort();
       aheadController.current?.abort();
     };
-  }, [loadFeed]);
+  }, [initialFeed, loadFeed, prefetch]);
 
   useEffect(() => {
     let alive = true;
-    // 书目是本地文件，这一下基本不花时间。
+    // 书目是随应用一起发的静态文件，这一下基本不花时间；榜只在第一次没有存档时才往屏幕上放。
     loadCatalog(category)
       .then((data) => {
         if (!alive) return;
-        setRank(rankOf(data.books, RANK_COUNT));
+        const next = rankOf(data.books, RANK_COUNT);
+        keepRank(category, next);
+        setRank((current) => (current.length ? current : next));
         setRankLoading(false);
       })
       .catch(() => {
@@ -159,7 +186,7 @@ export function HomeStore({
         </div>
 
         {/* 推荐要实时查接口，它挂了就只收起这一段，榜单读的是本地书目，照常显示。 */}
-        {feedFailed ? (
+        {feedFailed && !feed.length ? (
           <p className="home-store__subhead home-store__quiet">推荐暂时取不到，先看看榜单</p>
         ) : (
           <>
@@ -176,11 +203,10 @@ export function HomeStore({
               </button>
             </div>
 
+            {/* 骨架和成品是同一套卡片尺寸，数据到了原地换上，不会把下面的榜单推走。 */}
             <div className="home-row__track" aria-busy={feedLoading}>
               {feedLoading && !feed.length
-                ? Array.from({ length: 4 }, (_, index) => (
-                    <div className="store-skeleton store-skeleton--card" key={index} />
-                  ))
+                ? Array.from({ length: 4 }, (_, index) => <StoreCardSkeleton key={index} />)
                 : feed.slice(0, FEED_SHOWN).map((book, index) => (
                     <StoreCard
                       key={book.bookId}
@@ -204,26 +230,24 @@ export function HomeStore({
             <small>按微信读书推荐值排序，墨听自己排的</small>
           </div>
 
-          {rankLoading ? (
-            <div className="store-ranklist" role="status" aria-label="正在加载榜单">
-              {Array.from({ length: RANK_COUNT }, (_, index) => (
-                <div className="store-skeleton store-skeleton--row" key={index} />
-              ))}
-            </div>
-          ) : (
-            <div className="store-ranklist">
-              {rank.map((book, index) => (
-                <StoreRow
-                  key={book.bookId}
-                  book={book}
-                  rank={index + 1}
-                  // 榜只有三行，滚一下就到，别让它懒加载出一排空封面。
-                  priority
-                  onOpen={(target) => onOpenBook(target.bookId)}
-                />
-              ))}
-            </div>
-          )}
+          <div
+            className="store-ranklist"
+            role={rankLoading ? "status" : undefined}
+            aria-label={rankLoading ? "正在加载榜单" : undefined}
+          >
+            {rankLoading && !rank.length
+              ? Array.from({ length: RANK_COUNT }, (_, index) => <StoreRowSkeleton key={index} />)
+              : rank.map((book, index) => (
+                  <StoreRow
+                    key={book.bookId}
+                    book={book}
+                    rank={index + 1}
+                    // 榜只有三行，滚一下就到，别让它懒加载出一排空封面。
+                    priority
+                    onOpen={(target) => onOpenBook(target.bookId)}
+                  />
+                ))}
+          </div>
         </section>
       ) : null}
     </>

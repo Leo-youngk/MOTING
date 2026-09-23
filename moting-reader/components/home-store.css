@@ -4,11 +4,6 @@
  * 卡片和榜单行直接复用书城页的零件，两处的手感必须是同一个。
  */
 
-/* 懒加载这块时先占住位置，chunk 到了换成骨架屏，高度对得上就不会跳。 */
-.home-store__loading {
-  min-height: 560px;
-}
-
 .home-store__head {
   display: flex;
   align-items: baseline;

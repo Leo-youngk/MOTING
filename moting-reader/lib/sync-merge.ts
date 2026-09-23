@@ -36,12 +36,15 @@ export function bookPushTime(meta: { updatedAt: number; syncReadyAt?: number }):
 }
 
 /**
- * 推上云端的书籍 meta:去掉封面。封面是整张图的 data URL,动辄几百 KB 到几 MB,
- * 会顶破 D1 单行 2 MB 上限;它随正文走 R2(插图通道的 COVER_IMAGE_ID)。
- * 接收端合并时 meta 里没有这个键,本地已有的封面原样保留。
+ * 推上云端的书籍 meta:去掉封面和目录。
+ * 封面是整张图的 data URL,动辄几百 KB 到几 MB,会顶破 D1 单行 2 MB 上限;它随正文走 R2
+ * (插图通道的 COVER_IMAGE_ID)。目录是从正文算出来的,每台设备拿到正文后自己算。
+ * 接收端合并时 meta 里没有这两个键,本地已有的原样保留。
  */
-export function toSyncBookMeta<B extends { coverDataUrl?: string }>(meta: B): Omit<B, "coverDataUrl"> {
-  const { coverDataUrl: _cover, ...rest } = meta;
+export function toSyncBookMeta<B extends { coverDataUrl?: string; chapterOutline?: unknown }>(
+  meta: B
+): Omit<B, "coverDataUrl" | "chapterOutline"> {
+  const { coverDataUrl: _cover, chapterOutline: _outline, ...rest } = meta;
   return rest;
 }
 

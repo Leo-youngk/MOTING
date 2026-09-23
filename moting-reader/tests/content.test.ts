@@ -7,14 +7,16 @@ import {
   chaptersFromPlainText,
   createBook,
   createChapter,
+  formatRemaining,
   movePosition,
   nextChapterRange,
+  outlineOf,
   positionFor,
+  remainingCharacters,
   sliceSpeechBlock,
   splitBlocksIntoSections,
   splitIntoSentences,
   toSpeakableText,
-  withImageSizes,
 } from "../lib/content.ts";
 import type { BlockInput } from "../lib/content.ts";
 
@@ -105,7 +107,7 @@ test("插图成块但不进句子流，缺图源的插图直接丢掉", () => {
   assert.equal(buildSpeechBlocks(chapter).length, 2);
 });
 
-test("插图尺寸随正文一起存下来，老书补量时只改缺尺寸的那几段", () => {
+test("插图尺寸随正文一起存下来", () => {
   const chapter = createChapter(
     "第一章",
     [
@@ -119,21 +121,28 @@ test("插图尺寸随正文一起存下来，老书补量时只改缺尺寸的�
   assert.equal(chapter.paragraphs[1].imageWidth, 800);
   assert.equal(chapter.paragraphs[1].imageHeight, 600);
   assert.equal(chapter.paragraphs[2].imageHeight, undefined);
+});
 
-  const book = createBook({ title: "带插图的书", author: "", format: "epub", chapters: [chapter] });
-  const filled = withImageSizes(
-    book,
-    new Map([
-      ["image-1", { width: 10, height: 10 }],
-      ["image-2", { width: 400, height: 300 }],
-    ])
+test("书目里的目录跟正文一致，剩余时长只看书目就能算", () => {
+  const chapters = chaptersFromPlainText(
+    "第一章 起点\n\n这是第一句。这是第二句。\n\n第二章 继续\n\n这是第三句，比前面长一些。"
   );
-  const paragraphs = filled.chapters[0].paragraphs;
-  // 已经有尺寸的不动，免得把导入时量准的值覆盖掉。
-  assert.equal(paragraphs[1].imageWidth, 800);
-  assert.equal(paragraphs[2].imageWidth, 400);
-  assert.equal(paragraphs[2].imageHeight, 300);
-  assert.notEqual(filled.chapters[0], book.chapters[0]);
+  const book = createBook({ title: "目录", author: "", format: "txt", chapters });
+  assert.deepEqual(outlineOf(chapters), book.chapterOutline);
+  assert.deepEqual(
+    book.chapterOutline.map((item) => [item.id, item.title, item.sentenceCount, item.characterCount]),
+    chapters.map((chapter) => [chapter.id, chapter.title, chapter.sentenceCount, chapter.characterCount])
+  );
+
+  // 书库里只有书目、没有正文：剩余时长照样算得出来，跟拿整本书算的一样。
+  const { chapters: _chapters, ...meta } = book;
+  const position = { chapterId: chapters[0].id, chapterIndex: 0, sentenceId: "", sentenceIndex: 1, percent: 30, updatedAt: 0 };
+  assert.equal(remainingCharacters(meta, position), remainingCharacters(book, position));
+  assert.equal(
+    remainingCharacters(meta, position),
+    chapters[0].characterCount / 2 + chapters[1].characterCount
+  );
+  assert.equal(formatRemaining(meta), formatRemaining(book));
 });
 
 test("只有插图没有正文时不算一章", () => {

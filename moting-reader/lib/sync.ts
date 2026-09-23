@@ -9,6 +9,7 @@ import {
   getAllSessions,
   getBook,
   getBookImage,
+  getBookMeta,
   getBookMetas,
   getLegacyStats,
   getSettings,
@@ -16,16 +17,16 @@ import {
   getSyncState,
   mergeLegacyStats,
   removeBook,
-  saveBook,
+  saveBookMeta,
   saveBookMetadata,
   saveChat,
   saveImportedBook,
   saveReadingPositions,
-  saveSession,
+  saveSessionsIfNewer,
   saveSettings,
   saveSyncState,
+  updateBookMeta,
   writeNotes,
-  type BookMeta,
   type SyncState,
 } from "./storage";
 import type { BookImage } from "./types";
@@ -33,6 +34,7 @@ import type { BookMetadataPatch } from "./book-metadata-types";
 import type {
   Book,
   BookAiChat,
+  BookMeta,
   BookNote,
   BookPosition,
   Chapter,
@@ -481,18 +483,18 @@ async function applyPullPage(
       changed = true;
       deps.onApplied?.("books");
     } else if (action.op === "write") {
-      const local = localMetaById.has(record.key) ? await getBook(record.key) : undefined;
+      const local = localMetaById.has(record.key) ? await getBookMeta(record.key) : undefined;
       if (local) {
-        const merged: Book = {
+        // 目录和两个位置都不跟远端 meta 走:目录是本机从正文算的,位置各有各的通道。
+        const merged: BookMeta = {
           ...local,
           ...action.value,
-          chapters: local.chapters,
+          chapterOutline: local.chapterOutline,
           readingPosition: local.readingPosition,
           listeningPosition: local.listeningPosition,
         };
-        await saveBook(merged);
-        const { chapters: _chapters, ...meta } = merged;
-        localMetaById.set(record.key, meta);
+        await saveBookMeta(merged);
+        localMetaById.set(record.key, merged);
         changed = true;
         deps.onApplied?.("books");
       } else {
@@ -541,12 +543,12 @@ async function applyPullPage(
   }
 
   if (page.sessions?.length) {
-    for (const record of page.sessions) {
-      if (!record.data) continue;
-      await saveSession(record.data as ReadingSession);
+    const incoming = page.sessions.filter((record) => record.data).map((record) => record.data as ReadingSession);
+    // 本机刚推上去的记录会原样拉回来一遍,只有真写进去的才算变化。
+    if (await saveSessionsIfNewer(incoming)) {
       changed = true;
+      deps.onApplied?.("sessions");
     }
-    deps.onApplied?.("sessions");
   }
 
   for (const record of page.settings ?? []) {
@@ -565,28 +567,36 @@ async function applyPullPage(
 
   if (page.chats?.length) {
     const localChats = new Map((await getAllChats()).map((chat) => [chat.bookId, chat.updatedAt]));
+    let wrote = false;
     for (const record of page.chats) {
       if (!record.data) continue;
       const remote = record.data as BookAiChat;
       if (!localChats.has(record.key) || remote.updatedAt > (localChats.get(record.key) ?? 0)) {
         await saveChat(remote);
-        changed = true;
+        wrote = true;
       }
     }
-    deps.onApplied?.("chats");
+    if (wrote) {
+      changed = true;
+      deps.onApplied?.("chats");
+    }
   }
 
   if (page.patches?.length) {
     const localPatches = new Map((await getAllBookMetadata()).map((patch) => [patch.bookId, patch.fetchedAt]));
+    let wrote = false;
     for (const record of page.patches) {
       if (!record.data) continue;
       const remote = record.data as BookMetadataPatch;
       if (!localPatches.has(record.key) || remote.fetchedAt > (localPatches.get(record.key) ?? 0)) {
         await saveBookMetadata(remote);
-        changed = true;
+        wrote = true;
       }
     }
-    deps.onApplied?.("patches");
+    if (wrote) {
+      changed = true;
+      deps.onApplied?.("patches");
+    }
   }
 
   return changed;
@@ -619,18 +629,18 @@ export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
   const stillPending: string[] = [];
   for (const bookId of pending) {
     if (signal.aborted) break;
-    const book = await getBook(bookId);
-    if (!book || book.syncReadyAt) continue; // 书已删(墓碑另行同步),或早已传完。
+    const meta = await getBookMeta(bookId);
+    if (!meta || meta.syncReadyAt) continue; // 书已删(墓碑另行同步),或早已传完。
     try {
-      onProgress(`正在上传《${book.title}》…`);
+      onProgress(`正在上传《${meta.title}》…`);
+      const book = await getBook(bookId);
+      if (!book) continue;
       await uploadBookBody(bookId, book, signal);
-      // 上传期间这本书可能又被写过(听书进度每 20 秒落一次盘),重新取一份再打标记。
-      const latest = (await getBook(bookId)) ?? book;
-      const ready: Book = { ...latest, syncReadyAt: Date.now() };
-      await saveBook(ready);
-      const { chapters: _chapters, ...meta } = ready;
+      // 只改这一个字段:上传期间这本书可能又被写过(听书进度每 20 秒落一次盘)。
+      const ready = await updateBookMeta(bookId, { syncReadyAt: Date.now() });
+      if (!ready) continue;
       skipped += await pushAll(
-        { books: [{ key: bookId, data: JSON.stringify(toSyncBookMeta(meta)), updatedAt: bookPushTime(ready) }] },
+        { books: [{ key: bookId, data: JSON.stringify(toSyncBookMeta(ready)), updatedAt: bookPushTime(ready) }] },
         signal
       );
       deps.onApplied?.("books");
@@ -679,9 +689,9 @@ export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
     if (acc.deadBooks.has(bookId)) continue;
     const meta = localMetaById.get(bookId);
     if (!meta || !newerListening(meta.listeningPosition, position)) continue;
-    const book = await getBook(bookId);
-    if (!book || !newerListening(book.listeningPosition, position)) continue;
-    await saveBook({ ...book, listeningPosition: position });
+    const latest = await getBookMeta(bookId);
+    if (!latest || !newerListening(latest.listeningPosition, position)) continue;
+    await updateBookMeta(bookId, { listeningPosition: position });
     changed = true;
     deps.onApplied?.("books");
   }

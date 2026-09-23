@@ -2,8 +2,10 @@ import type {
   BlockKind,
   Book,
   BookFormat,
+  BookMeta,
   BookPosition,
   Chapter,
+  ChapterOutline,
   Paragraph,
   Sentence,
   SpeechBlock,
@@ -184,33 +186,6 @@ export function createChapter(
       (sum, sentence) => sum + sentence.text.length,
       0
     ),
-  };
-}
-
-/** 早期导入的书没记插图尺寸，量出来之后补回正文里，只重建受影响的章节。 */
-export function withImageSizes(
-  book: Book,
-  sizes: Map<string, { width: number; height: number }>
-): Book {
-  const sizeOf = (paragraph: Paragraph) =>
-    paragraph.kind === "image" && !paragraph.imageHeight && paragraph.imageId
-      ? sizes.get(paragraph.imageId)
-      : undefined;
-
-  return {
-    ...book,
-    chapters: book.chapters.map((chapter) => {
-      if (!chapter.paragraphs.some(sizeOf)) return chapter;
-      return {
-        ...chapter,
-        paragraphs: chapter.paragraphs.map((paragraph) => {
-          const size = sizeOf(paragraph);
-          return size
-            ? { ...paragraph, imageWidth: size.width, imageHeight: size.height }
-            : paragraph;
-        }),
-      };
-    }),
   };
 }
 
@@ -412,6 +387,7 @@ export function createBook(input: {
     updatedAt: now,
     lastOpenedAt: now,
     chapters: input.chapters,
+    chapterOutline: outlineOf(input.chapters),
     sentenceCount: input.chapters.reduce(
       (sum, chapter) => sum + chapter.sentenceCount,
       0
@@ -421,6 +397,16 @@ export function createBook(input: {
       0
     ),
   };
+}
+
+/** 从正文算出目录。书目里存的就是它，正文改了（导入、同步下载）必须跟着重算。 */
+export function outlineOf(chapters: Chapter[]): ChapterOutline[] {
+  return chapters.map((chapter) => ({
+    id: chapter.id,
+    title: chapter.title,
+    sentenceCount: chapter.sentenceCount,
+    characterCount: chapter.characterCount,
+  }));
 }
 
 export function flattenChapter(chapter: Chapter): Sentence[] {
@@ -684,23 +670,26 @@ export function formatReadingTime(characterCount: number): string {
 
 /** 从某个位置往后还剩多少字。当前章按句子比例折算，后面的章整章计入。 */
 export function remainingCharacters(
-  book: Book,
+  book: Pick<BookMeta, "characterCount" | "chapterOutline">,
   position?: BookPosition
 ): number {
   if (!position) return book.characterCount;
-  const chapter = book.chapters[position.chapterIndex];
+  const chapter = book.chapterOutline[position.chapterIndex];
   if (!chapter) return book.characterCount;
   const consumed = chapter.sentenceCount
     ? chapter.characterCount * (position.sentenceIndex / chapter.sentenceCount)
     : 0;
-  const later = book.chapters
+  const later = book.chapterOutline
     .slice(position.chapterIndex + 1)
     .reduce((sum, item) => sum + item.characterCount, 0);
   return Math.max(0, Math.round(chapter.characterCount - consumed + later));
 }
 
 /** 首页那句「剩余 2 小时 14 分」。已经读完就直接说读完。 */
-export function formatRemaining(book: Book, position?: BookPosition): string {
+export function formatRemaining(
+  book: Pick<BookMeta, "characterCount" | "chapterOutline">,
+  position?: BookPosition
+): string {
   if (!position) return `${formatReadingTime(book.characterCount)}读完`;
   if (position.percent >= 99) return "已读完";
   return `剩余${formatReadingTime(remainingCharacters(book, position))}`;
@@ -714,7 +703,7 @@ export interface BookPagination {
 }
 
 export function estimatePagination(
-  book: Book,
+  book: Pick<BookMeta, "chapterOutline">,
   layout: { fontSize: number; lineHeight: number; contentWidth: number },
   viewport: { width: number; height: number }
 ): BookPagination {
@@ -733,7 +722,7 @@ export function estimatePagination(
   const chapterStart: number[] = [];
   const chapterPages: number[] = [];
   let cursor = 1;
-  for (const chapter of book.chapters) {
+  for (const chapter of book.chapterOutline) {
     chapterStart.push(cursor);
     const pages = Math.max(
       1,

@@ -65,8 +65,11 @@ OPEN_DB = "const db = await new Promise((res, rej) => { const r = indexedDB.open
 def seed(page):
     page.evaluate(
         "async ([books, notes]) => {" + OPEN_DB + """
-            await new Promise((res, rej) => { const t = db.transaction(['books','notes'], 'readwrite');
-                const bs = t.objectStore('books'); books.forEach(b => bs.put(b));
+            await new Promise((res, rej) => { const t = db.transaction(['books','contents','notes'], 'readwrite');
+                // 书目和正文分两张表写,照 storage.putBook。
+                books.forEach(b => { const { chapters, ...meta } = b;
+                    t.objectStore('books').put({ ...meta, chapterOutline: chapters.map(c => ({ id: c.id, title: c.title, sentenceCount: c.sentenceCount, characterCount: c.characterCount })) });
+                    t.objectStore('contents').put({ bookId: b.id, chapters }); });
                 const ns = t.objectStore('notes'); notes.forEach(n => ns.put(n));
                 t.oncomplete = res; t.onerror = () => rej(t.error); });
             db.close();

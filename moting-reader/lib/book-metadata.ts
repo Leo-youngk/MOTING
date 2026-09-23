@@ -2,7 +2,7 @@ import type {
   BookMetadataCandidate,
   BookMetadataLookup,
 } from "./book-metadata-types";
-import type { Book } from "./types";
+import type { BookMeta } from "./types";
 import { searchWeread, wereadCoverUrl, WereadError } from "./weread.ts";
 import type { WereadBook, WereadSearchResult } from "./weread-types";
 
@@ -66,7 +66,7 @@ function stripExtension(name: string): string {
  * 三个解析器都是 `xxx || fileNameWithoutExtension(file.name)`（parsers.ts），
  * 所以脏标题必然跟文件名同源。
  */
-export function titleLooksLikeFileName(book: Book): boolean {
+export function titleLooksLikeFileName(book: BookMeta): boolean {
   if (!book.fileName) return false;
   const fromFile = normalizeTitleKey(stripExtension(book.fileName));
   return Boolean(fromFile) && fromFile === normalizeTitleKey(book.title);
@@ -135,20 +135,20 @@ export function formatAuthors(authors: string[]): string {
  * 注意不能拿 titleLooksLikeFileName 当这个判据：拿书名给文件命名是最普通不过的做法，
  * 「三国演义.epub」的标题跟文件名一致完全正常，按它去查等于每本书都查一遍。
  */
-export function titleLooksDirty(book: Book): boolean {
+export function titleLooksDirty(book: BookMeta): boolean {
   const title = book.title.trim();
   return Boolean(title) && cleanTitleText(title) !== title;
 }
 
 /** 这本书值不值得花一次请求。干净的书不查，省配额也省得配错。 */
-export function needsMetadataLookup(book: Book): boolean {
+export function needsMetadataLookup(book: BookMeta): boolean {
   if (book.format === "demo" || book.status !== "ready") return false;
   return (
     isPlaceholderAuthor(book.author) || titleLooksDirty(book) || !book.coverDataUrl
   );
 }
 
-export function lookupQuery(book: Book): { title: string; author: string } {
+export function lookupQuery(book: BookMeta): { title: string; author: string } {
   return {
     title: cleanTitleText(book.title) || book.title.trim(),
     author: isPlaceholderAuthor(book.author) ? "" : book.author.trim(),
@@ -171,7 +171,7 @@ export interface MetadataDecision {
  * EPUB 里本来就正确的书名、作者、封面，一律不碰。
  */
 export function decideAutoApply(
-  book: Book,
+  book: BookMeta,
   candidates: BookMetadataCandidate[]
 ): MetadataDecision | null {
   const key = normalizeTitleKey(book.title);
@@ -207,7 +207,7 @@ export class BookMetadataError extends Error {}
  * （围城、人类简史返回 0 封面），换源之后 8/8 命中且全部有封面，就没有再保留它的理由。
  */
 export async function lookupBookMetadata(
-  book: Book,
+  book: BookMeta,
   signal?: AbortSignal
 ): Promise<BookMetadataLookup> {
   const { title } = lookupQuery(book);

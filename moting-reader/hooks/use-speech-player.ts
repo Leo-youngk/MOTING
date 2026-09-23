@@ -30,7 +30,11 @@ import type {
 export type SleepMode = "off" | "15" | "30" | "45" | "chapter";
 
 interface SpeechPlayerOptions {
-  books: Book[];
+  /**
+   * 按 id 取一本已经读进内存的整本书（书目 + 正文）。书库里只有书目，正文按需读；
+   * 调用方保证开播之前已经把那本书的正文读进来了。
+   */
+  getBook: (bookId: string) => Book | undefined;
   settings: ReaderSettings;
   onProgress: (bookId: string, position: BookPosition) => void;
 }
@@ -179,7 +183,7 @@ interface PlayOptions {
 }
 
 export function useSpeechPlayer({
-  books,
+  getBook,
   settings,
   onProgress,
 }: SpeechPlayerOptions): SpeechPlayerState {
@@ -196,7 +200,7 @@ export function useSpeechPlayer({
   const [voiceError, setVoiceError] = useState("");
   const [recentVoiceURIs, setRecentVoiceURIs] = useState<string[]>([]);
 
-  const booksRef = useRef(books);
+  const getBookRef = useRef(getBook);
   const settingsRef = useRef(settings);
   const onProgressRef = useRef(onProgress);
   const locationRef = useRef<SpeechLocation | null>(null);
@@ -253,8 +257,8 @@ export function useSpeechPlayer({
   const [store] = useState(() => new SpeechClipStore());
 
   useEffect(() => {
-    booksRef.current = books;
-  }, [books]);
+    getBookRef.current = getBook;
+  }, [getBook]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -444,7 +448,7 @@ export function useSpeechPlayer({
       sentenceIndex: number,
       options: PlayOptions = {}
     ) => {
-      const book = booksRef.current.find((item) => item.id === bookId);
+      const book = getBookRef.current(bookId);
       if (!book) {
         setError("这本书已经不在书架中");
         stop();
@@ -816,7 +820,7 @@ export function useSpeechPlayer({
         return;
       }
 
-      const book = booksRef.current.find((item) => item.id === at.bookId);
+      const book = getBookRef.current(at.bookId);
       const chapter = book?.chapters[at.chapterIndex];
       let segment = chapter
         ? segmentFromChapter(chapter, at.sentenceIndex, "edge", true)
@@ -939,7 +943,7 @@ export function useSpeechPlayer({
     (voiceURIs: string[]) => {
       const at = locationRef.current;
       if (!at) return;
-      const book = booksRef.current.find((item) => item.id === at.bookId);
+      const book = getBookRef.current(at.bookId);
       const chapter = book?.chapters[at.chapterIndex];
       if (!chapter) return;
       const segment = segmentFromChapter(chapter, at.sentenceIndex, "edge", true);
@@ -984,9 +988,7 @@ export function useSpeechPlayer({
       if (edgeDownRef.current) return;
       const voiceURI = settingsRef.current.voiceURI;
       if (voiceURI && !isEdgeVoiceURI(voiceURI)) return;
-      // 这里收整本书而不是 bookId：调用方是子组件，它的 effect 跑在父组件的
-      // `booksRef.current = books` 之前，那时按 id 去 booksRef 里找是找不到的
-      // （首次挂载时拿到的还是空数组，于是这个预取一次都没成功过）。
+      // 这里收整本书而不是 bookId：调用方（播放页）手里本来就是这本书的整本，不用再查一次。
       const chapter = book.chapters[position.chapterIndex];
       if (!chapter) return;
       // 必须和 playAt 起播时算出来的那一段完全一致，否则是另一个缓存键，白备。
@@ -1006,7 +1008,7 @@ export function useSpeechPlayer({
 
   const start = useCallback(
     (bookId: string, position?: BookPosition) => {
-      const book = booksRef.current.find((item) => item.id === bookId);
+      const book = getBookRef.current(bookId);
       if (!book) return;
       // 用户主动开播时再给云端一次机会，之前的失败可能只是临时断网。
       edgeDownRef.current = false;
@@ -1106,7 +1108,7 @@ export function useSpeechPlayer({
     (delta: number) => {
       const current = locationRef.current;
       if (!current) return;
-      const book = booksRef.current.find((item) => item.id === current.bookId);
+      const book = getBookRef.current(current.bookId);
       if (!book) return;
       const next = locationAfter(
         book,
@@ -1155,7 +1157,7 @@ export function useSpeechPlayer({
     (delta: number) => {
       const current = locationRef.current;
       if (!current) return;
-      const book = booksRef.current.find((item) => item.id === current.bookId);
+      const book = getBookRef.current(current.bookId);
       if (!book) return;
       const chapterIndex = Math.max(
         0,
@@ -1267,7 +1269,7 @@ export function useSpeechPlayer({
       return;
     }
     const session = navigator.mediaSession;
-    const book = booksRef.current.find((item) => item.id === sessionBookId);
+    const book = getBookRef.current(sessionBookId);
     if (!book) {
       session.metadata = null;
       return;

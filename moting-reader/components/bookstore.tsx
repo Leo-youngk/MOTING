@@ -10,7 +10,8 @@ import {
   wereadCoverDisplayUrl,
   wereadCoverUrl,
 } from "../lib/weread";
-import { loadCatalog, rankOf, type StoreCatalog } from "../lib/store-catalog";
+import { loadCatalog, peekCatalog, rankOf, type StoreCatalog } from "../lib/store-catalog";
+import { readFeed } from "../lib/store-snapshot";
 import {
   formatRatingCount,
   formatReadingCount,
@@ -23,7 +24,7 @@ import {
   type WereadBookDetail,
   type WereadLane,
 } from "../lib/weread-types";
-import type { Book } from "../lib/types";
+import type { BookMeta } from "../lib/types";
 import "./bookstore.css";
 
 /** 横滑轨道里先露几本，其余收进「全部」里，免得一条流拖出几十张图。 */
@@ -61,6 +62,14 @@ export function Cover({
           loading={large || priority ? "eager" : "lazy"}
           fetchPriority={large || priority ? "high" : "auto"}
           decoding="async"
+          draggable={false}
+          // 封面到了淡入，不是一张张「蹦」出来；已经在缓存里的直接显示，不必再淡一次。
+          ref={(image) => {
+            if (image?.complete && image.naturalWidth) image.dataset.loaded = "";
+          }}
+          onLoad={(event) => {
+            event.currentTarget.dataset.loaded = "";
+          }}
           onError={(event) => {
             // 直连失败(图床改了策略)先退回 Worker 转发;转发也失败才藏起来露出占位图标。
             const image = event.currentTarget;
@@ -140,8 +149,35 @@ export function StoreCard({
       {dense ? null : (
         <span className="store-card__author">{book.author || "作者未提供"}</span>
       )}
-      <Rating book={book} compact />
+      <span className="store-card__rating">
+        <Rating book={book} compact />
+      </span>
     </button>
+  );
+}
+
+/**
+ * 卡片的占位：跟 StoreCard 同一套结构和尺寸（书名固定两行、作者一行、推荐值一行），
+ * 数据到了原地换上，不会把下面的内容往下推。
+ */
+export function StoreCardSkeleton({ dense = false }: { dense?: boolean }) {
+  return (
+    <span className={`store-card store-card--skeleton${dense ? " store-card--dense" : ""}`} aria-hidden="true">
+      <span className="store-card__art">
+        <span className="store-cover store-skeleton" />
+      </span>
+      <span className="store-card__title">
+        <i className="store-skeleton" />
+      </span>
+      {dense ? null : (
+        <span className="store-card__author">
+          <i className="store-skeleton" />
+        </span>
+      )}
+      <span className="store-card__rating">
+        <i className="store-skeleton" />
+      </span>
+    </span>
   );
 }
 
@@ -172,6 +208,26 @@ export function StoreRow({
   );
 }
 
+/** 榜单行的占位，跟 StoreRow 同尺寸。 */
+export function StoreRowSkeleton() {
+  return (
+    <span className="store-row store-row--skeleton" aria-hidden="true">
+      <span className="store-cover store-skeleton" />
+      <span className="store-row__info">
+        <strong>
+          <i className="store-skeleton" />
+        </strong>
+        <small>
+          <i className="store-skeleton" />
+        </small>
+        <span className="store-rating">
+          <i className="store-skeleton" />
+        </span>
+      </span>
+    </span>
+  );
+}
+
 export function LaneSkeleton() {
   return (
     <div className="store-lane" role="status" aria-label="正在加载书城">
@@ -180,7 +236,7 @@ export function LaneSkeleton() {
       </div>
       <div className="store-lane__track">
         {Array.from({ length: 4 }, (_, index) => (
-          <div className="store-skeleton store-skeleton--card" key={index} />
+          <StoreCardSkeleton key={index} />
         ))}
       </div>
     </div>
@@ -191,7 +247,7 @@ export function RankSkeleton() {
   return (
     <div className="store-grid" role="status" aria-label="正在加载榜单">
       {Array.from({ length: 6 }, (_, index) => (
-        <div className="store-skeleton store-skeleton--tile" key={index} />
+        <StoreCardSkeleton dense key={index} />
       ))}
     </div>
   );
@@ -204,14 +260,20 @@ export function Bookstore({
   initialBookId = "",
 }: {
   /** 本地书库。最近读的那本会被当成「相似推荐」的种子。 */
-  books: Book[];
+  books: BookMeta[];
   onBack: () => void;
   onFindBook: (title: string, author: string) => void;
   /** 从主页的书城条点进来时带的书，直接落在这本书的详情上。 */
   initialBookId?: string;
 }) {
-  const [lanes, setLanes] = useState<WereadLane[]>([]);
-  const [loading, setLoading] = useState(true);
+  // 「为你推荐」跟主页用的是同一份：主页已经取到过的话，进书城直接画，不再出骨架。
+  const [initialFeed] = useState(() => readFeed());
+  const [lanes, setLanes] = useState<WereadLane[]>(() =>
+    initialFeed
+      ? [{ kind: "recommend", title: "为你推荐", subtitle: "微信读书按你的阅读记录挑的", books: initialFeed.books }]
+      : []
+  );
+  const [loading, setLoading] = useState(!initialFeed);
   const [error, setError] = useState("");
   /**
    * 推荐流单独的错误。
@@ -232,8 +294,8 @@ export function Bookstore({
    * 一个分类的书目就是一个文件，榜和「全部」都从它来：
    * 榜 = 评分人数够多的按推荐值排，「全部」= 原样按微信读书的顺序往下放。
    */
-  const [catalog, setCatalog] = useState<StoreCatalog | null>(null);
-  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalog, setCatalog] = useState<StoreCatalog | null>(() => peekCatalog(category));
+  const [catalogLoading, setCatalogLoading] = useState(() => !peekCatalog(category));
   const [catalogError, setCatalogError] = useState("");
   const [rankAll, setRankAll] = useState(false);
   const [browseShown, setBrowseShown] = useState(BROWSE_STEP);
@@ -260,30 +322,33 @@ export function Bookstore({
     // 刻意不在开头 setLoading(true)：换种子时保留旧内容直到新数据到位，
     // 既避开在 effect 同步阶段 setState，也不会让整页闪一下骨架屏再跳回来。
     const loadLanes = async () => {
-      try {
-        const recommend = await fetchWereadRecommend(0, 20, signal);
-        if (signal.aborted) return;
-        // 推荐一到就渲染。相似推荐要先搜种子书再查相似，是串着的两跳，
-        // 从前把三个请求攒齐才 setLanes，进书城得盯着骨架屏等三四秒。
-        setLanes(
-          recommend.books.length
-            ? [
-                {
-                  kind: "recommend",
-                  title: "为你推荐",
-                  subtitle: "微信读书按你的阅读记录挑的",
-                  books: recommend.books,
-                },
-              ]
-            : []
-        );
-        setError("");
-        setLoading(false);
-      } catch (reason) {
-        if (signal.aborted) return;
-        setLaneError(reason instanceof Error ? reason.message : "推荐暂时取不到");
-        setLoading(false);
-        return;
+      // 主页已经取到过「为你推荐」就直接用那一份（初始状态里已经画上了），只补相似推荐。
+      if (!initialFeed) {
+        try {
+          const recommend = await fetchWereadRecommend(0, 20, signal);
+          if (signal.aborted) return;
+          // 推荐一到就渲染。相似推荐要先搜种子书再查相似，是串着的两跳，
+          // 从前把三个请求攒齐才 setLanes，进书城得盯着骨架屏等三四秒。
+          setLanes(
+            recommend.books.length
+              ? [
+                  {
+                    kind: "recommend",
+                    title: "为你推荐",
+                    subtitle: "微信读书按你的阅读记录挑的",
+                    books: recommend.books,
+                  },
+                ]
+              : []
+          );
+          setError("");
+          setLoading(false);
+        } catch (reason) {
+          if (signal.aborted) return;
+          setLaneError(reason instanceof Error ? reason.message : "推荐暂时取不到");
+          setLoading(false);
+          return;
+        }
       }
 
       // 相似推荐要先拿种子书在微信读书里的 bookId，本地书库里没有这个 id。
@@ -311,7 +376,7 @@ export function Bookstore({
 
     void loadLanes();
     return () => controller.abort();
-  }, [seedTitle]);
+  }, [seedTitle, initialFeed]);
 
   useEffect(() => {
     const controller = new AbortController();

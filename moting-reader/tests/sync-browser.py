@@ -74,13 +74,17 @@ DOOMED_NOTES = [note(f"d-{RUN}-{i}", NOW - 50_000 + i, DOOMED_ID) for i in range
 POSITION = {"position": {"chapterId": "c1", "sentenceId": "s1"}, "lastOpenedAt": NOW - 40_000, "savedAt": NOW - 40_000}
 
 OPEN_DB = "const db = await new Promise((res, rej) => { const r = indexedDB.open('moting-reader'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });"
+# 本地库里书目和正文分两张表(books / contents),照 storage.putBook 的写法拆开写。
+PUT_BOOK = """const putBook = (t, b) => { const { chapters, ...meta } = b;
+    t.objectStore('books').put({ ...meta, chapterOutline: chapters.map(c => ({ id: c.id, title: c.title, sentenceCount: c.sentenceCount, characterCount: c.characterCount })) });
+    t.objectStore('contents').put({ bookId: b.id, chapters }); };"""
 
 
 def seed(page):
     page.evaluate(
-        "async ([books, notes, position, bookId]) => {" + OPEN_DB + """
-            await new Promise((res, rej) => { const t = db.transaction(['books','notes','settings'], 'readwrite');
-                const bs = t.objectStore('books'); books.forEach(b => bs.put(b));
+        "async ([books, notes, position, bookId]) => {" + OPEN_DB + PUT_BOOK + """
+            await new Promise((res, rej) => { const t = db.transaction(['books','contents','notes','settings'], 'readwrite');
+                books.forEach(b => putBook(t, b));
                 const ns = t.objectStore('notes'); notes.forEach(n => ns.put(n));
                 t.objectStore('settings').put(position, 'reading-position:' + bookId);
                 t.oncomplete = res; t.onerror = () => rej(t.error); });
@@ -130,9 +134,9 @@ def make_legacy(page, listening):
 
 def add_book(page, book):
     page.evaluate(
-        "async (book) => {" + OPEN_DB + """
-            await new Promise((res, rej) => { const t = db.transaction('books', 'readwrite');
-                t.objectStore('books').put(book); t.oncomplete = res; t.onerror = () => rej(t.error); });
+        "async (book) => {" + OPEN_DB + PUT_BOOK + """
+            await new Promise((res, rej) => { const t = db.transaction(['books','contents'], 'readwrite');
+                putBook(t, book); t.oncomplete = res; t.onerror = () => rej(t.error); });
             db.close();
         }""",
         book,
@@ -143,8 +147,9 @@ def remove_book(page, book_id):
     """照 storage.removeBook 的做法删书:书、它的划线和位置都删掉,只给书落墓碑。"""
     page.evaluate(
         "async (bookId) => {" + OPEN_DB + """
-            await new Promise((res, rej) => { const t = db.transaction(['books','notes','settings'], 'readwrite');
+            await new Promise((res, rej) => { const t = db.transaction(['books','contents','notes','settings'], 'readwrite');
                 t.objectStore('books').delete(bookId);
+                t.objectStore('contents').delete(bookId);
                 const cursor = t.objectStore('notes').index('bookId').openCursor(IDBKeyRange.only(bookId));
                 cursor.onsuccess = () => { const c = cursor.result; if (c) { c.delete(); c.continue(); } };
                 const ss = t.objectStore('settings');
@@ -165,20 +170,22 @@ def idb_state(page):
             const read = (store) => new Promise((res) => { const rq = db.transaction(store).objectStore(store).getAll(); rq.onsuccess = () => res(rq.result); });
             const get = (store, key) => new Promise((res) => { const rq = db.transaction(store).objectStore(store).get(key); rq.onsuccess = () => res(rq.result); });
             const books = await read('books');
+            const contents = await read('contents');
             const allNotes = await read('notes');
             const book = books.find(b => b.id === bookId);
             const resume = books.find(b => b.id === resumeId);
+            const chaptersOf = (id) => contents.find(c => c.bookId === id)?.chapters?.length ?? 0;
             const notes = allNotes.filter(n => n.bookId === bookId).map(n => n.id);
             const position = await get('settings', 'reading-position:' + bookId);
             const reader = await get('settings', 'reader');
             const stats = await get('settings', 'stats');
             const sync = await get('settings', 'sync:state');
             db.close();
-            return { hasBook: !!book, chapters: book?.chapters?.length ?? 0, cover: book?.coverDataUrl ?? null,
+            return { hasBook: !!book, chapters: book ? chaptersOf(bookId) : 0, cover: book?.coverDataUrl ?? null,
                      notes, position: position ?? null, pushedAt: sync?.pushedAt ?? 0, pullCursor: sync?.pullCursor ?? 0,
                      schema: sync?.schema ?? 0, aiModel: reader?.aiModel ?? null, statsDays: stats?.days ?? {},
                      listening: book?.listeningPosition ?? null,
-                     resumeChapters: resume?.chapters?.length ?? 0, resumeCover: resume?.coverDataUrl ?? null,
+                     resumeChapters: resume ? chaptersOf(resumeId) : 0, resumeCover: resume?.coverDataUrl ?? null,
                      doomedBook: books.some(b => b.id === doomedId),
                      doomedNotes: allNotes.filter(n => n.bookId === doomedId).length,
                      demoBooks: books.filter(b => b.format === 'demo').length };

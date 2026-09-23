@@ -18,6 +18,8 @@ export interface StoreCatalog {
 const RANKABLE_MIN_COUNT = 500;
 
 const loaded = new Map<string, Promise<StoreCatalog>>();
+/** 已经取到手的书目。进书城时有现成的就直接画，不必先出一帧骨架再等 Promise 回来。 */
+const settled = new Map<string, StoreCatalog>();
 
 export class CatalogError extends Error {}
 
@@ -37,12 +39,14 @@ export function loadCatalog(category: string): Promise<StoreCatalog> {
       if (!response.ok) throw new CatalogError(`书目文件读不到（${response.status}）`);
       const data = (await response.json()) as StoreCatalog;
       if (!Array.isArray(data?.books)) throw new CatalogError("书目文件格式不对");
-      return {
+      const catalog: StoreCatalog = {
         category: data.category ?? category,
         generatedAt: data.generatedAt ?? "",
         // 简介没存进文件——列表用不上，详情页会去查 /book/info。
         books: data.books.map((book) => ({ ...book, intro: book.intro ?? null })),
       };
+      settled.set(slug, catalog);
+      return catalog;
     })
     .catch((error: unknown) => {
       // 失败不留在缓存里，下次进来还能再试一次。
@@ -54,6 +58,12 @@ export function loadCatalog(category: string): Promise<StoreCatalog> {
 
   loaded.set(slug, task);
   return task;
+}
+
+/** 这一次打开 App 里已经取到的书目；没取过就是 null。 */
+export function peekCatalog(category: string): StoreCatalog | null {
+  const slug = CATEGORY_SLUGS[category];
+  return (slug && settled.get(slug)) || null;
 }
 
 /**
