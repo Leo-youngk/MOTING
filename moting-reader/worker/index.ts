@@ -1,5 +1,6 @@
 /** Cloudflare Worker entry point. */
 import handler from "vinext/server/app-router-entry";
+import { AI_REQUEST_LIMITS } from "../lib/ai";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
 import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
 import { synthesizeSpeech } from "./edge-tts";
@@ -128,18 +129,18 @@ function stringField(value: unknown, maxLength: number): string | null {
 }
 
 function normalizeMessages(value: unknown): AiMessage[] | null {
-  if (!Array.isArray(value) || value.length > 50) return null;
+  if (!Array.isArray(value) || value.length > AI_REQUEST_LIMITS.messages) return null;
   let totalLength = 0;
   const messages: AiMessage[] = [];
   for (const item of value) {
     if (!isRecord(item)) return null;
     const role = item.role;
-    const content = stringField(item.content, 20000);
+    const content = stringField(item.content, AI_REQUEST_LIMITS.messageChars);
     if ((role !== "system" && role !== "user" && role !== "assistant") || content === null) {
       return null;
     }
     totalLength += content.length;
-    if (totalLength > 256000) return null;
+    if (totalLength > AI_REQUEST_LIMITS.totalChars) return null;
     messages.push({ role, content });
   }
   return messages;

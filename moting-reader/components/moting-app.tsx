@@ -3,6 +3,7 @@
 import "./book-metadata.css";
 
 import {
+  ArrowDown,
   ArrowLeft,
   ArrowUp,
   BookOpen,
@@ -68,7 +69,7 @@ import { useAppNavigation } from "../hooks/use-app-navigation";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
-import { AiRequestError, fetchAiModels, streamAiChat } from "../lib/ai";
+import { AiRequestError, fetchAiModels, modelHistory, streamAiChat } from "../lib/ai";
 import {
   BookMetadataError,
   cleanTitleText,
@@ -275,14 +276,14 @@ function metaOf(book: Book): BookMeta {
   return meta;
 }
 
-function AiMarkdown({ content }: { content: string }) {
+function AiMarkdown({ content, streaming }: { content: string; streaming?: boolean }) {
   if (aiMarkdownModule) {
     const Ready = aiMarkdownModule.AiMarkdown;
-    return <Ready content={content} />;
+    return <Ready content={content} streaming={streaming} />;
   }
   return (
     <Suspense fallback={<span className="ai-markdown-loading">正在排版…</span>}>
-      <LazyAiMarkdown content={content} />
+      <LazyAiMarkdown content={content} streaming={streaming} />
     </Suspense>
   );
 }
@@ -3173,11 +3174,11 @@ function ReaderPopover({
 
 /** 章节全文太长会把请求撑爆、也烧钱，只带前面这么多字，够回答「这章讲了什么」就行。 */
 const AI_CHAPTER_TEXT_LIMIT = 6000;
+/** 目录也有上限：几百章的网文目录能有上万字，连同章节正文会顶破单条消息的上限（整个请求被拒）。 */
+const AI_TOC_LIMIT = 6000;
 
-/** 认定滚动方向所需的最小位移，低于这个数的抖动和回弹不算。 */
-const BAR_SCROLL_THRESHOLD = 12;
-/** 顶部这一段内不收顶栏，免得刚往下拨一点顶栏就跑了。 */
-const BAR_HIDE_AFTER = 48;
+/** 刚发出的问题滚到顶栏下面时离顶栏的距离。改它要同步 CSS 里 .ai-chat__latest 的最小高度。 */
+const LATEST_GAP = 16;
 
 /** 起手提问：拿真实的书名和章节标题拼，只是把常问的几件事摆出来，不编造内容。 */
 function starterPrompts(
@@ -3214,9 +3215,13 @@ async function askAi({
   brief?: boolean;
   onDelta: (delta: { content?: string; reasoning?: string }) => void;
 }) {
-  const toc = tocIndexes(book.chapterOutline)
+  const fullToc = tocIndexes(book.chapterOutline)
     .map((index, number) => `${number + 1}. ${chapterLabel(book.chapterOutline, index)}`)
     .join("\n");
+  const toc =
+    fullToc.length > AI_TOC_LIMIT
+      ? `${fullToc.slice(0, AI_TOC_LIMIT)}\n……（目录太长，后面的省略了）`
+      : fullToc;
   const chapterTitle = chapter ? chapterLabelFor(book.chapterOutline, chapter.id) : "正文";
   const chapterText = chapter
     ? flattenChapter(chapter)
@@ -3239,16 +3244,16 @@ async function askAi({
           role: "system",
           content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。\n如有需要可使用 Markdown 格式（标题、加粗、列表、代码块等）让回答更清晰，但不必为简短回答刻意加格式。${brief ? "\n这次回答显示在正文旁边的批注里，控制在 200 字以内，直接说结论，不要用标题。" : ""}`,
         },
-        ...history.map((turn) => ({
-          role: turn.role,
-          content: turn.quote
-            ? `引用原文：\n${turn.quote}\n\n${turn.content}`
-            : turn.content,
-        })),
+        ...modelHistory(history),
       ],
     },
     onDelta
   );
+}
+
+/** 对话记录只留答上来的回答（出错、被打断、模型什么都没给的空回答不留），提问都留。 */
+function isAnsweredTurn(turn: AiChatTurn): boolean {
+  return turn.role === "user" || turn.content.trim().length > 0;
 }
 
 /** 划词后「问 AI」，多轮聊天面板；模型设置默认收起，把注意力留给原文和对话。 */
@@ -3274,18 +3279,22 @@ function AiAskPanel({
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [showReasoning, setShowReasoning] = useState(true);
+  // 思考过程每轮各自展开，默认收起：展开的长思考会把下面的回答整段推走。
+  const [openReasoning, setOpenReasoning] = useState<ReadonlySet<number>>(() => new Set());
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  // 这次打开后发出的最新一问（turns 下标）。它连同回答至少占一屏，问题才能停在顶栏下面。
+  const [pinned, setPinned] = useState<number | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
-  const lastScrollTopRef = useRef(0);
-  const barHiddenRef = useRef(false);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const threadRef = useRef<HTMLDivElement | null>(null);
+  const latestRef = useRef<HTMLDivElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+  const atBottomRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const streamTextRef = useRef({ content: "", reasoning: "" });
   const streamFrameRef = useRef<number | null>(null);
-  const scrollFrameRef = useRef<number | null>(null);
 
   useScrollLock();
   useEffect(() => () => controllerRef.current?.abort(), []);
@@ -3295,12 +3304,70 @@ function AiAskPanel({
       if (streamFrameRef.current !== null) {
         window.cancelAnimationFrame(streamFrameRef.current);
       }
-      if (scrollFrameRef.current !== null) {
-        window.cancelAnimationFrame(scrollFrameRef.current);
-      }
     },
     []
   );
+
+  /**
+   * 回答的末尾还在屏幕下面，就亮出「回到最新」。走 DOM 属性不走 state：
+   * 滚动中重渲染一整屏 Markdown 就是卡顿本身。
+   */
+  const syncBelow = useCallback(() => {
+    const scroller = scrollRef.current;
+    const end = endRef.current;
+    if (!scroller || !end) return;
+    const below = end.getBoundingClientRect().top - scroller.getBoundingClientRect().bottom > 8;
+    chatRef.current?.toggleAttribute("data-below", below);
+  }, []);
+
+  // 打开时停在对话末尾。赶在第一帧之前滚好，不先闪一下开头。
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  }, []);
+
+  // 消息区变矮（键盘弹起、输入框长高）时，原来停在底部的继续停在底部。
+  // 内容长高则不跟着滚：回答在问题下面往下长，读到哪由人自己决定。
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    const thread = threadRef.current;
+    if (!scroller || !thread) return;
+    let height = scroller.clientHeight;
+    const observer = new ResizeObserver(() => {
+      scroller.style.setProperty("--chat-viewport", `${scroller.clientHeight}px`);
+      if (scroller.clientHeight !== height) {
+        height = scroller.clientHeight;
+        if (atBottomRef.current) scroller.scrollTop = scroller.scrollHeight;
+      }
+      syncBelow();
+    });
+    observer.observe(scroller);
+    observer.observe(thread);
+    return () => observer.disconnect();
+  }, [syncBelow]);
+
+  // 刚发出的问题滚到顶栏下面，回答从它下面长出来（Claude、ChatGPT 的做法）。
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    const latest = latestRef.current;
+    if (pinned === null || !scroller || !latest) return;
+    const top =
+      latest.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top +
+      scroller.scrollTop -
+      parseFloat(getComputedStyle(scroller).paddingTop) -
+      LATEST_GAP;
+    scroller.scrollTo({ top, behavior: "smooth" });
+  }, [pinned]);
+
+  const jumpToEnd = () => {
+    const scroller = scrollRef.current;
+    const end = endRef.current;
+    if (!scroller || !end) return;
+    const endTop =
+      end.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+    scroller.scrollTo({ top: Math.max(0, endTop - scroller.clientHeight + 24), behavior: "smooth" });
+  };
 
   const copyAnswer = async (index: number, content: string) => {
     try {
@@ -3312,17 +3379,13 @@ function AiAskPanel({
       setError("复制失败，请手动选择文字");
     }
   };
-  useEffect(() => {
-    // 只滚消息区自己。scrollIntoView 会把所有可滚祖先一起滚，连带把整页拖走。
-    if (scrollFrameRef.current !== null) {
-      window.cancelAnimationFrame(scrollFrameRef.current);
-    }
-    scrollFrameRef.current = window.requestAnimationFrame(() => {
-      scrollFrameRef.current = null;
-      const scroller = scrollRef.current;
-      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+
+  const toggleReasoning = (index: number) =>
+    setOpenReasoning((current) => {
+      const next = new Set(current);
+      if (!next.delete(index)) next.add(index);
+      return next;
     });
-  }, [turns]);
 
   const scheduleStreamRender = useCallback(() => {
     if (streamFrameRef.current !== null) return;
@@ -3345,7 +3408,7 @@ function AiAskPanel({
   const canSend = configured && !busy && (question.trim().length > 0 || isFreshQuote);
 
   /** preset 是点起手提问进来的，不走输入框，所以不能拿 canSend 拦。 */
-  const ask = async (preset?: string) => {
+  const ask = (preset?: string) => {
     if (busy || !configured) return;
     const userText =
       (preset ?? question).trim() || (isFreshQuote ? "帮我讲讲这段话" : "");
@@ -3355,10 +3418,22 @@ function AiAskPanel({
       content: userText,
       ...(isFreshQuote ? { quote: text } : {}),
     };
-    const history: AiChatTurn[] = [...turns, userTurn];
-    setTurns([...history, { role: "assistant", content: "", reasoning: "" }]);
+    // 之前没答上来的空回答不留：界面上本来就不显示，发给模型的历史里也不该有。
+    const history: AiChatTurn[] = [...turns.filter(isAnsweredTurn), userTurn];
+    setPinned(history.length - 1);
     setQuestion("");
     if (inputRef.current) inputRef.current.style.height = "auto";
+    void run(history);
+  };
+
+  /** 上一问没答上来：拿同一段历史再问一次，问题留在原处。 */
+  const retry = () => {
+    if (busy) return;
+    void run(turns.slice(0, -1));
+  };
+
+  const run = async (history: AiChatTurn[]) => {
+    setTurns([...history, { role: "assistant", content: "", reasoning: "" }]);
     setBusy(true);
     setError("");
     const controller = new AbortController();
@@ -3389,10 +3464,82 @@ function AiAskPanel({
         streamFrameRef.current = null;
       }
       streamTextRef.current = { content, reasoning };
-      setTurns([...history, { role: "assistant", content, reasoning }]);
+      const next: AiChatTurn[] = [...history, { role: "assistant", content, reasoning }];
+      setTurns(next);
       setBusy(false);
-      onTurnsChange([...history, { role: "assistant", content, reasoning }]);
+      // 没答上来的这一轮只留在眼前（带着「重试」），不写进这本书的对话记录。
+      onTurnsChange(next.filter(isAnsweredTurn));
     }
+  };
+
+  const lastIndex = turns.length - 1;
+  const renderTurn = (turn: AiChatTurn, index: number) => {
+    if (turn.role === "user") {
+      return (
+        <div className="ai-ask__turn-user" key={index}>
+          {turn.quote ? <blockquote className="ai-ask__quote-sent">{turn.quote}</blockquote> : null}
+          <p className="ai-ask__question">{turn.content}</p>
+        </div>
+      );
+    }
+    const streaming = busy && index === lastIndex;
+    const reasoningOpen = openReasoning.has(index);
+    return (
+      <div className="ai-ask__turn-assistant" key={index}>
+        {turn.reasoning ? (
+          <div className={`ai-ask__reasoning${reasoningOpen ? " is-open" : ""}`}>
+            <button
+              type="button"
+              className="ai-ask__reasoning-toggle"
+              aria-expanded={reasoningOpen}
+              onClick={() => toggleReasoning(index)}
+            >
+              {streaming && !turn.content ? "正在思考…" : "思考过程"}
+              <ChevronDown size={14} />
+            </button>
+            {reasoningOpen ? <p className="ai-ask__reasoning-text">{turn.reasoning}</p> : null}
+          </div>
+        ) : null}
+        {turn.content ? (
+          <div className="ai-ask__answer">
+            <AiMarkdown content={turn.content} streaming={streaming} />
+          </div>
+        ) : streaming && !turn.reasoning ? (
+          <div className="ai-ask__answer">
+            <span className="ai-chat__thinking" aria-label="正在思考">
+              <i />
+              <i />
+              <i />
+            </span>
+          </div>
+        ) : null}
+        {/* 操作行在出字时就占好位置、只是先不显示，答完亮出来时下面的东西不会被推一下。 */}
+        {turn.content ? (
+          <div className="ai-ask__actions" data-hidden={streaming || undefined}>
+            <button
+              type="button"
+              className="ai-ask__copy"
+              onClick={() => void copyAnswer(index, turn.content)}
+              aria-label={copiedIndex === index ? "已复制" : "复制回答"}
+            >
+              {copiedIndex === index ? <Check size={14} /> : <Copy size={14} />}
+              {copiedIndex === index ? "已复制" : "复制"}
+            </button>
+          </div>
+        ) : null}
+        {index === lastIndex && error && !busy ? (
+          <div className="ai-ask__failed">
+            <p className="ai-ask__error">{error}</p>
+            {turn.content ? null : (
+              <button type="button" className="ai-ask__retry" onClick={retry}>
+                <RefreshCw size={14} />
+                重试
+              </button>
+            )}
+          </div>
+        ) : null}
+      </div>
+    );
   };
 
   return (
@@ -3403,52 +3550,40 @@ function AiAskPanel({
       aria-modal="true"
       aria-label="问 AI"
     >
-      {/* 没有标题栏：内容一路铺到屏幕最顶，只留一枚浮在角上的关闭当退路，
-          往下滚时连它也收掉。 */}
-      <button
-        type="button"
-        className="ai-chat__close"
-        aria-label="关闭"
-        onClick={onClose}
-      >
-        <X size={20} />
-      </button>
+      {/* 顶栏一直都在：书名居中、关闭在右。它浮在消息上面，消息从它底下滚过去。 */}
+      <header className="ai-chat__bar">
+        <div className="ai-chat__title">
+          <strong>{displayTitle(book.title)}</strong>
+          <span>AI 对话</span>
+        </div>
+        <button
+          type="button"
+          className="ai-chat__close"
+          aria-label="关闭"
+          onClick={onClose}
+        >
+          <X size={20} />
+        </button>
+      </header>
 
       <div
         className="ai-chat__scroll"
         ref={scrollRef}
         onScroll={(event) => {
-          const top = event.currentTarget.scrollTop;
-          const last = lastScrollTopRef.current;
-          // 抖动和回弹都会触发 scroll，走够一段才认方向。
-          if (Math.abs(top - last) < BAR_SCROLL_THRESHOLD) return;
-          lastScrollTopRef.current = top;
-          const hidden = top > last && top > BAR_HIDE_AFTER;
-          if (hidden === barHiddenRef.current) return;
-          barHiddenRef.current = hidden;
-          // 走 DOM 属性而不是 state：滚动中重渲染整个面板（一堆 Markdown）就是卡顿本身。
-          chatRef.current?.toggleAttribute("data-immersive", hidden);
+          const scroller = event.currentTarget;
+          atBottomRef.current =
+            scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 24;
+          syncBelow();
         }}
       >
-        <div className="ai-chat__thread">
-          {isFreshQuote ? (
-            <section className="ai-chat__source">
-              <span>正在讨论</span>
-              <blockquote className="ai-ask__quote">{text}</blockquote>
-            </section>
-          ) : null}
-
+        <div className="ai-chat__thread" ref={threadRef}>
           {!turns.length ? (
             <div className="ai-chat__intro">
-              {isFreshQuote ? null : (
-                <>
-                  <strong>聊聊这本书</strong>
-                  {/* 没配模型时下面那张提示卡已经把话说完了，别再来一句同义的。 */}
-                  {configured ? (
-                    <p>《{displayTitle(book.title)}》里的观点、人物、细节，想到哪问到哪。</p>
-                  ) : null}
-                </>
-              )}
+              <strong>{isFreshQuote ? "聊聊这段话" : "聊聊这本书"}</strong>
+              {/* 没配模型时下面那张提示卡已经把话说完了，别再来一句同义的。 */}
+              {configured && !isFreshQuote ? (
+                <p>《{displayTitle(book.title)}》里的观点、人物、细节，想到哪问到哪。</p>
+              ) : null}
               {configured ? (
                 <div className="ai-chat__starters">
                   {starterPrompts(book, chapter, isFreshQuote).map((preset) => (
@@ -3471,108 +3606,57 @@ function AiAskPanel({
             </div>
           ) : null}
 
-          {turns.map((turn, index) =>
-            turn.role === "user" ? (
-              <div className="ai-ask__turn-user" key={index}>
-                {turn.quote ? (
-                  <blockquote className="ai-ask__quote ai-ask__quote--sent">
-                    {turn.quote}
-                  </blockquote>
-                ) : null}
-                <p className="ai-ask__question">{turn.content}</p>
-              </div>
-            ) : (
-              <div className="ai-ask__turn-assistant" key={index}>
-                {turn.reasoning ? (
-                  <div className="ai-ask__reasoning">
-                    <button
-                      type="button"
-                      className="ai-ask__reasoning-toggle"
-                      onClick={() => setShowReasoning((value) => !value)}
-                    >
-                      <ChevronDown
-                        size={14}
-                        style={{
-                          transform: showReasoning ? "rotate(0deg)" : "rotate(-90deg)",
-                        }}
-                      />
-                      思考过程
-                    </button>
-                    {showReasoning ? <p className="ai-ask__reasoning-text">{turn.reasoning}</p> : null}
-                  </div>
-                ) : null}
-                {turn.content || busy ? (
-                  <div className="ai-ask__answer">
-                    {turn.content ? <AiMarkdown content={turn.content} /> : null}
-                    {busy && !turn.content && index === turns.length - 1 ? (
-                      <span className="ai-chat__thinking" aria-label="正在思考">
-                        <i />
-                        <i />
-                        <i />
-                      </span>
-                    ) : null}
-                  </div>
-                ) : null}
-                {turn.content && !(busy && index === turns.length - 1) ? (
-                  <button
-                    type="button"
-                    className="ai-ask__copy"
-                    onClick={() => void copyAnswer(index, turn.content)}
-                    aria-label={copiedIndex === index ? "已复制" : "复制回答"}
-                  >
-                    {copiedIndex === index ? (
-                      <>
-                        <Check size={14} />
-                        已复制
-                      </>
-                    ) : (
-                      <>
-                        <Copy size={14} />
-                        复制
-                      </>
-                    )}
-                  </button>
-                ) : null}
-              </div>
-            )
+          {turns.slice(0, pinned ?? turns.length).map(renderTurn)}
+          {pinned !== null ? (
+            <div className="ai-chat__latest" ref={latestRef}>
+              {turns.slice(pinned).map((turn, offset) => renderTurn(turn, pinned + offset))}
+              <div ref={endRef} />
+            </div>
+          ) : (
+            <div ref={endRef} />
           )}
         </div>
       </div>
 
-      {error ? <p className="ai-chat__error">{error}</p> : null}
-
       <div className="ai-chat__composer">
-        {/* 单行输入条：文字和发送键并排。模型配置搬去主页设置之后，这里不再
-            需要第二行，输入区高度直接砍掉一半。 */}
-        <div
-          className={`ai-chat__input${busy || canSend ? "" : " is-bare"}`}
+        <button
+          type="button"
+          className="ai-chat__jump"
+          aria-label="回到最新"
+          onClick={jumpToEnd}
         >
-          <textarea
-            ref={inputRef}
-            rows={1}
-            placeholder={isFreshQuote ? "留空就是让 AI 讲讲这段话" : "发消息或输入问题..."}
-            value={question}
-            onChange={(event) => {
-              setQuestion(event.target.value);
-              event.currentTarget.style.height = "auto";
-              event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 180)}px`;
-            }}
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                !event.shiftKey &&
-                !event.nativeEvent.isComposing
-              ) {
-                event.preventDefault();
-                void ask();
-              }
-            }}
-          />
-          {/* 没东西可发就整个不渲染发送键，右侧的内缩由 is-bare 补齐。 */}
-          {busy || canSend ? (
+          <ArrowDown size={18} />
+        </button>
+        <div className="ai-chat__input">
+          {/* 从正文划词带进来的原文挂在输入框里，发出去之前一直看得见。 */}
+          {isFreshQuote ? <p className="ai-chat__quote">{text}</p> : null}
+          <div className="ai-chat__row">
+            <textarea
+              ref={inputRef}
+              rows={1}
+              placeholder={isFreshQuote ? "留空就是让 AI 讲讲这段话" : "问问这本书…"}
+              value={question}
+              onChange={(event) => {
+                setQuestion(event.target.value);
+                event.currentTarget.style.height = "auto";
+                event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 180)}px`;
+              }}
+              onKeyDown={(event) => {
+                if (
+                  event.key === "Enter" &&
+                  !event.shiftKey &&
+                  !event.nativeEvent.isComposing
+                ) {
+                  event.preventDefault();
+                  void ask();
+                }
+              }}
+            />
+            {/* 发送键常驻，没东西可发时置灰：时有时无的话输入框宽度跟着变，字会重新折行。 */}
             <button
               type="button"
               className="ai-chat__send"
+              disabled={!busy && !canSend}
               onClick={() => {
                 if (busy) controllerRef.current?.abort();
                 else void ask();
@@ -3581,7 +3665,7 @@ function AiAskPanel({
             >
               {busy ? <Square size={14} fill="currentColor" /> : <ArrowUp size={20} />}
             </button>
-          ) : null}
+          </div>
         </div>
       </div>
     </div>
@@ -3664,8 +3748,10 @@ function AiInlineAsk({
       else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
     } finally {
       setBusy(false);
-      // 这一轮照样进这本书的常驻对话，正文里的批注只是它的即时视图。
-      onTurnsChange([...history, { role: "assistant", content, reasoning }]);
+      // 这一轮照样进这本书的常驻对话，正文里的批注只是它的即时视图。没答上来的空回答不留。
+      onTurnsChange(
+        [...history, { role: "assistant" as const, content, reasoning }].filter(isAnsweredTurn)
+      );
     }
   };
 
@@ -3745,7 +3831,7 @@ function AiInlineAsk({
         )
       ) : (
         <div className="ai-inline__answer">
-          {answer ? <AiMarkdown content={answer} /> : null}
+          {answer ? <AiMarkdown content={answer} streaming={busy} /> : null}
           {busy && !answer ? (
             <span className="ai-chat__thinking" aria-label="正在思考">
               <i />

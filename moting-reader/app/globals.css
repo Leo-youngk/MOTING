@@ -2108,6 +2108,8 @@ button:disabled {
 /* --- 全屏长对话 ------------------------------------------------------ */
 
 .ai-chat {
+  /* 顶栏的高度（含刘海区）。消息区的上内边距、最新一问的最小高度都按它算。 */
+  --chat-top: calc(env(safe-area-inset-top) + 50px);
   position: fixed;
   z-index: 120;
   inset: 0;
@@ -2120,37 +2122,66 @@ button:disabled {
   padding-bottom: var(--viewport-fill-bottom, 0px);
   display: flex;
   flex-direction: column;
-  /* 一块平整的纸，不做渐变——之前那层冷灰渐变在半空的屏幕上像没加载完。 */
   background: var(--paper);
   animation: fade-in var(--dur-fast) ease both;
 }
 
-/* 没有标题栏。之前那条铺满 safe-area 的纯色顶栏正是要躲开的挡块——现在内容
-   一路铺到屏幕最顶，只留一枚浮在角上的关闭。往下滚时它跟着淡出。 */
-.ai-chat__close {
+/* 顶栏一直都在，不随滚动出没。消息从它底下滚过去，所以是毛玻璃——跟底栏、
+   迷你播放条一样是浮在内容上面的那一层。 */
+.ai-chat__bar {
   position: absolute;
   z-index: 2;
-  top: calc(env(safe-area-inset-top) + 6px);
-  right: 10px;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: grid;
+  height: var(--chat-top);
+  grid-template-columns: 52px minmax(0, 1fr) 52px;
+  align-items: center;
+  padding-top: env(safe-area-inset-top);
+  border-bottom: 0.5px solid var(--line-soft);
+  background: var(--glass-fill);
+  backdrop-filter: var(--glass-blur);
+}
+
+.ai-chat__title {
+  display: flex;
+  min-width: 0;
+  grid-column: 2;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+.ai-chat__title strong {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--ink);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-chat__title span {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+}
+
+.ai-chat__close {
   display: inline-flex;
-  width: 38px;
-  height: 38px;
+  width: 36px;
+  height: 36px;
+  grid-column: 3;
   align-items: center;
   justify-content: center;
+  justify-self: center;
+  padding: 0;
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--paper) 72%, transparent);
-  backdrop-filter: blur(10px);
-  color: color-mix(in srgb, var(--ink) 50%, transparent);
-  transition: opacity var(--dur-base) ease;
-}
-
-.ai-chat__close:active {
-  opacity: 0.5;
-}
-
-.ai-chat[data-immersive] .ai-chat__close {
-  opacity: 0;
-  pointer-events: none;
+  background: transparent;
+  color: var(--muted);
 }
 
 .ai-chat__scroll {
@@ -2158,46 +2189,44 @@ button:disabled {
   flex: 1;
   flex-direction: column;
   overflow-y: auto;
-  padding-top: calc(env(safe-area-inset-top) + 12px);
+  padding-top: var(--chat-top);
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
 
-/* 内容少的时候贴着输入框往上排：视觉重心本来就在输入框，上方那片留白是页面
-   顶部的呼吸（顶栏已经去掉了，没有东西框住它）。夹在内容和输入框中间的空白
-   才是死白。内容多到溢出时 margin-top 没有空间可占，自然回到从顶滚。 */
+/* 从上往下排：发出去的问题停在原地，回答在它下面长出来。 */
 .ai-chat__thread {
   display: flex;
   width: min(100%, 720px);
-  flex-direction: column;
-  gap: 12px;
-  margin: auto auto 0;
-  padding: 8px 20px 24px;
-}
-
-/* 轮内（提问接回答）收紧，轮与轮之间拉开，读起来才有段落感。 */
-.ai-ask__turn-assistant + .ai-ask__turn-user {
-  margin-top: 22px;
-}
-
-.ai-chat__source {
-  display: flex;
+  flex: 1 0 auto;
   flex-direction: column;
   gap: 8px;
-  margin-bottom: 6px;
+  margin: 0 auto;
+  padding: 16px 20px 24px;
 }
 
-.ai-chat__source > span {
-  color: var(--muted);
-  font-size: var(--text-sm);
-  letter-spacing: 0.08em;
+/* 最新一问连同回答至少占满顶栏以下的一屏，问题才能滚到顶栏下面、回答有地方往下长。
+   40px = 滚到位时离顶栏的 16px（LATEST_GAP）+ 对话底部的 24px 内边距。 */
+.ai-chat__latest {
+  display: flex;
+  min-height: calc(var(--chat-viewport, 100vh) - var(--chat-top) - 40px);
+  flex-direction: column;
+  gap: 8px;
 }
 
+/* 轮内（提问接回答）收紧，轮与轮之间拉开。 */
+.ai-ask__turn-assistant + .ai-ask__turn-user,
+.ai-ask__turn-assistant + .ai-chat__latest {
+  margin-top: 20px;
+}
+
+/* 还没聊过：标题和起手提问放在消息区正中。 */
 .ai-chat__intro {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 6px 0 0;
+  margin: auto 0;
+  padding-bottom: 24px;
 }
 
 .ai-chat__intro strong {
@@ -2215,7 +2244,7 @@ button:disabled {
   line-height: 1.65;
 }
 
-/* 起手提问：拿真实的书名章节拼出来的三行，顺手就能点，也顺手把首屏填满。 */
+/* 起手提问：拿真实的书名章节拼出来的三行，顺手就能点。 */
 .ai-chat__starters {
   display: flex;
   flex-direction: column;
@@ -2256,21 +2285,14 @@ button:disabled {
   margin-top: 3px;
 }
 
-.ai-chat__error {
-  margin: 0;
-  padding: 0 20px 6px;
-  color: var(--danger);
-  font-size: var(--text-md);
-}
-
 .ai-chat__composer {
+  position: relative;
   display: flex;
   width: min(100%, 720px);
   flex-direction: column;
   margin: 0 auto;
   /* 不给 Home Indicator 留安全区，8px 只是让输入卡的圆角浮起来、不被屏幕圆角切。 */
-  padding: 10px 16px 8px;
-  background: linear-gradient(to bottom, transparent, var(--paper) 24px, var(--paper));
+  padding: 8px 16px;
 }
 
 /* 键盘弹起时底边停在键盘上沿（不再往下探物理屏底，那块已被键盘盖住）。 */
@@ -2284,12 +2306,9 @@ html[data-keyboard-open] .ai-chat__composer {
   padding-bottom: 8px;
 }
 
-/* 单行输入条：文字和发送键并排。模型配置搬到主页设置之后，这里不再有第二行，
-   收起状态的高度从 100 出头降到 52 上下。 */
 .ai-chat__input {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
   padding: 6px 6px 6px 18px;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-xl);
@@ -2297,9 +2316,25 @@ html[data-keyboard-open] .ai-chat__composer {
   box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 6%, transparent);
 }
 
-/* 没有发送键时右边补回等量内缩，不然一侧空一块。 */
-.ai-chat__input.is-bare {
-  padding-right: 18px;
+/* 从正文划词带进来的原文：挂在输入框里，最多两行。 */
+.ai-chat__quote {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 6px 12px 4px 0;
+  padding: 1px 0 1px 10px;
+  border-left: 2px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-serif);
+  font-size: var(--text-md);
+  line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.ai-chat__row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
 }
 
 /* flex 行里必须走 flex+min-width:0。用 width:100% 的话它按整个容器宽度算，
@@ -2334,86 +2369,174 @@ html[data-keyboard-open] .ai-chat__composer {
   border-radius: var(--radius-pill);
   background: var(--accent);
   color: #fff;
-  transition: transform var(--dur-fast) ease, opacity var(--dur-fast) ease;
+  transition:
+    background var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
 }
 
-.ai-chat__send:active {
+/* 没东西可发时置灰，不收起：发送键时有时无，输入框的宽度就跟着变。 */
+.ai-chat__send:disabled {
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
+  color: color-mix(in srgb, var(--ink) 32%, transparent);
+}
+
+.ai-chat__send:not(:disabled):active {
   transform: scale(0.94);
 }
 
-.ai-ask__quote {
-  overflow-y: auto;
-  max-height: 7.5em;
-  margin: 0;
-  padding: 12px 16px;
-  border-left: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
-  border-radius: 0 12px 12px 0;
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
-  color: color-mix(in srgb, var(--ink) 88%, transparent);
-  font-family: var(--font-serif);
-  font-size: var(--text-base);
-  line-height: 1.75;
-  overscroll-behavior: contain;
-}
-
-.ai-ask__reasoning {
-  padding: 10px 13px;
-  border-radius: var(--radius-md);
-  background: var(--paper-deep);
-}
-
-.ai-ask__reasoning-toggle {
-  display: flex;
+/* 回答的末尾还在屏幕下面：输入框上方浮一枚「回到最新」。它压在消息上面，所以是玻璃。 */
+.ai-chat__jump {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
   padding: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--text-sm);
+  border: 0.5px solid var(--glass-edge);
+  border-radius: var(--radius-pill);
+  background: var(--glass-fill);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+  color: var(--ink);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 6px);
+  transition:
+    opacity var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
 }
 
-.ai-ask__reasoning-toggle svg {
-  transition: transform var(--dur-fast) ease;
+.ai-chat[data-below] .ai-chat__jump {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
 }
 
-.ai-ask__reasoning-text {
-  margin: 8px 0 0;
-  color: var(--muted);
-  font-size: var(--text-md);
-  line-height: 1.65;
-  white-space: pre-wrap;
-}
-
-/* 提问：满屏宽、不做气泡。靠字号和字重跟回答分层，不靠一个右对齐的方块。 */
+/* 提问：右对齐的浅色气泡，一眼跟满宽的回答分开。 */
 .ai-ask__turn-user {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  align-items: flex-end;
+  gap: 6px;
 }
 
 .ai-ask__question {
+  max-width: 85%;
   margin: 0;
+  padding: 9px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--paper-deep);
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: var(--text-lg);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.55;
+  font-size: var(--text-callout);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
-/* 发出去的引用跟着问题走，收窄一档、压低对比度，别抢问题本身。 */
-.ai-ask__quote--sent {
-  max-height: 6em;
-  padding: 9px 13px;
+/* 带着的原文摘录跟在提问上面，收一档、压低对比度，最多三行。 */
+.ai-ask__quote-sent {
+  display: -webkit-box;
+  overflow: hidden;
+  max-width: 85%;
+  margin: 0;
+  padding: 1px 0 1px 10px;
+  border-left: 2px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-serif);
   font-size: var(--text-md);
-  line-height: 1.65;
+  line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .ai-ask__turn-assistant {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+}
+
+/* 思考过程默认收起成一行，点开才展开；出字前这一行写「正在思考…」，答案出来后
+   改成「思考过程」，高度不变。 */
+.ai-ask__reasoning {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-ask__reasoning-toggle {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.ai-ask__reasoning-toggle svg {
+  transform: rotate(-90deg);
+  transition: transform var(--dur-fast) ease;
+}
+
+.ai-ask__reasoning.is-open .ai-ask__reasoning-toggle svg {
+  transform: none;
+}
+
+.ai-ask__reasoning-text {
+  margin: 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--line-soft);
+  color: var(--muted);
+  font-size: var(--text-md);
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.ai-ask__actions {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 16px;
+}
+
+.ai-ask__actions[data-hidden] {
+  visibility: hidden;
+}
+
+/* 没答上来：错误就写在这一问下面，旁边一枚「重试」，不用再打一遍「？」。 */
+.ai-ask__failed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.ai-ask__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-md);
+  line-height: 1.6;
+}
+
+.ai-ask__retry {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  border: 0.5px solid var(--line-soft);
+  border-radius: var(--radius-pill);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-control);
+  color: var(--ink);
+  font-size: var(--text-md);
 }
 
 /* markdown 正文排版。全屏回答和正文批注共用，尺寸一律走 em——批注的字号基准
@@ -2583,11 +2706,12 @@ html[data-keyboard-open] .ai-chat__composer {
   opacity: 0.55;
 }
 
+/* 正好一行字高：第一行字出来替换它的时候，下面的东西不跳。 */
 .ai-chat__thinking {
   display: inline-flex;
+  height: 1lh;
   align-items: center;
   gap: 5px;
-  min-height: 28px;
 }
 
 .ai-chat__thinking i {
@@ -2599,11 +2723,11 @@ html[data-keyboard-open] .ai-chat__composer {
 }
 
 .ai-chat__thinking i:nth-child(2) {
-  animation-delay: var(--dur-fast);
+  animation-delay: 120ms;
 }
 
 .ai-chat__thinking i:nth-child(3) {
-  animation-delay: var(--dur-base);
+  animation-delay: 240ms;
 }
 
 @keyframes ai-thinking {
