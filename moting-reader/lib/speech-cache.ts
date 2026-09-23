@@ -1,7 +1,7 @@
 import { fetchSpeechClip, type SpeechClip } from "./speech-audio.ts";
 
 /**
- * 内存缓存预算。跟书籍的 20MB 单文件上限是两回事，各管各的：
+ * 内存缓存预算。跟书籍的 50MB 单文件上限是两回事，各管各的：
  * 这里存的是已经合成好的 MP3，超出后按最久未用淘汰。
  */
 export const DEFAULT_CLIP_BUDGET_BYTES = 16 * 1024 * 1024;

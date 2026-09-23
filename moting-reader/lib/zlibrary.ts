@@ -1,4 +1,4 @@
-import { MAX_BOOK_FILE_ERROR } from "./file-limits";
+import { MAX_BOOK_FILE_ERROR, MAX_BOOK_FILE_LABEL } from "./file-limits";
 import { fetchWithTimeout } from "./fetch-utils";
 import { ONLINE_BOOK_MAX_BYTES, type OnlineBook, type OnlineSearchResult, type ZlibrarySession } from "./zlibrary-types";
 
@@ -70,7 +70,7 @@ export async function downloadZlibrary(book: OnlineBook, onProgress: (label: str
   } catch (error) {
     await reader.cancel().catch(() => {});
     if (signal.aborted) throw error;
-    throw new Error(error instanceof Error && error.message.includes("20 MB") ? error.message : "下载中断，文件尚未加入书库，请重试");
+    throw new Error(error instanceof Error && error.message.includes(MAX_BOOK_FILE_LABEL) ? error.message : "下载中断，文件尚未加入书库，请重试");
   } finally {
     reader.releaseLock();
   }
