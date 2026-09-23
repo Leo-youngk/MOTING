@@ -2332,6 +2332,55 @@ function AiModelPicker({
         )}
       </div>
 
+      <div className="ai-setup__group">
+        <div className="ai-setup__head">
+          <h3>备用模型</h3>
+        </div>
+        <p className="ai-setup__note">
+          主模型太忙（503、限流）时自动改用它回答，用同一个接口地址和 API Key。用到它的那条回答下面会注明。
+        </p>
+        {models.length ? (
+          <label className="ai-setup__field">
+            <span>主模型忙时改用</span>
+            <select
+              value={settings.aiFallbackModel}
+              onChange={(event) =>
+                onChange({ ...settings, aiFallbackModel: event.target.value })
+              }
+            >
+              <option value="">不用备用模型</option>
+              {settings.aiFallbackModel && !models.includes(settings.aiFallbackModel) ? (
+                <option value={settings.aiFallbackModel}>
+                  {settings.aiFallbackModel}（这个接口的列表里没有）
+                </option>
+              ) : null}
+              {models.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label className="ai-setup__field">
+            <span>备用模型名</span>
+            <input
+              type="text"
+              value={settings.aiFallbackModel}
+              placeholder="不填就不用备用模型"
+              onChange={(event) =>
+                onChange({ ...settings, aiFallbackModel: event.target.value.trim() })
+              }
+            />
+          </label>
+        )}
+        {settings.aiFallbackModel && settings.aiFallbackModel === settings.aiModel ? (
+          <p className="ai-setup__status ai-setup__status--error">
+            备用模型和主模型是同一个，等于没设。
+          </p>
+        ) : null}
+      </div>
+
       <label className="ai-setup__switch">
         <span>
           <strong>深度思考</strong>
@@ -3205,6 +3254,7 @@ async function askAi({
   signal,
   brief = false,
   onDelta,
+  onModel,
 }: {
   book: BookMeta;
   chapter: Chapter | undefined;
@@ -3214,6 +3264,7 @@ async function askAi({
   /** 正文批注只是页边的一小块，长篇大论会把正文淹掉，所以额外要一句简短。 */
   brief?: boolean;
   onDelta: (delta: { content?: string; reasoning?: string }) => void;
+  onModel?: (model: string) => void;
 }) {
   const fullToc = tocIndexes(book.chapterOutline)
     .map((index, number) => `${number + 1}. ${chapterLabel(book.chapterOutline, index)}`)
@@ -3237,8 +3288,10 @@ async function askAi({
       baseUrl: settings.aiBaseUrl,
       apiKey: settings.aiApiKey,
       model: settings.aiModel,
+      fallbackModel: settings.aiFallbackModel,
       deepThinking: settings.aiDeepThinking,
       signal,
+      onModel,
       messages: [
         {
           role: "system",
@@ -3254,6 +3307,11 @@ async function askAi({
 /** 对话记录只留答上来的回答（出错、被打断、模型什么都没给的空回答不留），提问都留。 */
 function isAnsweredTurn(turn: AiChatTurn): boolean {
   return turn.role === "user" || turn.content.trim().length > 0;
+}
+
+/** 这条是备用模型答的就记下模型名，界面上标出来；主模型答的不记，免得每条都挂一行字。 */
+function fallbackMark(answeredBy: string, settings: ReaderSettings): Pick<AiChatTurn, "model"> {
+  return answeredBy && answeredBy !== settings.aiModel ? { model: answeredBy } : {};
 }
 
 /** 划词后「问 AI」，多轮聊天面板；模型设置默认收起，把注意力留给原文和对话。 */
@@ -3440,6 +3498,7 @@ function AiAskPanel({
     controllerRef.current = controller;
     let content = "";
     let reasoning = "";
+    let answeredBy = "";
     streamTextRef.current = { content: "", reasoning: "" };
     try {
       await askAi({
@@ -3454,6 +3513,9 @@ function AiAskPanel({
           streamTextRef.current = { content, reasoning };
           scheduleStreamRender();
         },
+        onModel: (model) => {
+          answeredBy = model;
+        },
       });
     } catch (err) {
       if (err instanceof AiRequestError) setError(err.message);
@@ -3464,7 +3526,10 @@ function AiAskPanel({
         streamFrameRef.current = null;
       }
       streamTextRef.current = { content, reasoning };
-      const next: AiChatTurn[] = [...history, { role: "assistant", content, reasoning }];
+      const next: AiChatTurn[] = [
+        ...history,
+        { role: "assistant", content, reasoning, ...fallbackMark(answeredBy, settings) },
+      ];
       setTurns(next);
       setBusy(false);
       // 没答上来的这一轮只留在眼前（带着「重试」），不写进这本书的对话记录。
@@ -3525,6 +3590,7 @@ function AiAskPanel({
               {copiedIndex === index ? <Check size={14} /> : <Copy size={14} />}
               {copiedIndex === index ? "已复制" : "复制"}
             </button>
+            {turn.model ? <span className="ai-ask__via">主模型太忙，由备用模型 {turn.model} 回答</span> : null}
           </div>
         ) : null}
         {index === lastIndex && error && !busy ? (
@@ -3702,6 +3768,7 @@ function AiInlineAsk({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [via, setVia] = useState<string | undefined>();
   const controllerRef = useRef<AbortController | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -3729,6 +3796,8 @@ function AiInlineAsk({
     controllerRef.current = controller;
     let content = "";
     let reasoning = "";
+    let answeredBy = "";
+    setVia(undefined);
     try {
       await askAi({
         book,
@@ -3742,6 +3811,10 @@ function AiInlineAsk({
           if (delta.reasoning) reasoning += delta.reasoning;
           setAnswer(content);
         },
+        onModel: (model) => {
+          answeredBy = model;
+          setVia(fallbackMark(model, settings).model);
+        },
       });
     } catch (err) {
       if (err instanceof AiRequestError) setError(err.message);
@@ -3750,7 +3823,10 @@ function AiInlineAsk({
       setBusy(false);
       // 这一轮照样进这本书的常驻对话，正文里的批注只是它的即时视图。没答上来的空回答不留。
       onTurnsChange(
-        [...history, { role: "assistant" as const, content, reasoning }].filter(isAnsweredTurn)
+        [
+          ...history,
+          { role: "assistant" as const, content, reasoning, ...fallbackMark(answeredBy, settings) },
+        ].filter(isAnsweredTurn)
       );
     }
   };
@@ -3854,6 +3930,7 @@ function AiInlineAsk({
             <Sparkles size={13} />
             继续聊
           </button>
+          {via && answer ? <span className="ai-ask__via">由备用模型 {via} 回答</span> : null}
         </div>
       ) : null}
     </aside>

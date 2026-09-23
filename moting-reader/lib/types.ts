@@ -186,6 +186,8 @@ export interface ReaderSettings {
   /** 请求经我们的 Worker 转发（绕开跨域限制），密钥随请求过一次服务器，不落盘。 */
   aiApiKey: string;
   aiModel: string;
+  /** 主模型忙（503、限流）时自动改用的模型，同一个接口地址和密钥；空串表示不设。 */
+  aiFallbackModel: string;
   aiDeepThinking: boolean;
 }
 
@@ -195,6 +197,8 @@ export interface AiChatTurn {
   reasoning?: string;
   /** 触发这轮提问时选中的原文片段，只在换了新片段的那一轮才有值。 */
   quote?: string;
+  /** 这条回答是备用模型答的时候记下它的名字（主模型答的不记）。 */
+  model?: string;
 }
 
 /** 一本书一条常驻对话，不按划线片段拆分，随书本身持久化。 */
@@ -258,6 +262,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   aiBaseUrl: "",
   aiApiKey: "",
   aiModel: "",
+  aiFallbackModel: "",
   aiDeepThinking: false,
 };
 

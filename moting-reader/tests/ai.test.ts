@@ -46,7 +46,7 @@ test("the history stays within the size limits and keeps the current question", 
   assert.ok(!messages.some((message) => message.content === "最早的一问"));
 });
 
-function sse(chunks: string[]) {
+function sse(chunks: string[], headers: Record<string, string> = {}) {
   const encoder = new TextEncoder();
   return new Response(
     new ReadableStream({
@@ -55,7 +55,7 @@ function sse(chunks: string[]) {
         controller.close();
       },
     }),
-    { status: 200, headers: { "content-type": "text/event-stream" } }
+    { status: 200, headers: { "content-type": "text/event-stream", ...headers } }
   );
 }
 
@@ -99,5 +99,24 @@ test("a normal stream delivers the answer piece by piece", async () => {
       text += delta.content ?? "";
     });
     assert.equal(text, "你好");
+  });
+});
+
+test("the model that actually answered is reported, so a fallback answer can be labelled", async () => {
+  const chunks = ['data: {"choices":[{"delta":{"content":"好"}}]}\n\n', "data: [DONE]\n\n"];
+  await withFetch(sse(chunks, { "x-ai-model": "gemini-3.7-flash" }), async () => {
+    let model = "";
+    await streamAiChat({ ...options, onModel: (answeredBy) => (model = answeredBy) }, () => {});
+    assert.equal(model, "gemini-3.7-flash");
+  });
+});
+
+test("an error body wrapped in an array still shows its message", async () => {
+  const body = '[{"error":{"code":503,"message":"模型过载"}}]';
+  await withFetch(new Response(body, { status: 503 }), async () => {
+    await assert.rejects(
+      streamAiChat(options, () => {}),
+      (error) => error instanceof AiRequestError && error.message === "模型过载"
+    );
   });
 });

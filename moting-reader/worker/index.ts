@@ -3,6 +3,7 @@ import handler from "vinext/server/app-router-entry";
 import { AI_REQUEST_LIMITS } from "../lib/ai";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
 import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
+import { aiAttemptPlan, aiFailureMessage, requestWithRetry } from "./ai-upstream";
 import { synthesizeSpeech } from "./edge-tts";
 import { forwardSync, handleSync } from "./sync";
 import { handleWeread } from "./weread";
@@ -31,6 +32,8 @@ const MAX_AI_MODELS_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_AI_ERROR_RESPONSE_BYTES = 64 * 1024;
 const AI_MODELS_TIMEOUT_MS = 30000;
 const AI_CHAT_TIMEOUT_MS = 120000;
+/** 上游忙时所有重试加起来最多等这么久。一次 503 本身就要三秒上下，再长用户就以为卡死了。 */
+const AI_RETRY_BUDGET_MS = 30000;
 // 音色名会拼进 SSML 属性，必须限死格式，否则等于把 SSML 注入点暴露出去。
 const VOICE_PATTERN = /^[a-z]{2,3}-[A-Z]{2}-[A-Za-z]+Neural$/;
 
@@ -179,7 +182,7 @@ function normalizeAiBaseUrl(raw: unknown): string | null {
 }
 
 /** BYOK 转发：接口地址不带 CORS 头时浏览器直连会被拦，借这层做一次服务器到服务器的转发。
- *  不落盘、不记日志，密钥只在这一次请求里过一下手。 */
+ *  不落盘，密钥只在这一次请求里过一下手；日志只记模型名和状态码，不记密钥和对话内容。 */
 async function handleAiModels(request: Request): Promise<Response> {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
@@ -212,6 +215,9 @@ async function handleAiModels(request: Request): Promise<Response> {
 
   try {
     const body = await readResponseText(upstream, MAX_AI_MODELS_RESPONSE_BYTES);
+    if (!upstream.ok) {
+      return aiError(aiFailureMessage(upstream.status, [], body), upstream.status);
+    }
     return new Response(body, {
       status: upstream.status,
       headers: {
@@ -250,50 +256,54 @@ async function handleAiChat(request: Request): Promise<Response> {
   if (!messages) return aiError("消息格式不对或内容过长", 400);
   const apiKey = stringField(payload.apiKey ?? "", 4096);
   if (apiKey === null) return aiError("API Key 过长", 400);
+  const fallbackModel = stringField(payload.fallbackModel ?? "", 200)?.trim() || null;
 
-  let upstream: Response;
+  let result;
   try {
-    upstream = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: true,
-        ...(payload.deepThinking ? { enable_thinking: true } : {}),
-      }),
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(AI_CHAT_TIMEOUT_MS)]),
+    result = await requestWithRetry({
+      plan: aiAttemptPlan(model, fallbackModel),
+      signal: request.signal,
+      budgetMs: AI_RETRY_BUDGET_MS,
+      send: (attemptModel) =>
+        fetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: attemptModel,
+            messages,
+            stream: true,
+            ...(payload.deepThinking ? { enable_thinking: true } : {}),
+          }),
+          signal: AbortSignal.any([request.signal, AbortSignal.timeout(AI_CHAT_TIMEOUT_MS)]),
+        }),
+      readError: (response) => readResponseText(response, MAX_AI_ERROR_RESPONSE_BYTES),
+      // 退路要看得见：每次重试、换备用模型都进 Workers 日志，出了问题能查到底是哪边忙。
+      onRetry: (attempt, next) =>
+        console.warn("ai upstream retry", { failed: attempt, next: next.model }),
     });
   } catch {
-    return aiError("连不上这个接口地址，检查地址是否正确", 502);
+    // 用户在等待重试时关掉了对话框，连接已经断了，这个响应不会有人收。
+    return aiError("请求已取消", 499);
   }
 
-  if (!upstream.ok || !upstream.body) {
-    try {
-      const detail = await readResponseText(upstream, MAX_AI_ERROR_RESPONSE_BYTES);
-      return new Response(detail || JSON.stringify({ error: { message: `AI 服务返回 ${upstream.status}` } }), {
-        status: upstream.status,
-        headers: {
-          "cache-control": "no-store",
-          "content-type": upstream.headers.get("content-type") ?? "application/json",
-        },
-      });
-    } catch (error) {
-      return aiError(
-        error instanceof PayloadError ? error.message : `AI 服务返回 ${upstream.status}`,
-        error instanceof PayloadError ? error.status : upstream.status
-      );
-    }
+  if (!result.ok) {
+    console.error("ai upstream failed", { status: result.status, attempts: result.attempts });
+    return aiError(aiFailureMessage(result.status, result.attempts, result.detail), result.status || 502);
+  }
+  if (result.model !== model) {
+    console.warn("ai fallback answered", { model: result.model, attempts: result.attempts });
   }
 
-  return new Response(upstream.body, {
+  return new Response(result.response.body, {
     headers: {
       "cache-control": "no-store",
-      "content-type": upstream.headers.get("content-type") ?? "text/event-stream",
+      "content-type": result.response.headers.get("content-type") ?? "text/event-stream",
       "x-content-type-options": "nosniff",
+      // 前端据此标出「这条是备用模型答的」。
+      "x-ai-model": result.model,
     },
   });
 }

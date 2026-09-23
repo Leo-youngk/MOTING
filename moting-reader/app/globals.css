@@ -2702,6 +2702,22 @@ html[data-keyboard-open] .ai-chat__composer {
   font-size: var(--text-sm);
 }
 
+/* 这条是备用模型答的：跟在操作后面一行小灰字，降级要看得见。 */
+.ai-ask__via {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-inline__actions .ai-ask__via {
+  align-self: center;
+  color: var(--reader-muted);
+  font-size: 0.8em;
+}
+
 .ai-ask__copy:active {
   opacity: 0.55;
 }
@@ -2771,7 +2787,7 @@ html[data-keyboard-open] .ai-chat__composer {
   letter-spacing: 0.02em;
 }
 
-.ai-setup__field input {
+.ai-setup__field :is(input, select) {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--line-soft);
@@ -2783,7 +2799,7 @@ html[data-keyboard-open] .ai-chat__composer {
   font-size: var(--text-callout);
 }
 
-.ai-setup__field input:focus {
+.ai-setup__field :is(input, select):focus {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--line-soft));
 }
 

@@ -13,6 +13,20 @@ export class AiRequestError extends Error {
   }
 }
 
+/**
+ * 错误响应里的那句人话。Worker 已统一成 `{"error":{"message"}}`，保险起见也认 Gemini
+ * 兼容接口那种外面包一层数组的 `[{"error":{…}}]`——不认的话用户只看得到一个状态码。
+ */
+async function errorMessage(response: Response): Promise<string | undefined> {
+  const detail: unknown = await response.json().catch(() => null);
+  const record = (Array.isArray(detail) ? detail[0] : detail) as
+    | { error?: { message?: unknown } }
+    | null
+    | undefined;
+  const message = record?.error?.message;
+  return typeof message === "string" && message ? message : undefined;
+}
+
 export async function fetchAiModels(
   baseUrl: string,
   apiKey: string,
@@ -30,8 +44,7 @@ export async function fetchAiModels(
     throw new AiRequestError("连不上服务器，稍后再试");
   }
   if (!response.ok) {
-    const detail = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
-    throw new AiRequestError(detail?.error?.message ?? `获取模型列表失败（${response.status}）`);
+    throw new AiRequestError((await errorMessage(response)) ?? `获取模型列表失败（${response.status}）`);
   }
   const body = (await response.json().catch(() => null)) as { data?: { id?: string }[] } | null;
   const ids = (body?.data ?? [])
@@ -102,21 +115,25 @@ export interface AiChatOptions {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** 主模型忙（503、限流）时 Worker 自动改用它答；空串表示不设备用。 */
+  fallbackModel?: string;
   messages: AiChatMessage[];
   deepThinking: boolean;
   signal?: AbortSignal;
+  /** 开始出字时告诉调用方是哪个模型在答：主模型忙时 Worker 会换成备用模型，界面要标出来。 */
+  onModel?: (model: string) => void;
 }
 
 /** 逐块把增量内容喂给 onDelta，content 和 reasoning_content（深度思考）分开传。 */
 export async function streamAiChat(options: AiChatOptions, onDelta: (delta: AiStreamDelta) => void): Promise<void> {
-  const { baseUrl, apiKey, model, messages, deepThinking, signal } = options;
+  const { baseUrl, apiKey, model, fallbackModel, messages, deepThinking, signal } = options;
 
   let response: Response;
   try {
     response = await fetch("/api/ai/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ baseUrl, apiKey, model, messages, deepThinking }),
+      body: JSON.stringify({ baseUrl, apiKey, model, fallbackModel, messages, deepThinking }),
       signal,
     });
   } catch (err) {
@@ -125,9 +142,9 @@ export async function streamAiChat(options: AiChatOptions, onDelta: (delta: AiSt
   }
 
   if (!response.ok || !response.body) {
-    const detail = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
-    throw new AiRequestError(detail?.error?.message ?? `AI 服务返回 ${response.status}`);
+    throw new AiRequestError((await errorMessage(response)) ?? `AI 服务返回 ${response.status}`);
   }
+  options.onModel?.(response.headers.get("x-ai-model") || model);
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
