@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flattenChapter, initialPosition, positionFor } from "../lib/content";
+import { chapterLabel, displayTitle } from "../lib/display-title";
 import {
   EDGE_VOICES,
   edgeVoiceName,
@@ -1275,9 +1276,12 @@ export function useSpeechPlayer({
       return;
     }
     session.metadata = new MediaMetadata({
-      title: book.chapters[sessionChapterIndex]?.title ?? book.title,
+      // 锁屏上显示的：章名（续页算前一章）、短书名。
+      title: book.chapters.length
+        ? chapterLabel(book.chapters, sessionChapterIndex)
+        : displayTitle(book.title),
       artist: book.author || "墨听",
-      album: book.title,
+      album: displayTitle(book.title),
       artwork: [
         {
           src: book.coverDataUrl || "/icon-512.png",

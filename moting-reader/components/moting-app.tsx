@@ -101,6 +101,14 @@ import {
   remainingCharacters,
 } from "../lib/content";
 import { createDemoBook } from "../lib/demo";
+import {
+  chapterLabel,
+  chapterLabelFor,
+  displayTitle,
+  isPlaceholderTitle,
+  tocIndexes,
+  tocIndexFor,
+} from "../lib/display-title";
 import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "../lib/file-limits";
 import { springTo } from "../lib/motion";
 import {
@@ -414,7 +422,7 @@ function BookCover({
       ) : (
         <div className="book-cover__generated">
           <span className="book-cover__rule" />
-          <strong>{book.title}</strong>
+          <strong>{displayTitle(book.title)}</strong>
           <small>{book.author}</small>
           <span className="book-cover__mark">墨听</span>
         </div>
@@ -795,7 +803,7 @@ function ShelfCard({
         className="shelf-card__text"
         onClick={() => onOpen(book)}
       >
-        <strong>{book.title}</strong>
+        <strong>{displayTitle(book.title)}</strong>
         <small>{book.author}</small>
         <em>{formatRemaining(book, position)}</em>
       </button>
@@ -826,7 +834,7 @@ function HomeCard({
       >
         <BookCover book={book} size="small" />
         <span className="home-card__meta">
-          <strong>{book.title}</strong>
+          <strong>{displayTitle(book.title)}</strong>
           <small>{book.author}</small>
           <em>{meta}</em>
         </span>
@@ -998,7 +1006,7 @@ function ReadingLog({
         {entries.slice(0, 5).map((entry) => (
           <li key={`${entry.key}-${entry.bookId}`} className="zen-log__entry">
             <span className="zen-log__date">{dayLabel(entry.key, now)}</span>
-            <span className="zen-log__book-name">{entry.bookTitle}</span>
+            <span className="zen-log__book-name">{displayTitle(entry.bookTitle)}</span>
             <span className="zen-log__span">{formatSpan(entry.seconds)}</span>
           </li>
         ))}
@@ -1053,7 +1061,7 @@ function HistoryScreen({
                   <span className="zen-log__date">
                     {dayLabel(entry.key, now)}
                   </span>
-                  <span className="zen-log__book-name">{entry.bookTitle}</span>
+                  <span className="zen-log__book-name">{displayTitle(entry.bookTitle)}</span>
                   <span className="zen-log__span">
                     {formatSpan(entry.seconds)}
                   </span>
@@ -1363,7 +1371,7 @@ function LibraryScreen({
       ) : null}
 
       {sheetBook ? (
-        <Modal title={sheetBook.title} onClose={() => setSheetBook(null)}>
+        <Modal title={displayTitle(sheetBook.title)} onClose={() => setSheetBook(null)}>
           <div className="book-actions">
             <p className="book-actions__author">{sheetBook.author}</p>
             <button
@@ -1634,7 +1642,7 @@ function ListenScreen({
                   >
                     <BookCover book={book} size="small" />
                     <span>
-                      <strong>{book.title}</strong>
+                      <strong>{displayTitle(book.title)}</strong>
                       <small>{book.author}</small>
                       <em>{formatRemaining(book, book.listeningPosition)}</em>
                     </span>
@@ -1943,7 +1951,7 @@ function NotesScreen({
                   <span className="ios-row__main">
                     <BookCover book={book} size="small" />
                     <span>
-                      <strong>{book.title}</strong>
+                      <strong>{displayTitle(book.title)}</strong>
                       <small>{last?.content.slice(0, 30) || book.author}</small>
                       <em>{rounds} 轮对话</em>
                     </span>
@@ -1975,7 +1983,7 @@ function NotesScreen({
               <span className="ios-row__main">
                 <BookCover book={book} size="small" />
                 <span>
-                  <strong>{book.title}</strong>
+                  <strong>{displayTitle(book.title)}</strong>
                   <small>{book.author}</small>
                   <em>
                     {count} 条笔记
@@ -2061,12 +2069,14 @@ function BookNotesScreen({
       });
     const result: Array<{ chapterId: string; title: string; items: BookNote[] }> = [];
     for (const note of visible) {
+      const index = order.chapterIndex.get(note.chapterId);
+      // 续页上的笔记归到前面那个有名字的章下面，跟目录一致。
+      const title = index === undefined ? "正文" : chapterLabel(book.chapters, index);
       const last = result[result.length - 1];
-      if (last && last.chapterId === note.chapterId) {
+      if (last && last.title === title) {
         last.items.push(note);
       } else {
-        const chapter = book.chapters[order.chapterIndex.get(note.chapterId) ?? -1];
-        result.push({ chapterId: note.chapterId, title: chapter?.title ?? "正文", items: [note] });
+        result.push({ chapterId: note.chapterId, title, items: [note] });
       }
     }
     return result;
@@ -2087,7 +2097,7 @@ function BookNotesScreen({
       <div className="book-notes-hero">
         <BookCover book={book} size="small" />
         <span>
-          <strong>{book.title}</strong>
+          <strong>{displayTitle(book.title)}</strong>
           <small>{book.author}</small>
           <em>
             {merged.length} 条笔记
@@ -2825,10 +2835,13 @@ const ArticleBody = memo(function ArticleBody({
             className="reader-chapter"
             data-chapter-section={index}
           >
-            <div className="reader-title">
-              <h1>{item.title}</h1>
-              <span className="reader-title__ornament" aria-hidden />
-            </div>
+            {/* 没名字的章是上一章的续页（章名页和正文拆成了两个文件），接着排，不另起章首。 */}
+            {isPlaceholderTitle(item.title) ? null : (
+              <div className="reader-title">
+                <h1>{item.title}</h1>
+                <span className="reader-title__ornament" aria-hidden />
+              </div>
+            )}
 
             {item.paragraphs.map((paragraph) => {
               if (paragraph.kind === "image") {
@@ -2930,7 +2943,7 @@ const ArticleBody = memo(function ArticleBody({
       {showEnd ? (
         <div className="reader-end">
           <span>全书完</span>
-          <p>{book.title}</p>
+          <p>{displayTitle(book.title)}</p>
         </div>
       ) : null}
 
@@ -3174,7 +3187,7 @@ function starterPrompts(
 ) {
   if (hasQuote) return ["这段在说什么", "举个例子", "和前后文什么关系"];
   const list = ["这本书主要在讲什么"];
-  if (chapter) list.push(`讲讲《${chapter.title}》这一章`);
+  if (chapter) list.push(`讲讲《${chapterLabelFor(book.chapterOutline, chapter.id)}》这一章`);
   list.push(`列一份《${book.title}》的阅读要点`);
   return list;
 }
@@ -3201,8 +3214,10 @@ async function askAi({
   brief?: boolean;
   onDelta: (delta: { content?: string; reasoning?: string }) => void;
 }) {
-  const toc = book.chapterOutline.map((c, i) => `${i + 1}. ${c.title}`).join("\n");
-  const chapterTitle = chapter?.title ?? "正文";
+  const toc = tocIndexes(book.chapterOutline)
+    .map((index, number) => `${number + 1}. ${chapterLabel(book.chapterOutline, index)}`)
+    .join("\n");
+  const chapterTitle = chapter ? chapterLabelFor(book.chapterOutline, chapter.id) : "正文";
   const chapterText = chapter
     ? flattenChapter(chapter)
         .map((sentence) => sentence.text)
@@ -3430,7 +3445,7 @@ function AiAskPanel({
                   <strong>聊聊这本书</strong>
                   {/* 没配模型时下面那张提示卡已经把话说完了，别再来一句同义的。 */}
                   {configured ? (
-                    <p>《{book.title}》里的观点、人物、细节，想到哪问到哪。</p>
+                    <p>《{displayTitle(book.title)}》里的观点、人物、细节，想到哪问到哪。</p>
                   ) : null}
                 </>
               )}
@@ -3907,6 +3922,7 @@ function ReaderScreen({
     setPopup(null);
   }, []);
   const chapter = book.chapters[chapterIndex];
+  const tocList = useMemo(() => tocIndexes(book.chapters), [book.chapters]);
 
   // 滚动模式是连续阅读：range 覆盖的这几章一起挂在 DOM 里，滑到边缘再往外接一章、
   // 从另一头摘掉一章。分页模式仍旧一次只排当前这一章。
@@ -5202,7 +5218,7 @@ function ReaderScreen({
                 <BookCover book={book} size="small" />
               </div>
               <div className="toc__meta">
-                <strong>{book.title}</strong>
+                <strong>{displayTitle(book.title)}</strong>
                 <span className="toc__pos">
                   页码
                   <b>{`第 ${currentPage} 页，共 ${pagination.total} 页`}</b>
@@ -5219,19 +5235,19 @@ function ReaderScreen({
               </button>
             </div>
             <div className="toc__list" ref={tocListRef}>
-              {book.chapters.map((item, index) => {
-                const active = index === chapterIndex;
+              {tocList.map((index) => {
+                const active = index === tocIndexFor(tocList, chapterIndex);
                 return (
                   <button
                     type="button"
-                    key={item.id}
+                    key={book.chapters[index].id}
                     className={`toc__item ${active ? "is-active" : ""}`}
                     onClick={() => {
                       changeChapter(index);
                       setShowChapters(false);
                     }}
                   >
-                    <span className="toc__title">{item.title}</span>
+                    <span className="toc__title">{chapterLabel(book.chapters, index)}</span>
                     <span className="toc__page">
                       {pagination.chapterStart[index]}
                     </span>
@@ -5418,6 +5434,8 @@ function PlayerScreen({
         )
       : book.listeningPosition ?? initialPosition(book);
   const chapter = book.chapters[basePosition.chapterIndex];
+  const tocList = useMemo(() => tocIndexes(book.chapters), [book.chapters]);
+  const tocActive = tocIndexFor(tocList, basePosition.chapterIndex);
   const sentences = chapter ? flattenChapter(chapter) : [];
   const sentence = sentences[basePosition.sentenceIndex] ?? sentences[0];
   const playing = activeForBook && player.isPlaying;
@@ -5522,8 +5540,8 @@ function PlayerScreen({
         )}
 
         <div className="player-title">
-          <h1>{book.title}</h1>
-          <p>{chapter?.title ?? "正文"}</p>
+          <h1>{displayTitle(book.title)}</h1>
+          <p>{chapter ? chapterLabel(book.chapters, basePosition.chapterIndex) : "正文"}</p>
         </div>
 
         <div className="player-icon-row">
@@ -5612,7 +5630,7 @@ function PlayerScreen({
             onClick={() => setShowChapters(true)}
           >
             <List size={19} />
-            <small>{book.chapters.length} 章</small>
+            <small>{tocList.length} 章</small>
           </button>
         </div>
 
@@ -5638,21 +5656,19 @@ function PlayerScreen({
       {showChapters ? (
         <Modal title="章节列表" onClose={() => setShowChapters(false)}>
           <div className="chapter-list" ref={chapterListRef}>
-            {book.chapters.map((item, index) => (
+            {tocList.map((index, number) => (
               <button
                 type="button"
-                key={item.id}
-                className={index === basePosition.chapterIndex ? "is-active" : ""}
+                key={book.chapters[index].id}
+                className={index === tocActive ? "is-active" : ""}
                 onClick={() => {
                   player.start(book.id, positionFor(book, index, 0));
                   setShowChapters(false);
                 }}
               >
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <strong>{item.title}</strong>
-                {index === basePosition.chapterIndex ? (
-                  <Volume2 size={17} />
-                ) : null}
+                <span>{String(number + 1).padStart(2, "0")}</span>
+                <strong>{chapterLabel(book.chapters, index)}</strong>
+                {index === tocActive ? <Volume2 size={17} /> : null}
               </button>
             ))}
           </div>
@@ -5804,7 +5820,7 @@ function MiniPlayer({
       <button type="button" className="mini-player__main" onClick={onOpen}>
         <BookCover book={book} size="small" />
         <span>
-          <strong>{book.title}</strong>
+          <strong>{displayTitle(book.title)}</strong>
           <small>{chapterTitle}</small>
         </span>
       </button>
@@ -7354,10 +7370,10 @@ export default function MotingApp() {
           {activeBook ? (
             <MiniPlayer
               book={activeBook}
-              chapterTitle={
-                activeBook.chapterOutline[player.location?.chapterIndex ?? 0]?.title ??
-                "正文"
-              }
+              chapterTitle={chapterLabel(
+                activeBook.chapterOutline,
+                player.location?.chapterIndex ?? 0
+              )}
               isPlaying={player.isPlaying}
               isBuffering={player.isBuffering}
               onToggle={player.toggle}
@@ -7428,7 +7444,7 @@ export default function MotingApp() {
           <div className="confirm-dialog">
             <BookCover book={deleteTarget} size="medium" />
             <p>
-              《{deleteTarget.title}》的正文、阅读进度和全部标记都会从当前设备删除。
+              《{displayTitle(deleteTarget.title)}》的正文、阅读进度和全部标记都会从当前设备删除。
             </p>
             <div>
               <SheetCancelButton>取消</SheetCancelButton>

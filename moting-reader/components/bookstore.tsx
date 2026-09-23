@@ -10,6 +10,7 @@ import {
   wereadCoverDisplayUrl,
   wereadCoverUrl,
 } from "../lib/weread";
+import { displayTitle } from "../lib/display-title";
 import { loadCatalog, peekCatalog, rankOf, type StoreCatalog } from "../lib/store-catalog";
 import { readFeed } from "../lib/store-snapshot";
 import {
@@ -145,7 +146,7 @@ export function StoreCard({
           </span>
         ) : null}
       </span>
-      <span className="store-card__title">{book.title}</span>
+      <span className="store-card__title">{displayTitle(book.title)}</span>
       {dense ? null : (
         <span className="store-card__author">{book.author || "作者未提供"}</span>
       )}
@@ -200,7 +201,7 @@ export function StoreRow({
       ) : null}
       <Cover book={book} size="row" priority={priority} />
       <span className="store-row__info">
-        <strong>{book.title}</strong>
+        <strong>{displayTitle(book.title)}</strong>
         <small>{book.author || "作者未提供"}</small>
         <Rating book={book} />
       </span>
