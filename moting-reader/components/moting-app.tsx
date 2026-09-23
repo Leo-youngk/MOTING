@@ -109,7 +109,6 @@ import {
   logoutSync,
   runSync,
   SyncError,
-  type SyncAppliedKind,
 } from "../lib/sync";
 import {
   clearLibrary,
@@ -162,6 +161,7 @@ import {
   totalSeconds,
 } from "../lib/reading-stats";
 import { useReadingSession } from "../hooks/use-reading-session";
+import { wereadCoverDisplayUrl } from "../lib/weread";
 import { useSafeInsets, type SafeInsets } from "../hooks/use-safe-insets";
 import { useTextSelection } from "../hooks/use-text-selection";
 import { SelectionLayer } from "./selection-layer";
@@ -182,8 +182,12 @@ const Bookstore = lazy(() =>
     default: Component,
   }))
 );
+// 主页首屏就要用书城这一块。等 React 渲染到它才开始下载，首屏会多等一个来回；
+// 模块一加载就先发请求，lazy 再取时直接命中同一个 Promise。
+const loadHomeStore = () => import("./home-store");
+if (typeof window !== "undefined") void loadHomeStore();
 const HomeStore = lazy(() =>
-  import("./home-store").then(({ HomeStore: Component }) => ({
+  loadHomeStore().then(({ HomeStore: Component }) => ({
     default: Component,
   }))
 );
@@ -1396,11 +1400,18 @@ function BookMetadataSheet({
                       {candidate.coverUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
-                          src={coverProxyUrl(candidate.coverUrl)}
+                          src={wereadCoverDisplayUrl(candidate.coverUrl, "row")}
                           alt=""
+                          referrerPolicy="no-referrer"
                           loading="lazy"
                           onError={(event) => {
-                            event.currentTarget.style.display = "none";
+                            const image = event.currentTarget;
+                            if (image.dataset.fallback !== "1" && candidate.coverUrl) {
+                              image.dataset.fallback = "1";
+                              image.src = coverProxyUrl(candidate.coverUrl, "row");
+                              return;
+                            }
+                            image.style.display = "none";
                           }}
                         />
                       ) : null}
@@ -1634,85 +1645,126 @@ function NotesCalendar({
   );
 }
 
+/** 一次跨句划线在库里是多条记录，列表上要先合回用户划的那一整段。 */
+function mergeNoteGroups(notes: BookNote[]): BookNote[] {
+  const buckets = new Map<string, BookNote[]>();
+  notes.forEach((note) => {
+    const key = groupKey(note);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(note);
+    else buckets.set(key, [note]);
+  });
+  return Array.from(buckets.values()).map(mergeNoteGroup);
+}
+
+/** 一条笔记：摘录按原色压一道下划线，底下是想法和操作。书内笔记页和旧的跨书列表共用这一种样式。 */
+function InkNote({
+  note,
+  chapterTitle,
+  onOpen,
+  onEditThought,
+  onDelete,
+}: {
+  note: BookNote;
+  /** 已经按章节分段时不再重复显示章节名。 */
+  chapterTitle?: string;
+  onOpen: (note: BookNote) => void;
+  onEditThought: (note: BookNote) => void;
+  onDelete: (note: BookNote) => void;
+}) {
+  const listening = note.kind === "listening-mark";
+  return (
+    <article className="ink-note">
+      <button type="button" className="ink-note__body" onClick={() => onOpen(note)}>
+        <span className="ink-note__meta">
+          {listening ? <Headphones size={11} /> : null}
+          {chapterTitle ? <span className="ink-note__chapter">{chapterTitle}</span> : null}
+          <em>{formatDate(note.createdAt)}</em>
+        </span>
+        <p className="ink-note__text">
+          <span
+            className={
+              listening
+                ? "ink-note__mark ink-note__mark--plain"
+                : `ink-note__mark ink-note__mark--${note.color ?? "yellow"} ink-note__mark--${note.highlightStyle ?? "underline"}`
+            }
+          >
+            {note.excerpt}
+          </span>
+        </p>
+        {note.thought ? <span className="ink-note__thought">{note.thought}</span> : null}
+      </button>
+      <div className="ink-note__actions">
+        <button type="button" onClick={() => onEditThought(note)}>
+          <PencilLine size={13} />
+          {note.thought ? "改想法" : "写想法"}
+        </button>
+        <button type="button" onClick={() => onDelete(note)}>
+          <Trash2 size={13} />
+          删除
+        </button>
+      </div>
+    </article>
+  );
+}
+
+/**
+ * 笔记 tab：先是有笔记的书，点进去才看这本书的笔记（照微信读书「我的笔记」）。
+ * 以前是所有书的笔记一路铺下来，书一多，找某一本的笔记要翻很久。
+ */
 function NotesScreen({
   notes,
   books,
   chats,
   onOpenBook,
-  onOpenNote,
-  onEditThought,
-  onDelete,
   onOpenChat,
 }: {
   notes: BookNote[];
   books: Book[];
   chats: BookAiChat[];
   onOpenBook: (book: Book) => void;
-  onOpenNote: (note: BookNote) => void;
-  onEditThought: (note: BookNote) => void;
-  onDelete: (note: BookNote) => void;
   onOpenChat: (book: Book) => void;
 }) {
-  const [filter, setFilter] = useState<"all" | "highlight" | "thought" | "chat">(
-    "all"
-  );
-  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [tab, setTab] = useState<"notes" | "chat">("notes");
+  const [query, setQuery] = useState("");
 
-  // 一次跨句划线在库里是多条记录，这里先合回一条，列表上才是用户划的那一整段。
-  const merged = useMemo(() => {
-    const buckets = new Map<string, BookNote[]>();
+  // 一本书一行。计数按「一次划线」算，跨句划线不会被数成好几条。
+  const shelves = useMemo(() => {
+    const byBook = new Map<string, { groups: Set<string>; thoughts: Set<string>; latest: number }>();
     notes.forEach((note) => {
+      let entry = byBook.get(note.bookId);
+      if (!entry) byBook.set(note.bookId, (entry = { groups: new Set(), thoughts: new Set(), latest: 0 }));
       const key = groupKey(note);
-      const bucket = buckets.get(key);
-      if (bucket) bucket.push(note);
-      else buckets.set(key, [note]);
-    });
-    return Array.from(buckets.values()).map(mergeNoteGroup);
-  }, [notes]);
-
-  const countsByDay = useMemo(() => {
-    const counts = new Map<string, number>();
-    merged.forEach((note) => {
-      const key = dayKey(note.createdAt);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    });
-    return counts;
-  }, [merged]);
-
-  const groups = useMemo(() => {
-    const visible = merged.filter((note) => {
-      if (selectedDay && dayKey(note.createdAt) !== selectedDay) return false;
-      if (filter === "highlight") return note.kind === "highlight";
-      if (filter === "thought") return Boolean(note.thought);
-      return true;
+      entry.groups.add(key);
+      if (note.thought) entry.thoughts.add(key);
+      entry.latest = Math.max(entry.latest, note.updatedAt ?? note.createdAt);
     });
     return books
-      .map((book) => ({
-        book,
-        items: visible
-          .filter((note) => note.bookId === book.id)
-          .sort((a, b) => b.createdAt - a.createdAt),
-      }))
-      .filter((entry) => entry.items.length)
-      .sort((a, b) => b.items[0].createdAt - a.items[0].createdAt);
-  }, [books, filter, merged, selectedDay]);
+      .filter((book) => byBook.has(book.id))
+      .map((book) => {
+        const entry = byBook.get(book.id)!;
+        return { book, count: entry.groups.size, thoughts: entry.thoughts.size, latest: entry.latest };
+      })
+      .sort((a, b) => b.latest - a.latest);
+  }, [books, notes]);
 
-  const highlights = merged.filter((note) => note.kind === "highlight").length;
-  const thoughts = merged.filter((note) => note.thought).length;
-
-  const chatGroups = useMemo(
+  const chatShelves = useMemo(
     () =>
       chats
         .filter((chat) => chat.turns.length)
         .map((chat) => ({ chat, book: books.find((b) => b.id === chat.bookId) }))
-        .filter(
-          (entry): entry is { chat: BookAiChat; book: Book } => Boolean(entry.book)
-        )
+        .filter((entry): entry is { chat: BookAiChat; book: Book } => Boolean(entry.book))
         .sort((a, b) => b.chat.updatedAt - a.chat.updatedAt),
     [chats, books]
   );
 
-  if (!notes.length && !chats.length) {
+  const needle = query.trim().toLowerCase();
+  const matches = (book: Book) => !needle || `${book.title} ${book.author}`.toLowerCase().includes(needle);
+  const visibleShelves = shelves.filter(({ book }) => matches(book));
+  const visibleChats = chatShelves.filter(({ book }) => matches(book));
+  const totalNotes = shelves.reduce((sum, entry) => sum + entry.count, 0);
+
+  if (!shelves.length && !chatShelves.length) {
     return (
       <div className="screen">
         <LargeHeader title="笔记" />
@@ -1730,166 +1782,119 @@ function NotesScreen({
       <LargeHeader title="笔记" />
 
       <p className="ink-summary">
-        {highlights} 条划线
-        {thoughts ? ` · ${thoughts} 条想法` : ""}
+        {shelves.length} 本书 · {totalNotes} 条笔记
       </p>
 
       <div className="ios-segmented">
         {(
           [
-            ["all", "全部"],
-            ["highlight", "划线"],
-            ["thought", "想法"],
+            ["notes", "笔记"],
             ["chat", "AI 对话"],
           ] as const
         ).map(([id, label]) => (
           <button
             type="button"
             key={id}
-            className={filter === id ? "is-active" : ""}
-            onClick={() => setFilter(id)}
+            className={tab === id ? "is-active" : ""}
+            onClick={() => setTab(id)}
           >
             {label}
           </button>
         ))}
       </div>
 
-      {filter === "chat" ? (
-        !chatGroups.length ? (
+      <label className="ios-search">
+        <Search size={16} />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="搜索书名或作者"
+        />
+        {query ? (
+          <button type="button" aria-label="清除搜索" onClick={() => setQuery("")}>
+            <X size={15} />
+          </button>
+        ) : null}
+      </label>
+
+      {tab === "chat" ? (
+        !chatShelves.length ? (
           <EmptyState
             icon={<Sparkles size={26} />}
             title="还没有 AI 对话"
             description="阅读时选中一段文字问 AI，聊天记录会按书保存在这里。"
           />
+        ) : !visibleChats.length ? (
+          <p className="no-results">没有找到匹配的书籍。</p>
         ) : (
-          <div className="ink-feed">
-            {chatGroups.map(({ book, chat }) => {
+          <div className="ios-inset-list">
+            {visibleChats.map(({ book, chat }) => {
               const last = chat.turns[chat.turns.length - 1];
+              const rounds = chat.turns.filter((turn) => turn.role === "user").length;
               return (
                 <button
                   type="button"
-                  className="ink-group__head"
+                  className="ios-row ios-row--media notes-book-row"
                   key={book.id}
                   onClick={() => onOpenChat(book)}
                 >
-                  <BookCover book={book} size="small" />
-                  <span>
-                    <strong>{book.title}</strong>
-                    <small>{last?.content.slice(0, 30) || book.author}</small>
+                  <span className="ios-row__main">
+                    <BookCover book={book} size="small" />
+                    <span>
+                      <strong>{book.title}</strong>
+                      <small>{last?.content.slice(0, 30) || book.author}</small>
+                      <em>{rounds} 轮对话</em>
+                    </span>
                   </span>
-                  <em>{chat.turns.filter((t) => t.role === "user").length}</em>
+                  <span className="notes-book-row__date">{formatDate(chat.updatedAt)}</span>
                   <ChevronRight size={15} className="ios-row__chevron" />
                 </button>
               );
             })}
           </div>
         )
+      ) : !shelves.length ? (
+        <EmptyState
+          icon={<Highlighter size={26} />}
+          title="还没有划线"
+          description="阅读时选中一段文字，就能划线、写想法；听书时也可以随手标记。"
+        />
+      ) : !visibleShelves.length ? (
+        <p className="no-results">没有找到匹配的书籍。</p>
       ) : (
-        <>
-          <NotesCalendar
-            countsByDay={countsByDay}
-            selected={selectedDay}
-            onSelect={setSelectedDay}
-          />
-
-          {selectedDay ? (
+        <div className="ios-inset-list">
+          {visibleShelves.map(({ book, count, thoughts, latest }) => (
             <button
               type="button"
-              className="notes-day-chip"
-              onClick={() => setSelectedDay(null)}
+              className="ios-row ios-row--media notes-book-row"
+              key={book.id}
+              onClick={() => onOpenBook(book)}
             >
-              只看 {selectedDay.replace(/-/g, ".")}
-              <X size={13} />
-            </button>
-          ) : null}
-
-          {!groups.length ? (
-            <EmptyState
-              icon={<Highlighter size={26} />}
-              title={selectedDay ? "这天没有笔记" : "这里还是空的"}
-              description={
-                selectedDay
-                  ? "换一天看看，或者清除筛选看全部。"
-                  : "换个筛选看看，或者回到正文里划一段。"
-              }
-            />
-          ) : (
-            <div className="ink-feed">
-              {groups.map(({ book, items }) => (
-            <section className="ink-group" key={book.id}>
-              <button
-                type="button"
-                className="ink-group__head"
-                onClick={() => onOpenBook(book)}
-              >
+              <span className="ios-row__main">
                 <BookCover book={book} size="small" />
                 <span>
                   <strong>{book.title}</strong>
                   <small>{book.author}</small>
+                  <em>
+                    {count} 条笔记
+                    {thoughts ? ` · ${thoughts} 条想法` : ""}
+                  </em>
                 </span>
-                <em>{items.length}</em>
-                <ChevronRight size={15} className="ios-row__chevron" />
-              </button>
-
-              {items.map((note) => {
-                const chapter = book.chapters.find(
-                  (item) => item.id === note.chapterId
-                );
-                const listening = note.kind === "listening-mark";
-                return (
-                  <article className="ink-note" key={note.id}>
-                    <button
-                      type="button"
-                      className="ink-note__body"
-                      onClick={() => onOpenNote(note)}
-                    >
-                      <span className="ink-note__meta">
-                        {listening ? <Headphones size={11} /> : null}
-                        <span className="ink-note__chapter">
-                          {chapter?.title ?? "正文"}
-                        </span>
-                        <em>{formatDate(note.createdAt)}</em>
-                      </span>
-                      <p className="ink-note__text">
-                        <span
-                          className={
-                            listening
-                              ? "ink-note__mark ink-note__mark--plain"
-                              : `ink-note__mark ink-note__mark--${note.color ?? "yellow"} ink-note__mark--${note.highlightStyle ?? "underline"}`
-                          }
-                        >
-                          {note.excerpt}
-                        </span>
-                      </p>
-                      {note.thought ? (
-                        <span className="ink-note__thought">
-                          {note.thought}
-                        </span>
-                      ) : null}
-                    </button>
-                    <div className="ink-note__actions">
-                      <button type="button" onClick={() => onEditThought(note)}>
-                        <PencilLine size={13} />
-                        {note.thought ? "改想法" : "写想法"}
-                      </button>
-                      <button type="button" onClick={() => onDelete(note)}>
-                        <Trash2 size={13} />
-                        删除
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
-            </section>
+              </span>
+              <span className="notes-book-row__date">{formatDate(latest)}</span>
+              <ChevronRight size={15} className="ios-row__chevron" />
+            </button>
           ))}
-            </div>
-          )}
-        </>
+        </div>
       )}
     </div>
   );
 }
 
+/**
+ * 一本书的笔记：按章节分段、按在书里的先后排（跟微信读书一致），
+ * 找「第三章划过的那句」不用在时间线里来回翻。日历筛选照旧保留。
+ */
 function BookNotesScreen({
   book,
   notes,
@@ -1905,34 +1910,89 @@ function BookNotesScreen({
   onDelete: (note: BookNote) => void;
   onEditThought: (note: BookNote) => void;
 }) {
-  const [filter, setFilter] = useState<"all" | "thought" | "listening-mark">(
-    "all"
-  );
+  const [filter, setFilter] = useState<"all" | "thought" | "listening-mark">("all");
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+
+  const merged = useMemo(() => mergeNoteGroups(notes), [notes]);
+
+  // 句子在全书里的先后。一本长篇几万句，只在正文变了时算一次。
+  const order = useMemo(() => {
+    const chapterIndex = new Map<string, number>();
+    const sentenceIndex = new Map<string, number>();
+    let position = 0;
+    book.chapters.forEach((chapter, index) => {
+      chapterIndex.set(chapter.id, index);
+      for (const paragraph of chapter.paragraphs) {
+        for (const sentence of paragraph.sentences ?? []) {
+          sentenceIndex.set(sentence.id, position);
+          position += 1;
+        }
+      }
+    });
+    return { chapterIndex, sentenceIndex };
+  }, [book.chapters]);
+
   const countsByDay = useMemo(() => {
     const counts = new Map<string, number>();
-    notes.forEach((note) => {
+    merged.forEach((note) => {
       const key = dayKey(note.createdAt);
       counts.set(key, (counts.get(key) ?? 0) + 1);
     });
     return counts;
-  }, [notes]);
-  const visible = notes.filter((note) => {
-    if (selectedDay && dayKey(note.createdAt) !== selectedDay) return false;
-    if (filter === "thought") return Boolean(note.thought);
-    if (filter === "listening-mark") return note.kind === "listening-mark";
-    return true;
-  });
+  }, [merged]);
+
+  const sections = useMemo(() => {
+    const visible = merged
+      .filter((note) => {
+        if (selectedDay && dayKey(note.createdAt) !== selectedDay) return false;
+        if (filter === "thought") return Boolean(note.thought);
+        if (filter === "listening-mark") return note.kind === "listening-mark";
+        return true;
+      })
+      .sort((a, b) => {
+        const chapterA = order.chapterIndex.get(a.chapterId) ?? Number.MAX_SAFE_INTEGER;
+        const chapterB = order.chapterIndex.get(b.chapterId) ?? Number.MAX_SAFE_INTEGER;
+        if (chapterA !== chapterB) return chapterA - chapterB;
+        const sentenceA = order.sentenceIndex.get(a.sentenceId) ?? Number.MAX_SAFE_INTEGER;
+        const sentenceB = order.sentenceIndex.get(b.sentenceId) ?? Number.MAX_SAFE_INTEGER;
+        return sentenceA - sentenceB || a.createdAt - b.createdAt;
+      });
+    const result: Array<{ chapterId: string; title: string; items: BookNote[] }> = [];
+    for (const note of visible) {
+      const last = result[result.length - 1];
+      if (last && last.chapterId === note.chapterId) {
+        last.items.push(note);
+      } else {
+        const chapter = book.chapters[order.chapterIndex.get(note.chapterId) ?? -1];
+        result.push({ chapterId: note.chapterId, title: chapter?.title ?? "正文", items: [note] });
+      }
+    }
+    return result;
+  }, [book.chapters, filter, merged, order, selectedDay]);
+
+  const thoughts = merged.filter((note) => note.thought).length;
 
   return (
     <div className="screen screen--book-notes">
       <header className="ios-nav-bar">
         <button type="button" className="ios-back" onClick={onBack}>
           <ChevronLeft size={22} />
-          笔记
+          返回
         </button>
-        <span>{book.title}</span>
+        <span>笔记</span>
       </header>
+
+      <div className="book-notes-hero">
+        <BookCover book={book} size="small" />
+        <span>
+          <strong>{book.title}</strong>
+          <small>{book.author}</small>
+          <em>
+            {merged.length} 条笔记
+            {thoughts ? ` · ${thoughts} 条想法` : ""}
+          </em>
+        </span>
+      </div>
 
       <div className="ios-segmented">
         {(
@@ -1953,76 +2013,39 @@ function BookNotesScreen({
         ))}
       </div>
 
-      <NotesCalendar
-        countsByDay={countsByDay}
-        selected={selectedDay}
-        onSelect={setSelectedDay}
-      />
+      <NotesCalendar countsByDay={countsByDay} selected={selectedDay} onSelect={setSelectedDay} />
 
       {selectedDay ? (
-        <button
-          type="button"
-          className="notes-day-chip"
-          onClick={() => setSelectedDay(null)}
-        >
+        <button type="button" className="notes-day-chip" onClick={() => setSelectedDay(null)}>
           只看 {selectedDay.replace(/-/g, ".")}
           <X size={13} />
         </button>
       ) : null}
 
-      {!visible.length ? (
+      {!sections.length ? (
         <EmptyState
           icon={<Highlighter size={26} />}
           title={selectedDay ? "这天没有笔记" : "这里还是空的"}
           description={
-            selectedDay
-              ? "换一天看看，或者清除筛选看全部。"
-              : "换个筛选，或者回到正文里划一段。"
+            selectedDay ? "换一天看看，或者清除筛选看全部。" : "换个筛选，或者回到正文里划一段。"
           }
         />
       ) : (
-        <div className="note-feed">
-          {visible.map((note) => {
-            const chapter = book.chapters.find(
-              (item) => item.id === note.chapterId
-            );
-            return (
-              <article
-                className={`note-card note-card--${note.color ?? "yellow"}`}
-                key={note.id}
-              >
-                <button
-                  type="button"
-                  className="note-card__body"
-                  onClick={() => onOpen(note)}
-                >
-                  <span className="note-card__chapter">
-                    {note.kind === "listening-mark" ? (
-                      <Headphones size={12} />
-                    ) : (
-                      <Highlighter size={12} />
-                    )}
-                    {chapter?.title ?? "正文"}
-                  </span>
-                  <p>{note.excerpt}</p>
-                  {note.thought ? (
-                    <span className="note-card__thought">{note.thought}</span>
-                  ) : null}
-                  <small>{formatDate(note.createdAt)}</small>
-                </button>
-                <div className="note-card__actions">
-                  <button type="button" onClick={() => onEditThought(note)}>
-                    <PencilLine size={14} />
-                    {note.thought ? "改想法" : "写想法"}
-                  </button>
-                  <button type="button" onClick={() => onDelete(note)}>
-                    <Trash2 size={14} />
-                    删除
-                  </button>
-                </div>
-              </article>
-            );
-          })}
+        <div className="ink-feed ink-feed--book">
+          {sections.map((section) => (
+            <section className="ink-chapter" key={section.chapterId}>
+              <h3 className="ink-chapter__title">{section.title}</h3>
+              {section.items.map((note) => (
+                <InkNote
+                  key={note.id}
+                  note={note}
+                  onOpen={onOpen}
+                  onEditThought={onEditThought}
+                  onDelete={onDelete}
+                />
+              ))}
+            </section>
+          ))}
         </div>
       )}
     </div>
@@ -5839,7 +5862,7 @@ export default function MotingApp() {
   }, []);
 
   const scheduleSyncReload = useCallback(
-    (_kind: SyncAppliedKind) => {
+    () => {
       if (syncReloadTimerRef.current !== null) return;
       syncReloadTimerRef.current = window.setTimeout(() => {
         syncReloadTimerRef.current = null;
@@ -5869,8 +5892,8 @@ export default function MotingApp() {
         setLastSyncAt(result.syncedAt);
         if (result.failedContent.length) {
           showToast(`${result.failedContent.length} 本书超出云端大小上限,未能同步`);
-        } else if (result.tooLarge) {
-          showToast(`${result.tooLarge} 条记录超出云端单条上限,未能同步`);
+        } else if (result.skipped) {
+          showToast(`${result.skipped} 条记录超出云端上限或数据异常,未能同步`);
         } else if (manual) {
           showToast(result.changed ? "同步完成" : "云端没有新变更");
         }
@@ -5888,7 +5911,7 @@ export default function MotingApp() {
         if (!controller.signal.aborted) setSyncing(false);
       }
     },
-    [reloadFromStorage, scheduleSyncReload, showToast]
+    [scheduleSyncReload, showToast]
   );
 
   const handleSyncLogin = useCallback(
@@ -7141,12 +7164,6 @@ export default function MotingApp() {
                 onOpenBook={(book) =>
                   navigate({ name: "book-notes", bookId: book.id })
                 }
-                onOpenNote={openNote}
-                onDelete={deleteBookNote}
-                onEditThought={(note) => {
-                  setThoughtTarget(note);
-                  setThoughtDraft(note.thought ?? "");
-                }}
                 onOpenChat={setChatBook}
               />
             )}

@@ -49,6 +49,8 @@ export interface SyncTombstones {
  * - pullCursor:服务端号段(server_at)。下次 pull 从这里接着拉。
  */
 export interface SyncState {
+  /** 同步协议的数据版本。客户端新增同步类别时加一,旧版本的设备会整体补传一次。 */
+  schema: number;
   pushedAt: number;
   pullCursor: number;
   tombstones: SyncTombstones;
@@ -56,6 +58,7 @@ export interface SyncState {
 }
 
 const DEFAULT_SYNC_STATE: SyncState = {
+  schema: 0,
   pushedAt: 0,
   pullCursor: 0,
   tombstones: { books: {}, notes: {} },
@@ -339,6 +342,7 @@ export async function getSyncState(): Promise<SyncState> {
   if (!state || typeof state !== "object") return { ...DEFAULT_SYNC_STATE, tombstones: { books: {}, notes: {} } };
   const stored = state as Partial<SyncState>;
   return {
+    schema: typeof stored.schema === "number" ? stored.schema : 0,
     pushedAt: typeof stored.pushedAt === "number" ? stored.pushedAt : 0,
     pullCursor: typeof stored.pullCursor === "number" ? stored.pullCursor : 0,
     tombstones: {
@@ -357,11 +361,21 @@ export async function saveSyncState(state: SyncState): Promise<void> {
 }
 
 /** settings 本身的修改时间,LWW 用;没有它就分不清「没改」和「改了」。 */
+/**
+ * settings 的修改时间。存过设置但没有 mtime 的(同步上线前保存的)记为 1:
+ * 它要能被推上去,但任何一台设备上真正改过的设置都比它新。
+ * 从没存过设置(全是默认值)的设备记 0,不推,等着拉别人的。
+ */
 export async function getSettingsMtime(): Promise<number> {
   const db = await openDatabase();
   const transaction = db.transaction(SETTINGS_STORE, "readonly");
-  const mtime = await requestToPromise(transaction.objectStore(SETTINGS_STORE).get(SETTINGS_MTIME_KEY));
-  return typeof mtime === "number" ? mtime : 0;
+  const store = transaction.objectStore(SETTINGS_STORE);
+  const [mtime, settings] = await Promise.all([
+    requestToPromise(store.get(SETTINGS_MTIME_KEY)),
+    requestToPromise(store.get("reader")),
+  ]);
+  if (typeof mtime === "number") return mtime;
+  return settings ? 1 : 0;
 }
 
 /**
@@ -572,6 +586,41 @@ export async function saveSettings(
   // 同步拉回来的新设置用它自己的远程时间,避免本地时间把 LWW 摚乱。
   store.put(mtime, SETTINGS_MTIME_KEY);
   await transactionDone(transaction);
+}
+
+/** 早期版本存下的每日阅读时长基数;没有就是 null(新设备,或从没用过早期版本)。 */
+export async function getLegacyStats(): Promise<ReadingStats | null> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readonly");
+  const stats = await requestToPromise(transaction.objectStore(SETTINGS_STORE).get("stats"));
+  if (!stats || typeof stats !== "object") return null;
+  const days = (stats as Partial<ReadingStats>).days;
+  return days && typeof days === "object" && Object.keys(days).length ? { days } : null;
+}
+
+/**
+ * 把别的设备的历史基数并进来:同一天取较大值。按天取大是幂等的,
+ * 重复拉取、两台设备互相合并都不会把时长越加越多。返回本地是否有变化。
+ */
+export async function mergeLegacyStats(remote: ReadingStats): Promise<boolean> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readwrite");
+  const store = transaction.objectStore(SETTINGS_STORE);
+  let changed = false;
+  // get→put 用回调串在同一事务里;中间插 await 的话 Safari 可能先把事务提交掉。
+  const request = store.get("stats");
+  request.onsuccess = () => {
+    const current = request.result as Partial<ReadingStats> | undefined;
+    const days: Record<string, number> = { ...(current?.days ?? {}) };
+    for (const [day, seconds] of Object.entries(remote.days ?? {})) {
+      if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= (days[day] ?? 0)) continue;
+      days[day] = seconds;
+      changed = true;
+    }
+    if (changed) store.put({ ...(current ?? {}), days }, "stats");
+  };
+  await transactionDone(transaction);
+  return changed;
 }
 
 export async function getStats(): Promise<ReadingStats> {

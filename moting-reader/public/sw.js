@@ -43,22 +43,22 @@ self.addEventListener("fetch", (event) => {
 
   // 分类书目是会重抓更新的静态数据，不能跟图标一样 cache-first 钉死，
   // 否则重抓之后已装的 PWA 永远读旧的那份。
-  // network-first：在线时永远最新，离线回落到上次缓存的。
+  // stale-while-revalidate：有缓存先给缓存（进书城不再每次等一个来回），
+  // 同时在后台取新的存起来，重新部署过的书目下次打开就是新的；离线时照样有得看。
   if (url.pathname.startsWith("/catalog/")) {
     event.respondWith(
-      fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            event.waitUntil(
-              caches.open(CACHE_NAME)
-                .then((cache) => cache.put(request, copy))
-                .catch(() => undefined)
-            );
-          }
-          return response;
-        })
-        .catch(() => caches.match(request))
+      caches.open(CACHE_NAME).then(async (cache) => {
+        const cached = await cache.match(request);
+        const refresh = fetch(request).then((response) => {
+          if (!response.ok) return response;
+          return cache.put(request, response.clone()).then(() => response);
+        });
+        if (cached) {
+          event.waitUntil(refresh.catch(() => undefined));
+          return cached;
+        }
+        return refresh;
+      })
     );
     return;
   }

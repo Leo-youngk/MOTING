@@ -1494,97 +1494,6 @@ button:disabled {
     var(--glass-shadow);
 }
 
-.note-feed {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-/* 卡片左侧的色条对应划线颜色，和正文里那一笔是同一套。 */
-.note-card {
-  overflow: hidden;
-  border-radius: 12px;
-  background: var(--paper-deep);
-  border-left: 4px solid var(--note-color, var(--mark-yellow));
-}
-
-.note-card--yellow {
-  --note-color: var(--mark-yellow);
-}
-
-.note-card--green {
-  --note-color: var(--mark-green);
-}
-
-.note-card--blue {
-  --note-color: var(--mark-blue);
-}
-
-.note-card--pink {
-  --note-color: var(--mark-pink);
-}
-
-.note-card__body {
-  display: flex;
-  width: 100%;
-  flex-direction: column;
-  gap: 8px;
-  padding: 14px 15px 12px;
-  background: transparent;
-  text-align: left;
-}
-
-.note-card__chapter {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.note-card__body p {
-  margin: 0;
-  font-family: var(--font-serif);
-  font-size: 16px;
-  line-height: 1.75;
-}
-
-.note-card__thought {
-  padding: 9px 11px;
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--surface-strong) 80%, transparent);
-  color: var(--ink);
-  font-size: 14px;
-  line-height: 1.65;
-}
-
-.note-card__body small {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.note-card__actions {
-  display: flex;
-  gap: 4px;
-  padding: 0 9px 9px;
-}
-
-.note-card__actions button {
-  display: inline-flex;
-  min-height: 32px;
-  align-items: center;
-  gap: 5px;
-  padding: 0 11px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-strong) 80%, transparent);
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.note-card__actions button:last-child {
-  color: var(--danger);
-}
-
 /* 笔记 tab：不用卡片，靠留白和一条墨线分段。摘录用宋体，
    划线本身按原色压在字脚下当一道底纹——看着就是书页上留下的那一笔。 */
 .notes-calendar {
@@ -1710,46 +1619,66 @@ button:disabled {
   margin-top: 20px;
 }
 
-.ink-group__head {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 12px;
-  padding: 0 0 13px;
-  border-bottom: 1px solid color-mix(in srgb, var(--ink) 13%, transparent);
-  background: none;
-  text-align: left;
+.ink-feed--book {
+  gap: 30px;
+  margin-top: 6px;
 }
 
-.ink-group__head > span {
-  display: grid;
-  min-width: 0;
-  flex: 1;
-  gap: 3px;
-}
-
-.ink-group__head strong {
+/* 书内笔记按章节分段：章节名是一条细墨线上的小字，不抢摘录的戏。 */
+.ink-chapter__title {
+  margin: 0;
+  padding: 0 0 10px;
   overflow: hidden;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 13%, transparent);
+  color: var(--muted);
   font-family: var(--font-serif);
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 500;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.04em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ink-group__head small {
-  color: var(--muted);
-  font-size: 11px;
+.book-notes-hero {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin: 0 0 18px;
 }
 
-.ink-group__head em {
-  flex-shrink: 0;
-  color: var(--subtle);
+.book-notes-hero > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.book-notes-hero strong {
+  overflow: hidden;
   font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.book-notes-hero small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.book-notes-hero em {
+  color: var(--accent);
   font-size: 12px;
   font-style: normal;
-  letter-spacing: 0.06em;
+}
+
+.notes-book-row__date {
+  flex: 0 0 auto;
+  color: var(--subtle);
+  font-size: 12px;
 }
 
 .ink-note {

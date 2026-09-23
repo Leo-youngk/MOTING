@@ -7,7 +7,8 @@ export type SyncTable =
   | "sessions"
   | "settings"
   | "chats"
-  | "patches";
+  | "patches"
+  | "listening";
 
 export interface SyncRow {
   key: string;
@@ -46,6 +47,7 @@ const VALUE_COLUMN: Record<SyncTable, string> = {
   settings: "data",
   chats: "data",
   patches: "data",
+  listening: "data",
 };
 const KEY_COLUMN: Record<SyncTable, string> = {
   books: "id",
@@ -55,6 +57,7 @@ const KEY_COLUMN: Record<SyncTable, string> = {
   settings: "key",
   chats: "book_id",
   patches: "book_id",
+  listening: "book_id",
 };
 const HAS_TOMBSTONE: Record<SyncTable, boolean> = {
   books: true,
@@ -64,6 +67,7 @@ const HAS_TOMBSTONE: Record<SyncTable, boolean> = {
   settings: false,
   chats: false,
   patches: false,
+  listening: false,
 };
 const HAS_BOOK_ID: Record<SyncTable, boolean> = {
   books: false,
@@ -73,6 +77,7 @@ const HAS_BOOK_ID: Record<SyncTable, boolean> = {
   settings: false,
   chats: false,
   patches: false,
+  listening: false,
 };
 
 /**

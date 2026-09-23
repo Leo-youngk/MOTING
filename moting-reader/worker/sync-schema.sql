@@ -70,3 +70,13 @@ CREATE TABLE IF NOT EXISTS patches (
   updated_at INTEGER NOT NULL,
   server_at INTEGER NOT NULL
 );
+
+-- 听书进度。它存在客户端 Book 记录里,跟书籍 meta 一起走会被 meta 的 LWW 连带覆盖,
+-- 所以单独一张表,按位置自己的 updatedAt 比新旧。
+CREATE TABLE IF NOT EXISTS listening (
+  book_id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  server_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_listening_server ON listening (server_at);

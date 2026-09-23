@@ -23,6 +23,8 @@ const UPSTREAM_TIMEOUT_MS = 12_000;
 const SEARCH_CACHE_SECONDS = 60 * 60 * 6;
 const BOOK_CACHE_SECONDS = 60 * 60 * 24;
 const FEED_CACHE_SECONDS = 60 * 30;
+/** 某本书的相似推荐几乎不变，首次回源要 1.7 秒，缓存一天。「为你推荐」仍按上面的半小时刷新。 */
+const SIMILAR_CACHE_SECONDS = 60 * 60 * 24;
 const COVER_CACHE_SECONDS = 60 * 60 * 24 * 30;
 /**
  * 推荐和相似推荐的回包不带评分，得按本补查。
@@ -426,7 +428,7 @@ async function handleSimilar(
   const key = new Request(
     `${url.origin}/api/weread/similar?${new URLSearchParams({ bookId, maxIdx: String(maxIdx), count: String(size) })}`
   );
-  return cached(cache, ctx, key, FEED_CACHE_SECONDS, async () => {
+  return cached(cache, ctx, key, SIMILAR_CACHE_SECONDS, async () => {
     // maxIdx 和 sessionId 必须都带上，少一个网关就回「参数格式错误」——文档没写这条。
     const data = await gateway(
       "/book/similar",

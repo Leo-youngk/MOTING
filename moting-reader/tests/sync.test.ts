@@ -5,9 +5,11 @@ import type { SyncRow, SyncStore, SyncTable } from "../worker/sync-store.ts";
 import {
   bookPushTime,
   COVER_IMAGE_ID,
+  forEachLimit,
   mergeBookMeta,
   mergeNote,
   mergePosition,
+  newerListening,
   splitPayload,
   toSyncBookMeta,
   toSyncPatch,
@@ -253,18 +255,68 @@ test("tombstone delete propagates to pull with deletedAt", async () => {
 // ---------------------------------------------------------------------------
 // 输入校验:恶意请求打不到 store。
 
-test("cross-site, bad method and malformed records never touch the store", async () => {
+test("cross-site, bad method and malformed requests are refused outright", async () => {
   const { e } = env();
   const cookie = await loginCookie(e);
   const cases: [Request, number][] = [
     [syncRequest("push", { books: [] }, { origin: "https://attacker.example" }), 403],
     [new Request("https://reader.example/api/sync/push", { method: "DELETE", headers: { "content-type": "application/json" } }), 405],
-    [syncRequest("push", { books: [{ key: "../etc", data: "{}", updatedAt: 1 }] }, { cookie }), 400],
-    [syncRequest("push", { books: [{ key: "ok", data: "{}", updatedAt: -1 }] }, { cookie }), 400],
-    [syncRequest("push", { settings: [{ key: "Bad Key", data: "{}", updatedAt: 1 }] }, { cookie }), 400],
+    [syncRequest("push", { books: "not-a-list" }, { cookie }), 400],
     [syncRequest("pull", { since: -1 }, { cookie }), 400],
   ];
   for (const [input, status] of cases) assert.equal((await handleSync(input, e)).status, status);
+});
+
+test("a malformed record is skipped and reported; the good ones in the same batch still land", async () => {
+  const { e, store } = env();
+  const cookie = await loginCookie(e);
+  const future = Date.now() + 3 * 24 * 3600 * 1000; // 时钟快了三天的设备
+  const response = await handleSync(
+    syncRequest("push", {
+      books: [
+        { key: "../etc", data: "{}", updatedAt: 1 },
+        { key: "skewed", data: "{}", updatedAt: future },
+        { key: "good", data: JSON.stringify({ id: "good" }), updatedAt: 10 },
+      ],
+      settings: [{ key: "Bad Key", data: "{}", updatedAt: 1 }],
+    }, { cookie }),
+    e
+  );
+  assert.equal(response.status, 200);
+  const body = await jsonOf<{ rejected: Record<string, string[]> }>(response);
+  assert.deepEqual(body.rejected, { books: ["../etc", "skewed"], settings: ["Bad Key"] });
+  assert.deepEqual([...(store.rows.get("books")?.keys() ?? [])], ["good"]);
+  assert.equal(store.rows.get("settings")?.size ?? 0, 0);
+});
+
+test("listening progress has its own table and pulls back by key", async () => {
+  const { e } = env();
+  const cookie = await loginCookie(e);
+  const position = { chapterId: "c1", chapterIndex: 0, sentenceId: "s9", sentenceIndex: 9, percent: 40, updatedAt: 500 };
+  await handleSync(syncRequest("push", { listening: [{ key: "b1", data: JSON.stringify(position), updatedAt: 500 }] }, { cookie }), e);
+  // 更旧的进度晚到,不能覆盖。
+  await handleSync(syncRequest("push", { listening: [{ key: "b1", data: JSON.stringify({ ...position, sentenceId: "s1", updatedAt: 100 }), updatedAt: 100 }] }, { cookie }), e);
+  const { pages } = await pullAll(e, cookie);
+  assert.deepEqual(pages[0].listening.map((row) => (row.data as { sentenceId: string }).sentenceId), ["s9"]);
+});
+
+test("HEAD on content and images answers existence without a body, so an interrupted upload can resume", async () => {
+  const { e } = env();
+  const cookie = await loginCookie(e);
+  const head = (path: string) =>
+    handleSync(new Request(`https://reader.example/api/sync/${path}`, { method: "HEAD", headers: { origin: "https://reader.example", cookie } }), e);
+  assert.equal((await head("book/b1/content")).status, 404);
+  await handleSync(
+    new Request("https://reader.example/api/sync/book/b1/content", { method: "POST", headers: { "content-type": "application/json", origin: "https://reader.example", cookie }, body: "[]" }),
+    e
+  );
+  const found = await head("book/b1/content");
+  assert.equal(found.status, 200);
+  assert.equal(await found.text(), "");
+  assert.equal((await head("book/b1/images/_cover")).status, 404);
+  // 没登录的 HEAD 也得挡住,不能拿来探测别人的书。
+  const anonymous = await handleSync(new Request("https://reader.example/api/sync/book/b1/content", { method: "HEAD", headers: { origin: "https://reader.example" } }), e);
+  assert.equal(anonymous.status, 401);
 });
 
 // ---------------------------------------------------------------------------
@@ -378,4 +430,38 @@ test("covers stay out of D1: book meta and patch original drop their data URLs",
   // 补全来的新封面很小,而且对端没有别的来源,要保留。
   assert.equal(patch.applied.coverDataUrl, "data:image/jpeg;base64,BBBB");
   assert.match(COVER_IMAGE_ID, /^[A-Za-z0-9_-]{1,64}$/);
+});
+
+test("newerListening only takes a strictly newer remote position", () => {
+  const local = { sentenceId: "s5", updatedAt: 200 };
+  assert.equal(newerListening(local, { sentenceId: "s9", updatedAt: 300 })?.sentenceId, "s9");
+  assert.equal(newerListening(local, { sentenceId: "s1", updatedAt: 200 }), null);
+  assert.equal(newerListening(undefined, { sentenceId: "s1", updatedAt: 1 })?.sentenceId, "s1");
+  assert.equal(newerListening(local, undefined), null);
+});
+
+test("forEachLimit keeps at most N tasks in flight and stops taking new work after a failure", async () => {
+  let running = 0;
+  let peak = 0;
+  const done: number[] = [];
+  await forEachLimit([1, 2, 3, 4, 5, 6, 7, 8, 9], 4, async (n) => {
+    running += 1;
+    peak = Math.max(peak, running);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    running -= 1;
+    done.push(n);
+  });
+  assert.equal(peak, 4);
+  assert.equal(done.length, 9);
+
+  const started: number[] = [];
+  await assert.rejects(
+    forEachLimit([1, 2, 3, 4, 5, 6, 7, 8, 9], 2, async (n) => {
+      started.push(n);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (n === 2) throw new Error("boom");
+    }),
+    /boom/
+  );
+  assert.ok(started.length < 9, `should stop early, started ${started.length}`);
 });

@@ -39,6 +39,7 @@ const TABLES: Record<string, { table: SyncTable; tombstones: boolean; needsBookI
   settings: { table: "settings", tombstones: false, needsBookId: false, keyPattern: SETTING_KEY_PATTERN },
   chats: { table: "chats", tombstones: false, needsBookId: false, keyPattern: SYNC_KEY_PATTERN },
   patches: { table: "patches", tombstones: false, needsBookId: false, keyPattern: SYNC_KEY_PATTERN },
+  listening: { table: "listening", tombstones: false, needsBookId: false, keyPattern: SYNC_KEY_PATTERN },
 };
 
 class SyncError extends Error {
@@ -132,7 +133,8 @@ interface ParsedPush {
 
 /**
  * 单条 push 记录的解析:键格式、时间戳合理性。墓碑允许无 data、无 bookId。
- * 体积不在这里判:超过 D1 单行上限的记录由 handlePush 跳过并回报,不拖垮整批。
+ * 这里抛的错只让这一条被跳过(handlePush 收进 rejected 回报),不拖垮整批——
+ * 否则一条坏记录(比如时钟快了一天的设备写的)会让之后每一轮同步都失败。
  */
 function parsePushItem(raw: unknown, config: (typeof TABLES)[string], now: number): ParsedPush {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new SyncError("push 记录格式不对");
@@ -172,12 +174,21 @@ async function handlePush(request: Request, { store }: Resolved): Promise<Respon
 
   const accepted: ParsedPush[] = [];
   const tooLarge: Record<string, string[]> = {};
+  const rejected: Record<string, string[]> = {};
   for (const [name, config] of Object.entries(TABLES)) {
     const list = body[name];
     if (list === undefined || list === null) continue;
     if (!Array.isArray(list) || list.length > PUSH_ITEM_LIMIT) throw new SyncError(`${name} 记录数无效`);
     for (const raw of list) {
-      const parsed = parsePushItem(raw, config, now);
+      let parsed: ParsedPush;
+      try {
+        parsed = parsePushItem(raw, config, now);
+      } catch (error) {
+        if (!(error instanceof SyncError)) throw error;
+        const key = raw && typeof raw === "object" && typeof (raw as Json).key === "string" ? String((raw as Json).key).slice(0, 64) : "";
+        (rejected[name] ??= []).push(key);
+        continue;
+      }
       const { row } = parsed;
       // D1 单个参数/单行上限 2 MB:超了的记录跳过并回报,其余照常入库。
       const bytes = packedRowBytes({ i: 0, k: row.key, d: row.data, u: row.updatedAt, x: row.deletedAt, b: row.bookId });
@@ -190,7 +201,9 @@ async function handlePush(request: Request, { store }: Resolved): Promise<Respon
   }
   if (accepted.length > PUSH_ITEM_LIMIT) throw new SyncError("单次上传记录过多");
   await store.applyPush(accepted);
-  return json({ tooLarge });
+  const skipped = Object.values(rejected).reduce((sum, keys) => sum + keys.length, 0);
+  if (skipped) console.warn("sync_push_rejected", { count: skipped });
+  return json({ tooLarge, rejected });
 }
 
 /**
@@ -249,6 +262,10 @@ function imageKey(bookId: string, imageId: string): string {
 async function handleBookContent(request: Request, { store, bucket }: Resolved, bookId: string): Promise<Response> {
   if (!(await validSession(request, store))) return json({ error: "请先登录同步账号" }, 401);
   if (!SYNC_KEY_PATTERN.test(bookId)) return json({ error: "书籍编号无效" }, 400);
+  if (request.method === "HEAD") {
+    const exists = await bucket.head(contentKey(bookId));
+    return new Response(null, { status: exists ? 200 : 404, headers: { "cache-control": "no-store" } });
+  }
   if (request.method === "GET") {
     const object = await bucket.get(contentKey(bookId));
     if (!object || !object.body) return json({ error: "云端没有这本书的正文" }, 404);
@@ -271,7 +288,7 @@ async function handleBookContent(request: Request, { store, bucket }: Resolved, 
     await bucket.put(contentKey(bookId), body, { httpMetadata: { contentType: "application/json" } });
     return json({ stored: true });
   }
-  return json({ error: "只支持 GET 或 POST 请求" }, 405);
+  return json({ error: "只支持 GET、HEAD 或 POST 请求" }, 405);
 }
 
 async function handleBookImage(
@@ -282,6 +299,10 @@ async function handleBookImage(
 ): Promise<Response> {
   if (!(await validSession(request, store))) return json({ error: "请先登录同步账号" }, 401);
   if (!SYNC_KEY_PATTERN.test(bookId) || !SYNC_KEY_PATTERN.test(imageId)) return json({ error: "书籍或插图编号无效" }, 400);
+  if (request.method === "HEAD") {
+    const exists = await bucket.head(imageKey(bookId, imageId));
+    return new Response(null, { status: exists ? 200 : 404, headers: { "cache-control": "no-store" } });
+  }
   if (request.method === "GET") {
     const object = await bucket.get(imageKey(bookId, imageId));
     if (!object || !object.body) return json({ error: "云端没有这张插图" }, 404);
@@ -307,12 +328,14 @@ async function handleBookImage(
     });
     return json({ stored: true });
   }
-  return json({ error: "只支持 GET 或 POST 请求" }, 405);
+  return json({ error: "只支持 GET、HEAD 或 POST 请求" }, 405);
 }
 
 export async function handleSync(request: Request, env: SyncEnv): Promise<Response> {
   try {
-    if (request.method !== "GET" && request.method !== "POST") return json({ error: "只支持 GET 或 POST 请求" }, 405);
+    if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "POST") {
+      return json({ error: "只支持 GET、HEAD 或 POST 请求" }, 405);
+    }
     const origin = request.headers.get("origin");
     if (origin && origin !== new URL(request.url).origin) return json({ error: "不允许跨站请求" }, 403);
     const url = new URL(request.url);
@@ -380,7 +403,8 @@ export async function forwardSync(request: Request, upstream: string): Promise<R
       headers,
       body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
       redirect: "manual",
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(180_000)]),
+      // 比客户端最长的等待(正文上传 300 秒)再宽一点,慢网上传大书时不能先被这一层掐断。
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(330_000)]),
     });
   } catch (error) {
     if (request.signal.aborted) throw error;

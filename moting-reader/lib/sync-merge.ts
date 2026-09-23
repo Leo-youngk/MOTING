@@ -23,6 +23,7 @@ export interface PushPayload {
   settings?: PushItem[];
   chats?: PushItem[];
   patches?: PushItem[];
+  listening?: PushItem[];
 }
 
 // 服务端单次限 500 条、32 MB;这里更保守,条数和字节两道闸。
@@ -128,4 +129,43 @@ export function mergePosition<R extends { savedAt: number }>(
   const record = remote.data as R;
   if (localSavedAt !== undefined && record.savedAt <= localSavedAt) return { op: "keep" };
   return { op: "write", value: record };
+}
+
+/**
+ * 听书进度:按位置自己的 updatedAt 比新旧,远端更新才返回它。
+ * 它不跟书籍 meta 走——meta 的 LWW 看的是整本书最后被谁改过,会把刚听过的进度用对端的旧值盖掉。
+ */
+export function newerListening<P extends { updatedAt: number }>(
+  local: P | undefined,
+  remote: P | undefined
+): P | null {
+  if (!remote || typeof remote !== "object" || !Number.isFinite(remote.updatedAt)) return null;
+  if (local && remote.updatedAt <= local.updatedAt) return null;
+  return remote;
+}
+
+/**
+ * 限并发地逐个处理。插图一本书几十张,串行时每张都要付一次两跳往返;
+ * 任何一个失败就不再领新任务,把第一个错误抛出去。
+ */
+export async function forEachLimit<T>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<void>
+): Promise<void> {
+  let next = 0;
+  let failure: { error: unknown } | null = null;
+  const worker = async () => {
+    while (!failure && next < items.length) {
+      const item = items[next];
+      next += 1;
+      try {
+        await task(item);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure) throw (failure as { error: unknown }).error;
 }

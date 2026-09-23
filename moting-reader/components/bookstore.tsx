@@ -7,6 +7,7 @@ import {
   fetchWereadRecommend,
   fetchWereadSimilar,
   searchWeread,
+  wereadCoverDisplayUrl,
   wereadCoverUrl,
 } from "../lib/weread";
 import { loadCatalog, rankOf, type StoreCatalog } from "../lib/store-catalog";
@@ -54,13 +55,23 @@ export function Cover({
       {book.coverUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={wereadCoverUrl(book.coverUrl, size)}
+          src={wereadCoverDisplayUrl(book.coverUrl, size)}
           alt=""
+          referrerPolicy="no-referrer"
           loading={large || priority ? "eager" : "lazy"}
           fetchPriority={large || priority ? "high" : "auto"}
           decoding="async"
           onError={(event) => {
-            event.currentTarget.style.display = "none";
+            // 直连失败(图床改了策略)先退回 Worker 转发;转发也失败才藏起来露出占位图标。
+            const image = event.currentTarget;
+            const proxied = wereadCoverUrl(book.coverUrl!, size);
+            if (image.dataset.fallback !== "1") {
+              image.dataset.fallback = "1";
+              console.warn("weread_cover_direct_failed", { bookId: book.bookId });
+              image.src = proxied;
+              return;
+            }
+            image.style.display = "none";
           }}
         />
       ) : null}

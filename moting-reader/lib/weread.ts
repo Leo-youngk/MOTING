@@ -25,7 +25,32 @@ const COVER_SIZES = {
 } as const;
 
 /**
- * 封面必须经 Worker 转发：微信读书图床不给 CORS 头，直接取会把 canvas 污染掉。
+ * 页面上展示用的封面：直连微信读书图床。
+ *
+ * 实测首张 94 ms，经 Worker 转发要 1.3 s（转发多一跳出境，缓存命中也要 300 ms）。
+ * 图床不校验来源（空 / 本站 / 陌生 Referer 都给 200），<img> 也不需要 CORS。
+ * 链接不是 https 的微信读书图床时退回转发——服务端已经规整过，这里只是兜底。
+ * 图床哪天拦了直连，BookCover 的 onError 会切回转发地址，界面上不会空。
+ */
+export function wereadCoverDisplayUrl(
+  coverUrl: string,
+  size: keyof typeof COVER_SIZES = "large"
+): string {
+  const target = coverUrl.replace(COVER_VARIANT, `/${COVER_SIZES[size]}`);
+  try {
+    const url = new URL(target);
+    // 跟 worker/weread.ts 的 coverLink 白名单一致。
+    if (url.protocol === "https:" && /^cdn\.weread\.qq\.com$|\.image\.myqcloud\.com$/.test(url.hostname)) {
+      return url.toString();
+    }
+  } catch {
+    // 落到下面的转发。
+  }
+  return wereadCoverUrl(coverUrl, size);
+}
+
+/**
+ * 要读像素的封面必须经 Worker 转发：微信读书图床不给 CORS 头，直接取会把 canvas 污染掉。
  * 默认取大图——书籍资料那条链路要把封面压到 440px 存进书库，拿小图会糊。
  */
 export function wereadCoverUrl(
