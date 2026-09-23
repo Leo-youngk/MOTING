@@ -178,7 +178,9 @@ import {
   type Rect,
 } from "../lib/popover-placement";
 import { EDGE_VOICES } from "../lib/edge-voices";
+import { Bookstore } from "./bookstore";
 import { HomeStore } from "./home-store";
+import { OnlineLibrary } from "./online-library";
 
 /**
  * 发了新版之后，还开着的旧页面去取自己那一版的分片会 404（Workers 只留最新一版的文件）。
@@ -202,25 +204,20 @@ function freshImport<T>(load: () => Promise<T>): Promise<T> {
   });
 }
 
-// 不在首屏的几块按需下载，开机闲下来再顺手取回来（见 MotingApp 里的预取），
-// 点进去时就不会先闪一行加载字样。主页的书城条首屏就要，直接打进主包。
-const loadOnlineLibrary = () => freshImport(() => import("./online-library"));
-const loadBookstore = () => freshImport(() => import("./bookstore"));
+/**
+ * AI 回答的 Markdown 排版（react-markdown 一家子，一百多 KB）按需下载，开机闲下来先取回来。
+ *
+ * 取到之后直接同步渲染，没取到才走 React.lazy：lazy 第一次渲染必然先挂起、亮出占位，
+ * 而 React 为了防闪烁，占位一旦亮出至少停 300ms 才换成内容——哪怕模块早就下好了。
+ * 书城、在线找书不走懒加载：主页的书城条在首屏，那部分代码本来就在主包里。
+ */
 const loadAiMarkdown = () => freshImport(() => import("./ai-markdown"));
-const OnlineLibrary = lazy(() =>
-  loadOnlineLibrary().then(({ OnlineLibrary: Component }) => ({
-    default: Component,
-  }))
-);
-const Bookstore = lazy(() =>
-  loadBookstore().then(({ Bookstore: Component }) => ({
-    default: Component,
-  }))
-);
+let aiMarkdownModule: Awaited<ReturnType<typeof loadAiMarkdown>> | null = null;
 const LazyAiMarkdown = lazy(() =>
-  loadAiMarkdown().then(({ AiMarkdown: Component }) => ({
-    default: Component,
-  }))
+  loadAiMarkdown().then((module) => {
+    aiMarkdownModule = module;
+    return { default: module.AiMarkdown };
+  })
 );
 
 /** 导入用的解析器很大，按需下载。发版后旧页面取不到旧分片时给一句人话，别甩一串英文报错。 */
@@ -271,6 +268,10 @@ function metaOf(book: Book): BookMeta {
 }
 
 function AiMarkdown({ content }: { content: string }) {
+  if (aiMarkdownModule) {
+    const Ready = aiMarkdownModule.AiMarkdown;
+    return <Ready content={content} />;
+  }
   return (
     <Suspense fallback={<span className="ai-markdown-loading">正在排版…</span>}>
       <LazyAiMarkdown content={content} />
@@ -6205,14 +6206,16 @@ export default function MotingApp() {
     };
   }, [commitContents, loadContent]);
 
-  // 书城、在线找书、AI 回答的排版这几块不在首屏，开机闲下来先把代码取回来，
-  // 点进去就不会先闪一行「正在打开…」。取失败无所谓，真点进去时还会再取。
+  // AI 回答的排版不在首屏，开机闲下来先把代码取回来，第一次看 AI 回答就不会先闪「正在排版…」。
+  // 取失败无所谓，真用到时还会再取。
   useEffect(() => {
     if (!ready) return;
     const prefetch = () => {
-      void import("./bookstore").catch(() => undefined);
-      void import("./online-library").catch(() => undefined);
-      void import("./ai-markdown").catch(() => undefined);
+      void import("./ai-markdown")
+        .then((module) => {
+          aiMarkdownModule = module;
+        })
+        .catch(() => undefined);
     };
     const idleWindow = window as Window & {
       requestIdleCallback?: Window["requestIdleCallback"];
@@ -7299,29 +7302,24 @@ export default function MotingApp() {
               />
             ) : view.name === "store" ? (
               <div className="screen">
-                {/* 代码开机后已经预取过，这里几乎不会等；真等的那一下留空，不闪一行加载字样。 */}
-                <Suspense fallback={null}>
-                  <Bookstore
-                    books={books}
-                    initialBookId={view.bookId ?? ""}
-                    onBack={() => goBack({ name: "home" })}
-                    onFindBook={(title, author) =>
-                      navigate({ name: "find", query: bookSearchQuery(title, author) })
-                    }
-                  />
-                </Suspense>
+                <Bookstore
+                  books={books}
+                  initialBookId={view.bookId ?? ""}
+                  onBack={() => goBack({ name: "home" })}
+                  onFindBook={(title, author) =>
+                    navigate({ name: "find", query: bookSearchQuery(title, author) })
+                  }
+                />
               </div>
             ) : view.name === "find" ? (
-              <Suspense fallback={<div className="screen" />}>
-                <OnlineLibrary
-                  key={view.query}
-                  initialQuery={view.query}
-                  books={books}
-                  onImport={handleOnlineImport}
-                  onOpen={(book) => openReader(book)}
-                  onBack={() => goBack({ name: "library" })}
-                />
-              </Suspense>
+              <OnlineLibrary
+                key={view.query}
+                initialQuery={view.query}
+                books={books}
+                onImport={handleOnlineImport}
+                onOpen={(book) => openReader(book)}
+                onBack={() => goBack({ name: "library" })}
+              />
             ) : view.name === "listen" ? (
               <ListenScreen
                 books={books}
