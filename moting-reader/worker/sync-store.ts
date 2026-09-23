@@ -28,6 +28,8 @@ export interface SyncStore {
   /** 返回该会话的过期时刻;不存在给 null。 */
   getSession(tokenHash: string): Promise<number | null>;
   dropSession(tokenHash: string): Promise<void>;
+  /** 把会话的过期时刻推到 expiresAt(滑动续期)。 */
+  renewSession(tokenHash: string, expiresAt: number): Promise<void>;
   /**
    * 原子写入一批记录:预占 server_at 号段与全部 upsert 在同一事务里完成,
    * 并发的 pull 要么看到整批、要么一条都看不到,游标永远不会跳过还没落库的号。
@@ -168,6 +170,9 @@ export function createD1Store(db: D1Database): SyncStore {
     },
     async dropSession(tokenHash) {
       await db.prepare("DELETE FROM auth_tokens WHERE token_hash = ?").bind(tokenHash).run();
+    },
+    async renewSession(tokenHash, expiresAt) {
+      await db.prepare("UPDATE auth_tokens SET expires_at = ? WHERE token_hash = ?").bind(expiresAt, tokenHash).run();
     },
     async applyPush(rows) {
       if (!rows.length) return;

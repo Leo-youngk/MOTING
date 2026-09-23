@@ -38,7 +38,7 @@
 同源 POST,凭据在 HttpOnly / SameSite=Strict / Secure Cookie 里,与在线找书一致。
 
 - `session`(GET/POST)→ `{ connected, enabled }`;未配资源时 `enabled:false`
-- `login` {username,password} → 校验(哈希后比较)→ 30 天会话 Cookie
+- `login` {username,password} → 校验(哈希后比较)→ 30 天会话 Cookie。**滑动续期**:session/push/pull 校验会话时,距上次续期超过一天就把服务端过期时刻和浏览器 Cookie 一起推回 30 天后(Cookie 不续的话浏览器照样 30 天后丢掉它)。30 天内同步过一次就永远不用重新登录。
 - `logout` → 清会话
 - `push` {books,notes,positions,sessions,settings,chats,patches,listening} → 逐条 LWW,返回 `{ tooLarge, rejected }`:超过 D1 单行上限的、以及单条数据异常的(键不合法、时间戳比服务端快一天以上等)都只跳过这一条并回报,客户端提示用户。只有整体格式不对才 400——一条坏记录不能让之后每一轮同步都失败。
   - 整批在一个 D1 batch(事务)里完成:先占 `server_at` 号段,再每表一条 `INSERT … SELECT FROM json_each(?)` 批量 upsert。免费档每次调用限 50 条 D1 查询,逐条 upsert 会在首轮上传时直接失败。

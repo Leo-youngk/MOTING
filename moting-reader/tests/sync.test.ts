@@ -43,6 +43,9 @@ function createMemoryStore(): SyncStore & { rows: Map<SyncTable, Map<string, Syn
     async dropSession(hash) {
       this.sessions.delete(hash);
     },
+    async renewSession(hash, expiresAt) {
+      if (this.sessions.has(hash)) this.sessions.set(hash, expiresAt);
+    },
     async applyPush(batch) {
       if (!batch.length) return;
       clockValue = Math.max(clockValue, Date.now() * 1000) + batch.length;
@@ -464,4 +467,28 @@ test("forEachLimit keeps at most N tasks in flight and stops taking new work aft
     /boom/
   );
   assert.ok(started.length < 9, `should stop early, started ${started.length}`);
+});
+
+test("a session within its last 29 days is renewed on sync, so an active device never has to log in again", async () => {
+  const { e, store } = env();
+  const cookie = await loginCookie(e);
+  const [hash] = [...store.sessions.keys()];
+  const day = 24 * 3600 * 1000;
+
+  // 刚登录:不续期,不重发 cookie(避免每次同步都多一次 D1 写)。
+  const fresh = await handleSync(syncRequest("pull", { since: 0 }, { cookie }), e);
+  assert.equal(fresh.headers.getSetCookie().length, 0);
+
+  // 过了 20 天:同步一次就把过期时刻推回 30 天后,并重发同一个 token 的 cookie。
+  store.sessions.set(hash, Date.now() + 10 * day);
+  const renewed = await handleSync(syncRequest("pull", { since: 0 }, { cookie }), e);
+  assert.equal(renewed.status, 200);
+  const setCookie = renewed.headers.getSetCookie()[0] ?? "";
+  assert.ok(setCookie.startsWith(cookie + ";"), setCookie);
+  assert.match(setCookie, /Max-Age=2592000/);
+  assert.ok((store.sessions.get(hash) ?? 0) > Date.now() + 29 * day);
+
+  // 已经过期的不续,老老实实 401。
+  store.sessions.set(hash, Date.now() - 1);
+  assert.equal((await handleSync(syncRequest("pull", { since: 0 }, { cookie }), e)).status, 401);
 });

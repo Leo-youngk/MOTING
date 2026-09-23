@@ -17,6 +17,9 @@ export interface SyncEnv {
 
 const SESSION_COOKIE = "moting_sync";
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
+// 滑动续期:距上次续期超过一天才写库、重发 cookie,不让每次同步都多一次 D1 写。
+// 只要 30 天内同步过一次,就永远不用重新登录。
+const SESSION_RENEW_AFTER_MS = 24 * 3600 * 1000;
 const PUSH_ITEM_LIMIT = 500;
 // 一页 pull 的条数与字节预算。页满就带 hasMore 返回,客户端拿 cursor 接着拉。
 const PULL_PAGE_ROWS = 300;
@@ -85,11 +88,27 @@ function sessionToken(request: Request): string {
   return "";
 }
 
-async function validSession(request: Request, store: SyncStore): Promise<boolean> {
+function sessionCookie(request: Request, token: string, maxAgeSeconds: number): string {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${SESSION_COOKIE}=${token}; Path=/api/sync; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}${secure}`;
+}
+
+interface SessionCheck {
+  ok: boolean;
+  /** 续期时要带回给浏览器的新 cookie;浏览器那边的有效期不续,服务端续了也没用。 */
+  cookie?: string;
+}
+
+async function checkSession(request: Request, store: SyncStore): Promise<SessionCheck> {
   const token = sessionToken(request);
-  if (!TOKEN_PATTERN.test(token)) return false;
-  const expiresAt = await store.getSession(await sha256Hex(token));
-  return expiresAt !== null && expiresAt > Date.now();
+  if (!TOKEN_PATTERN.test(token)) return { ok: false };
+  const hash = await sha256Hex(token);
+  const expiresAt = await store.getSession(hash);
+  const now = Date.now();
+  if (expiresAt === null || expiresAt <= now) return { ok: false };
+  if (expiresAt - now > SESSION_TTL_MS - SESSION_RENEW_AFTER_MS) return { ok: true };
+  await store.renewSession(hash, now + SESSION_TTL_MS);
+  return { ok: true, cookie: sessionCookie(request, token, SESSION_TTL_MS / 1000) };
 }
 
 interface Resolved {
@@ -121,9 +140,7 @@ async function handleLogin(request: Request, env: SyncEnv, { store }: Resolved):
   const now = Date.now();
   await store.pruneSessions(now);
   await store.addSession(await sha256Hex(token), now + SESSION_TTL_MS);
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-  const cookie = `${SESSION_COOKIE}=${token}; Path=/api/sync; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`;
-  return json({ connected: true }, 200, cookie);
+  return json({ connected: true }, 200, sessionCookie(request, token, SESSION_TTL_MS / 1000));
 }
 
 interface ParsedPush {
@@ -168,7 +185,8 @@ function parsePushItem(raw: unknown, config: (typeof TABLES)[string], now: numbe
 }
 
 async function handlePush(request: Request, { store }: Resolved): Promise<Response> {
-  if (!(await validSession(request, store))) return json({ error: "请先登录同步账号" }, 401);
+  const session = await checkSession(request, store);
+  if (!session.ok) return json({ error: "请先登录同步账号" }, 401);
   const now = Date.now();
   const body = await readBody(request, PUSH_BODY_LIMIT);
 
@@ -203,7 +221,7 @@ async function handlePush(request: Request, { store }: Resolved): Promise<Respon
   await store.applyPush(accepted);
   const skipped = Object.values(rejected).reduce((sum, keys) => sum + keys.length, 0);
   if (skipped) console.warn("sync_push_rejected", { count: skipped });
-  return json({ tooLarge, rejected });
+  return json({ tooLarge, rejected }, 200, session.cookie);
 }
 
 /**
@@ -212,7 +230,8 @@ async function handlePush(request: Request, { store }: Resolved): Promise<Respon
  * 下一页从最后一条的 server_at + 1 开始,不重不漏。
  */
 async function handlePull(request: Request, { store }: Resolved): Promise<Response> {
-  if (!(await validSession(request, store))) return json({ error: "请先登录同步账号" }, 401);
+  const session = await checkSession(request, store);
+  if (!session.ok) return json({ error: "请先登录同步账号" }, 401);
   const body = await readBody(request, 4096);
   const since = Number(body.since ?? 0);
   if (!Number.isSafeInteger(since) || since < 0) throw new SyncError("同步水位无效");
@@ -248,7 +267,7 @@ async function handlePull(request: Request, { store }: Resolved): Promise<Respon
   }
   result.cursor = cursor;
   result.hasMore = taken < candidates.length;
-  return json(result);
+  return json(result, 200, session.cookie);
 }
 
 function contentKey(bookId: string): string {
@@ -260,7 +279,7 @@ function imageKey(bookId: string, imageId: string): string {
 }
 
 async function handleBookContent(request: Request, { store, bucket }: Resolved, bookId: string): Promise<Response> {
-  if (!(await validSession(request, store))) return json({ error: "请先登录同步账号" }, 401);
+  if (!(await checkSession(request, store)).ok) return json({ error: "请先登录同步账号" }, 401);
   if (!SYNC_KEY_PATTERN.test(bookId)) return json({ error: "书籍编号无效" }, 400);
   if (request.method === "HEAD") {
     const exists = await bucket.head(contentKey(bookId));
@@ -297,7 +316,7 @@ async function handleBookImage(
   bookId: string,
   imageId: string
 ): Promise<Response> {
-  if (!(await validSession(request, store))) return json({ error: "请先登录同步账号" }, 401);
+  if (!(await checkSession(request, store)).ok) return json({ error: "请先登录同步账号" }, 401);
   if (!SYNC_KEY_PATTERN.test(bookId) || !SYNC_KEY_PATTERN.test(imageId)) return json({ error: "书籍或插图编号无效" }, 400);
   if (request.method === "HEAD") {
     const exists = await bucket.head(imageKey(bookId, imageId));
@@ -350,7 +369,8 @@ export async function handleSync(request: Request, env: SyncEnv): Promise<Respon
         resolved = null;
       }
       if (!resolved) return json({ connected: false, enabled: false });
-      return json({ connected: await validSession(request, resolved.store), enabled: true });
+      const session = await checkSession(request, resolved.store);
+      return json({ connected: session.ok, enabled: true }, 200, session.cookie);
     }
 
     const resolved = resolve(env);
@@ -358,9 +378,7 @@ export async function handleSync(request: Request, env: SyncEnv): Promise<Respon
     if (request.method === "POST" && action === "logout") {
       const token = sessionToken(request);
       if (TOKEN_PATTERN.test(token)) await resolved.store.dropSession(await sha256Hex(token));
-      const secure = url.protocol === "https:" ? "; Secure" : "";
-      const cookie = `${SESSION_COOKIE}=; Path=/api/sync; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
-      return json({ connected: false }, 200, cookie);
+      return json({ connected: false }, 200, sessionCookie(request, "", 0));
     }
     if (request.method === "POST" && action === "push") return await handlePush(request, resolved);
     if (request.method === "POST" && action === "pull") return await handlePull(request, resolved);
