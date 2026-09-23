@@ -83,6 +83,8 @@ export interface Book {
   fileName?: string;
   /** 同一在线版本只导入一次，删除后可重新下载。 */
   onlineSourceId?: string;
+  /** 正文与插图已完整上传云端的时刻;其他设备看到它才会下载这本书,避免拿到半本书。 */
+  syncReadyAt?: number;
   coverDataUrl?: string;
   accent: string;
   status: BookStatus;
@@ -126,6 +128,9 @@ export interface BookNote {
    * 旧数据没有这个字段，取不到时退回 id 本身当单元素组。
    */
   groupId?: string;
+  /** 最后一次修改时间。改色/写想法会更新;旧数据没有，同步时退回 createdAt。
+   * 没有它就没法做云端 LWW——createdAt 不变，另一台设备的更新永远比不过。 */
+  updatedAt?: number;
 }
 
 export type ReaderTheme =

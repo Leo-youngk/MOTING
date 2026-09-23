@@ -13,6 +13,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Cloud,
   Copy,
   Download,
   FileText,
@@ -30,6 +31,7 @@ import {
   PencilLine,
   Play,
   Plus,
+  RefreshCw,
   Search,
   Sparkles,
   Square,
@@ -47,6 +49,7 @@ import {
   Suspense,
   type ChangeEvent,
   type CSSProperties,
+  type FormEvent,
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
@@ -101,6 +104,14 @@ import { createDemoBook } from "../lib/demo";
 import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "../lib/file-limits";
 import { springTo } from "../lib/motion";
 import {
+  getSyncSession,
+  loginSync,
+  logoutSync,
+  runSync,
+  SyncError,
+  type SyncAppliedKind,
+} from "../lib/sync";
+import {
   clearLibrary,
   getAllBookMetadata,
   getAllBooks,
@@ -110,6 +121,7 @@ import {
   getBookImage,
   getSettings,
   getStats,
+  getSyncState,
   saveSession,
   removeBook,
   removeBookMetadata,
@@ -294,6 +306,15 @@ function formatStorageSize(characters: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 上次同步开始的本机时刻(毫秒)。 */
+function formatSyncTime(syncedAt: number): string {
+  const date = new Date(syncedAt);
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return sameDay ? `今天 ${clock}` : `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
 }
 
 function BookCover({
@@ -2203,17 +2224,49 @@ function SettingsPanel({
   books,
   onChange,
   onClear,
+  sync,
+  onSyncLogin,
+  onSyncLogout,
+  onSyncNow,
 }: {
   settings: ReaderSettings;
   voices: PlayerVoice[];
   books: Book[];
   onChange: (settings: ReaderSettings) => void;
   onClear: () => void;
+  sync: {
+    enabled: boolean;
+    connected: boolean;
+    syncing: boolean;
+    message: string;
+    error: string;
+    lastSyncAt: number;
+  };
+  onSyncLogin: (username: string, password: string) => Promise<void>;
+  onSyncLogout: () => void;
+  onSyncNow: () => void;
 }) {
   const totalCharacters = books.reduce(
     (sum, book) => sum + book.characterCount,
     0
   );
+  const [syncUser, setSyncUser] = useState("");
+  const [syncPass, setSyncPass] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+
+  const submitSyncLogin = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (syncBusy || !syncUser.trim() || !syncPass) return;
+    setSyncBusy(true);
+    try {
+      await onSyncLogin(syncUser.trim(), syncPass);
+      setSyncPass("");
+    } catch {
+      // 错误已由 onSyncLogin 写进 sync.error,这里只面展示。
+    } finally {
+      setSyncBusy(false);
+    }
+  };
 
   return (
     <div className="settings-panel">
@@ -2332,6 +2385,98 @@ function SettingsPanel({
 
       <section className="settings-group">
         <div className="settings-group__title">
+          <Cloud size={18} />
+          <h2>云端同步</h2>
+        </div>
+        {!sync.enabled ? (
+          <p className="privacy-note">此部署未启用同步,请在设置里登录或联系部署者。</p>
+        ) : sync.connected ? (
+          <>
+            <p className="privacy-note">
+              已连接。书籍、进度、划线与统计在设备间自动合并——每条记录单独比时间,
+              新者胜,任何一台设备的数据都不会被整库覆盖。
+            </p>
+            <div className="sync-status" aria-live="polite">
+              {sync.syncing ? (
+                <p>
+                  <LoaderCircle size={14} className="spin" aria-hidden="true" />
+                  {sync.message || "正在同步…"}
+                </p>
+              ) : (
+                <p>
+                  {sync.lastSyncAt
+                    ? `上次同步 ${formatSyncTime(sync.lastSyncAt)}`
+                    : "尚未同步"}
+                </p>
+              )}
+              {sync.error ? <p role="alert" className="sync-error">{sync.error}</p> : null}
+            </div>
+            <div className="sync-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={sync.syncing}
+                onClick={onSyncNow}
+              >
+                <RefreshCw size={15} />
+                {sync.syncing ? "同步中…" : "立即同步"}
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                disabled={sync.syncing || syncBusy}
+                onClick={onSyncLogout}
+              >
+                退出同步
+              </button>
+            </div>
+          </>
+        ) : (
+          <form className="sync-login" onSubmit={submitSyncLogin}>
+            <p className="privacy-note">
+              登录后,这台设备上的书籍、进度和划线会与其他设备自动合并。
+              不登录也照常用,只是数据只存在本机。
+            </p>
+            <label className="settings-row settings-row--stack">
+              <span>
+                <strong>用户名</strong>
+              </span>
+              <input
+                type="text"
+                autoComplete="username"
+                value={syncUser}
+                maxLength={256}
+                disabled={syncBusy}
+                onChange={(event) => setSyncUser(event.target.value)}
+              />
+            </label>
+            <label className="settings-row settings-row--stack">
+              <span>
+                <strong>密码</strong>
+              </span>
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={syncPass}
+                maxLength={256}
+                disabled={syncBusy}
+                onChange={(event) => setSyncPass(event.target.value)}
+              />
+            </label>
+            {sync.error ? <p role="alert" className="sync-error">{sync.error}</p> : null}
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={syncBusy || !syncUser.trim() || !syncPass}
+            >
+              {syncBusy ? "正在登录…" : "登录并同步"}
+            </button>
+          </form>
+        )}
+      </section>
+
+      <section className="settings-group">
+        <div className="settings-group__title">
           <Download size={18} />
           <h2>本地书库</h2>
         </div>
@@ -2346,7 +2491,9 @@ function SettingsPanel({
           </div>
         </div>
         <p className="privacy-note">
-          书籍、进度和标记保存在当前浏览器中，不会由本项目上传。
+          {sync.connected
+            ? "已开启云端同步:下面的清空只影响这台设备,云端数据保留,下次同步会恢复回来。"
+            : "书籍、进度和标记保存在当前浏览器中，不会由本项目上传。"}
         </p>
         <button type="button" className="danger-button" onClick={onClear}>
           <Trash2 size={17} />
@@ -5644,6 +5791,133 @@ export default function MotingApp() {
     [showToast]
   );
 
+  // ----------------------------------------------------------------------
+  // 云端同步:登录后自动跑,不登录时应用行为与原来完全一致。
+  const [syncEnabled, setSyncEnabled] = useState(true);
+  const [syncConnected, setSyncConnected] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState("");
+  const [syncError, setSyncError] = useState("");
+  const [lastSyncAt, setLastSyncAt] = useState(0);
+  const syncControllerRef = useRef<AbortController | null>(null);
+  const syncReloadTimerRef = useRef<number | null>(null);
+  // 同步把云端数据刷回本地时置位,让下面的「写操作后 30s debounce」跳过这一轮,
+  // 免得「同步→重读→又排一个同步」空转。
+  const syncQuietRef = useRef(false);
+
+  /** 同步把云端记录写进本地后,稍等片刻重读一次本地数据。 */
+  const reloadFromStorage = useCallback(async () => {
+    try {
+      const [
+        storedBooks,
+        storedNotes,
+        storedChats,
+        storedSettings,
+        storedStats,
+        storedSessions,
+        storedMetadata,
+      ] = await Promise.all([
+        getAllBooks(),
+        getAllNotes(),
+        getAllChats(),
+        getSettings(),
+        getStats(),
+        getAllSessions(),
+        getAllBookMetadata(),
+      ]);
+      syncQuietRef.current = true;
+      setBooks(storedBooks);
+      setNotes(storedNotes);
+      setChats(storedChats);
+      setSettings(storedSettings);
+      setStats(storedStats);
+      setSessions(storedSessions);
+      setBookMetadata(storedMetadata);
+    } catch {
+      // 重读失败不打断应用;下一轮同步或刷新还能拉回。
+    }
+  }, []);
+
+  const scheduleSyncReload = useCallback(
+    (_kind: SyncAppliedKind) => {
+      if (syncReloadTimerRef.current !== null) return;
+      syncReloadTimerRef.current = window.setTimeout(() => {
+        syncReloadTimerRef.current = null;
+        void reloadFromStorage();
+      }, 400);
+    },
+    [reloadFromStorage]
+  );
+
+  const triggerSync = useCallback(
+    async (manual = false) => {
+      if (syncControllerRef.current) {
+        if (manual) showToast("正在同步中…");
+        return;
+      }
+      const controller = new AbortController();
+      syncControllerRef.current = controller;
+      setSyncing(true);
+      setSyncMessage("");
+      setSyncError("");
+      try {
+        const result = await runSync({
+          signal: controller.signal,
+          onProgress: setSyncMessage,
+          onApplied: scheduleSyncReload,
+        });
+        setLastSyncAt(result.syncedAt);
+        if (result.failedContent.length) {
+          showToast(`${result.failedContent.length} 本书超出云端大小上限,未能同步`);
+        } else if (result.tooLarge) {
+          showToast(`${result.tooLarge} 条记录超出云端单条上限,未能同步`);
+        } else if (manual) {
+          showToast(result.changed ? "同步完成" : "云端没有新变更");
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          if (error instanceof SyncError && error.status === 401) {
+            setSyncConnected(false);
+            setSyncError("同步登录已过期,请重新登录");
+          } else {
+            setSyncError(error instanceof Error ? error.message : "同步失败,请稍后重试");
+          }
+        }
+      } finally {
+        if (syncControllerRef.current === controller) syncControllerRef.current = null;
+        if (!controller.signal.aborted) setSyncing(false);
+      }
+    },
+    [reloadFromStorage, scheduleSyncReload, showToast]
+  );
+
+  const handleSyncLogin = useCallback(
+    async (username: string, password: string) => {
+      setSyncError("");
+      const controller = new AbortController();
+      try {
+        await loginSync(username, password, controller.signal);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "登录失败,请重试";
+        setSyncError(message);
+        throw new Error(message);
+      }
+      setSyncConnected(true);
+      void triggerSync(true);
+    },
+    [triggerSync]
+  );
+
+  const handleSyncLogout = useCallback(async () => {
+    syncControllerRef.current?.abort();
+    syncControllerRef.current = null;
+    setSyncing(false);
+    setSyncMessage("");
+    const controller = new AbortController();
+    await logoutSync(controller.signal).catch(() => undefined);
+    setSyncConnected(false);
+  }, []);
+
   useEffect(
     () => () => {
       if (toastTimerRef.current !== null) {
@@ -5721,6 +5995,54 @@ export default function MotingApp() {
       cancelled = true;
     };
   }, []);
+
+  // 启动时读同步会话;已登录的设备开机就同步一轮。
+  useEffect(() => {
+    const controller = new AbortController();
+    getSyncState()
+      .then((state) => {
+        if (!controller.signal.aborted) setLastSyncAt(state.pushedAt);
+      })
+      .catch(() => undefined);
+    getSyncSession(controller.signal)
+      .then(({ connected, enabled }) => {
+        if (controller.signal.aborted) return;
+        setSyncEnabled(enabled);
+        setSyncConnected(connected);
+        if (connected) void triggerSync();
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [triggerSync]);
+
+  // 登录后每 5 分钟同步一轮;切到后台时补一次,手机息屏前也能把进度推上去。
+  useEffect(() => {
+    if (!syncConnected) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void triggerSync();
+    }, 5 * 60_000);
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") void triggerSync();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [syncConnected, triggerSync]);
+
+  // 写操作后 30s debounce 同步:读书进度、划线、改设置等让数据变化时,
+  // 推迟到「安静」满 30 秒再同步——读到哪里都实时写本地,但不会每翻一页都打云端。
+  // 一次真正的写最多换来一轮空同步,空同步不再改这些 state,链路自然停下。
+  useEffect(() => {
+    if (!syncConnected) return;
+    if (syncQuietRef.current) {
+      syncQuietRef.current = false;
+      return;
+    }
+    const timer = window.setTimeout(() => void triggerSync(), 30_000);
+    return () => window.clearTimeout(timer);
+  }, [books, notes, chats, settings, sessions, syncConnected, triggerSync]);
 
   useEffect(() => {
     document.documentElement.dataset.readerTheme = settings.theme;
@@ -6468,11 +6790,14 @@ export default function MotingApp() {
   /** 改色、写想法都要落到整组上，否则跨句划线会变成半蓝半黄。 */
   const updateNote = async (note: BookNote): Promise<boolean> => {
     const group = groupKey(note);
+    const touchedAt = Date.now();
     const patch = (item: BookNote): BookNote => ({
       ...item,
       color: note.color,
       highlightStyle: note.highlightStyle ?? "underline",
       thought: note.thought,
+      // 同步 LWW 靠它识别「这条划线改过了」;不更新的话另一台设备永远赢不过去。
+      updatedAt: touchedAt,
     });
     try {
       await writeNotes(notes.filter((item) => groupKey(item) === group).map(patch));
@@ -6542,7 +6867,10 @@ export default function MotingApp() {
     showToast("书籍及相关标记已删除");
   };
 
-  const restoreNotes = async (restored: BookNote[]) => {
+  const restoreNotes = async (removed: BookNote[]) => {
+    // 撤销也是一次修改:删除墓碑可能已经推上云端,恢复的这份必须比它新才能赢回来。
+    const touchedAt = Date.now();
+    const restored = removed.map((note) => ({ ...note, updatedAt: touchedAt }));
     try {
       await writeNotes(restored);
     } catch (error) {
@@ -6625,7 +6953,11 @@ export default function MotingApp() {
     setConfirmClear(false);
     setShowSettings(false);
     selectTab("home");
-    showToast("本地书库已清空，已保留一份使用指南");
+    showToast(
+      syncConnected
+        ? "本地已清空;云端仍保留,下次同步会恢复回来"
+        : "本地书库已清空，已保留一份使用指南"
+    );
   };
 
   const activeMainView: MainView =
@@ -6965,6 +7297,17 @@ export default function MotingApp() {
             books={books}
             onChange={changeSettings}
             onClear={() => setConfirmClear(true)}
+            sync={{
+              enabled: syncEnabled,
+              connected: syncConnected,
+              syncing,
+              message: syncMessage,
+              error: syncError,
+              lastSyncAt,
+            }}
+            onSyncLogin={handleSyncLogin}
+            onSyncLogout={() => void handleSyncLogout()}
+            onSyncNow={() => void triggerSync(true)}
           />
         </Modal>
       ) : null}

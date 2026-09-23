@@ -11,6 +11,19 @@
     "binding": "ASSETS"
   },
   "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "moting-sync",
+      "database_id": "c55d438a-79d1-493f-90ca-fd4301e0f9df"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BOOKS_BUCKET",
+      "bucket_name": "moting-books"
+    }
+  ],
   "observability": {
     "enabled": true,
     "logs": {

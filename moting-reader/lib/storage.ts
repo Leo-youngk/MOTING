@@ -22,6 +22,9 @@ const SESSION_STORE = "sessions";
 const READING_POSITION_PREFIX = "reading-position:";
 /** 线上补全的书籍资料。跟阅读位置一样单独存，不写回体积巨大的 Book 记录。 */
 const BOOK_METADATA_PREFIX = "book-metadata:";
+// 云端同步的本地状态,都放在 settings store 里。
+const SYNC_STATE_KEY = "sync:state";
+const SETTINGS_MTIME_KEY = "reader-mtime";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -29,6 +32,39 @@ interface StoredReadingPosition {
   position: BookPosition;
   lastOpenedAt: number;
   savedAt: number;
+}
+
+/** 书籍元数据:不含正文 chapters 的 Book,同步时只传这部分。 */
+export type BookMeta = Omit<Book, "chapters">;
+
+/** 已删除书/划线的墓碑。push 被服务端接受后清理。 */
+export interface SyncTombstones {
+  books: Record<string, number>;
+  notes: Record<string, number>;
+}
+
+/**
+ * 云端同步的本地状态。两个水位分属两台时钟,绝不能混用:
+ * - pushedAt:本机时钟(毫秒)。上次成功同步开始的时刻,本地记录的修改时间比它新才需要上传。
+ * - pullCursor:服务端号段(server_at)。下次 pull 从这里接着拉。
+ */
+export interface SyncState {
+  pushedAt: number;
+  pullCursor: number;
+  tombstones: SyncTombstones;
+  pendingContent: string[];
+}
+
+const DEFAULT_SYNC_STATE: SyncState = {
+  pushedAt: 0,
+  pullCursor: 0,
+  tombstones: { books: {}, notes: {} },
+  pendingContent: [],
+};
+
+/** 应用云端变更时传 tombstone:false——那是别人删的,不该再以本机名义推回去。 */
+export interface SyncWriteOptions {
+  tombstone?: boolean;
 }
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
@@ -227,6 +263,15 @@ export async function saveBook(book: Book): Promise<void> {
   await transactionDone(transaction);
 }
 
+/** 同步下载正文时按 id 取整本;内存里同时只有这一本。 */
+export async function getBook(bookId: string): Promise<Book | undefined> {
+  const db = await openDatabase();
+  const transaction = db.transaction(BOOK_STORE, "readonly");
+  return requestToPromise(
+    transaction.objectStore(BOOK_STORE).get(bookId) as IDBRequest<Book | undefined>
+  );
+}
+
 function deleteByBookId(store: IDBObjectStore, bookId: string): void {
   const request = store.index("bookId").openCursor(IDBKeyRange.only(bookId));
   request.onsuccess = () => {
@@ -237,8 +282,112 @@ function deleteByBookId(store: IDBObjectStore, bookId: string): void {
   };
 }
 
+/** 书籍 meta 的轻量读:逐本游标读、当场丢掉 chapters,内存峰值只有一本。 */
+export async function getBookMetas(): Promise<BookMeta[]> {
+  const db = await openDatabase();
+  const transaction = db.transaction(BOOK_STORE, "readonly");
+  return new Promise((resolve, reject) => {
+    const metas: BookMeta[] = [];
+    const request = transaction.objectStore(BOOK_STORE).openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve(metas.sort((a, b) => b.lastOpenedAt - a.lastOpenedAt));
+        return;
+      }
+      const book = cursor.value as Book;
+      if (book && typeof book === "object") {
+        const { chapters: _chapters, ...meta } = book;
+        metas.push(meta);
+      }
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error ?? new Error("无法读取书库"));
+  });
+}
+
+/** 全部阅读/听书位置,同步用。 */
+export async function getAllReadingPositions(): Promise<
+  Array<{ bookId: string; position: BookPosition; lastOpenedAt: number; savedAt: number }>
+> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readonly");
+  const store = transaction.objectStore(SETTINGS_STORE);
+  const [values, keys] = await Promise.all([
+    requestToPromise(store.getAll() as IDBRequest<unknown[]>),
+    requestToPromise(store.getAllKeys()),
+  ]);
+  const positions: Array<{ bookId: string; position: BookPosition; lastOpenedAt: number; savedAt: number }> = [];
+  keys.forEach((key, index) => {
+    if (typeof key !== "string" || !key.startsWith(READING_POSITION_PREFIX)) return;
+    const record = values[index] as Partial<StoredReadingPosition> | undefined;
+    if (!record?.position || typeof record.savedAt !== "number" || typeof record.lastOpenedAt !== "number") return;
+    positions.push({
+      bookId: key.slice(READING_POSITION_PREFIX.length),
+      position: record.position,
+      lastOpenedAt: record.lastOpenedAt,
+      savedAt: record.savedAt,
+    });
+  });
+  return positions;
+}
+
+export async function getSyncState(): Promise<SyncState> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readonly");
+  const state = await requestToPromise(transaction.objectStore(SETTINGS_STORE).get(SYNC_STATE_KEY));
+  if (!state || typeof state !== "object") return { ...DEFAULT_SYNC_STATE, tombstones: { books: {}, notes: {} } };
+  const stored = state as Partial<SyncState>;
+  return {
+    pushedAt: typeof stored.pushedAt === "number" ? stored.pushedAt : 0,
+    pullCursor: typeof stored.pullCursor === "number" ? stored.pullCursor : 0,
+    tombstones: {
+      books: stored.tombstones?.books ?? {},
+      notes: stored.tombstones?.notes ?? {},
+    },
+    pendingContent: Array.isArray(stored.pendingContent) ? stored.pendingContent : [],
+  };
+}
+
+export async function saveSyncState(state: SyncState): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readwrite");
+  transaction.objectStore(SETTINGS_STORE).put(state, SYNC_STATE_KEY);
+  await transactionDone(transaction);
+}
+
+/** settings 本身的修改时间,LWW 用;没有它就分不清「没改」和「改了」。 */
+export async function getSettingsMtime(): Promise<number> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readonly");
+  const mtime = await requestToPromise(transaction.objectStore(SETTINGS_STORE).get(SETTINGS_MTIME_KEY));
+  return typeof mtime === "number" ? mtime : 0;
+}
+
+/**
+ * 在 readwrite 事务内增删墓碑;get→put 链在同事务里自动延续。
+ * 重新写回的记录(比如撤销删除)要摘掉自己的墓碑,否则下次同步会把它再删一遍。
+ */
+function editTombstones(
+  store: IDBObjectStore,
+  kind: "books" | "notes",
+  added: Record<string, number>,
+  cleared: string[] = []
+): void {
+  if (!Object.keys(added).length && !cleared.length) return;
+  const request = store.get(SYNC_STATE_KEY);
+  request.onsuccess = () => {
+    const state = (request.result as SyncState | undefined) ?? DEFAULT_SYNC_STATE;
+    const list = { ...state.tombstones[kind] };
+    for (const id of cleared) delete list[id];
+    Object.assign(list, added);
+    const tombstones: SyncTombstones = { ...state.tombstones, [kind]: list };
+    store.put({ ...state, tombstones }, SYNC_STATE_KEY);
+  };
+}
+
 /** 阅读记录不跟着删：书没了，那段时间也确实读过。 */
-export async function removeBook(bookId: string): Promise<void> {
+export async function removeBook(bookId: string, { tombstone = true }: SyncWriteOptions = {}): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(
     [BOOK_STORE, NOTE_STORE, IMAGE_STORE, CHAT_STORE, SETTINGS_STORE],
@@ -251,6 +400,8 @@ export async function removeBook(bookId: string): Promise<void> {
   transaction.objectStore(SETTINGS_STORE).delete(readingPositionKey(bookId));
   // 补丁必须跟着删：留着的话重新导入同一本书、复用到同一个 id 时会串到旧资料上。
   transaction.objectStore(SETTINGS_STORE).delete(bookMetadataKey(bookId));
+  // 删除墓碑:同步时告知其他设备同样删除。本地清空(clearLibrary)不走这里,云端保留。
+  if (tombstone) editTombstones(transaction.objectStore(SETTINGS_STORE), "books", { [bookId]: Date.now() });
   await transactionDone(transaction);
 }
 
@@ -322,14 +473,30 @@ export async function saveNote(note: BookNote): Promise<void> {
 }
 
 /** 一次划线跨多句时，正文标记、改色和删除必须整组提交或整组回滚。 */
-export async function writeNotes(notes: BookNote[], removedIds: string[] = []): Promise<void> {
+export async function writeNotes(
+  notes: BookNote[],
+  removedIds: string[] = [],
+  { tombstone = true }: SyncWriteOptions = {}
+): Promise<void> {
   const db = await openDatabase();
-  const transaction = db.transaction(NOTE_STORE, "readwrite");
+  const transaction = db.transaction([NOTE_STORE, SETTINGS_STORE], "readwrite");
   const done = transactionDone(transaction);
   try {
     const store = transaction.objectStore(NOTE_STORE);
-    for (const note of notes) store.put(note);
+    for (const note of notes) {
+      // 旧记录没有 updatedAt 时补上;同步 LWW 靠它区分「没改」和「改了」。
+      store.put({ ...note, updatedAt: note.updatedAt ?? note.createdAt });
+    }
     for (const id of removedIds) store.delete(id);
+    if (tombstone) {
+      const removedAt = Date.now();
+      editTombstones(
+        transaction.objectStore(SETTINGS_STORE),
+        "notes",
+        Object.fromEntries(removedIds.map((id) => [id, removedAt])),
+        notes.map((note) => note.id)
+      );
+    }
   } catch (error) {
     transaction.abort();
     await done.catch(() => undefined);
@@ -339,10 +506,7 @@ export async function writeNotes(notes: BookNote[], removedIds: string[] = []): 
 }
 
 export async function removeNote(noteId: string): Promise<void> {
-  const db = await openDatabase();
-  const transaction = db.transaction(NOTE_STORE, "readwrite");
-  transaction.objectStore(NOTE_STORE).delete(noteId);
-  await transactionDone(transaction);
+  await writeNotes([], [noteId]);
 }
 
 export async function getAllChats(): Promise<BookAiChat[]> {
@@ -397,11 +561,16 @@ export async function getSettings(): Promise<ReaderSettings> {
 }
 
 export async function saveSettings(
-  settings: ReaderSettings
+  settings: ReaderSettings,
+  mtime = Date.now()
 ): Promise<void> {
   const db = await openDatabase();
   const transaction = db.transaction(SETTINGS_STORE, "readwrite");
-  transaction.objectStore(SETTINGS_STORE).put(settings, "reader");
+  const store = transaction.objectStore(SETTINGS_STORE);
+  store.put(settings, "reader");
+  // mtime 跟 settings 同事务落盘,同步时才能可靠地按「谁后改」合并。
+  // 同步拉回来的新设置用它自己的远程时间,避免本地时间把 LWW 摚乱。
+  store.put(mtime, SETTINGS_MTIME_KEY);
   await transactionDone(transaction);
 }
 

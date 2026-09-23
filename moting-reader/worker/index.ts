@@ -3,6 +3,7 @@ import handler from "vinext/server/app-router-entry";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
 import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
 import { synthesizeSpeech } from "./edge-tts";
+import { forwardSync, handleSync } from "./sync";
 import { handleWeread } from "./weread";
 import { handleZlibrary } from "./zlibrary";
 
@@ -438,6 +439,10 @@ const worker = {
     const pathname = new URL(request.url).pathname;
     if (pathname.startsWith("/api/weread/")) return handleWeread(request, env, ctx);
     if (pathname.startsWith("/api/zlibrary/")) return handleZlibrary(request);
+    if (pathname.startsWith("/api/sync/")) {
+      // 旧域名部署没有 R2/D1,凭 SYNC_UPSTREAM 把同步请求原样代理到主部署。
+      return env.SYNC_UPSTREAM ? forwardSync(request, env.SYNC_UPSTREAM) : handleSync(request, env);
+    }
     if (pathname === "/api/tts") {
       return handleSpeech(request, ctx);
     }
