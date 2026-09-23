@@ -58,3 +58,9 @@ npm run deploy:dry-run
 从章节中间开始播放时用 `sliceSpeechBlock()` 裁掉前面的部分，并重算偏移量。
 
 本地库（IndexedDB）里书目和正文分开存：`books` 表只有书目（含从正文算出的目录 `chapterOutline`），正文在 `contents` 表。书库、主页、同步只碰书目；进阅读器、播放器、单书笔记之前才读那一本的正文（`MotingApp` 的 `loadContent`）。
+
+书名、章名只在显示时处理（`lib/display-title.ts`）：列表和播放条用去掉营销括注的短书名，书籍资料页用全名；章名是「未知 / Unknown」这类占位词的章算上一章的续页，目录里不单列、阅读页不另起章首。
+
+## 界面规范
+
+字号、圆角、阴影、时长都用 `app/globals.css` 里 `:root` 的 token（`--text-*` 按 iOS 文字样式分级、`--radius-*`、`--shadow-*`、`--dur-*`），不要再写裸数值。阅读正文和 AI 回答跟着用户选的字号走，不在这套里。外壳界面一律黑体，宋体只留给正文、摘录和封面；橙色只给能点的东西和「正在进行」的状态。

@@ -12,6 +12,32 @@
   --ease-sheet: cubic-bezier(0.32, 0.72, 0, 1);
   --sheet-enter: 420ms;
   --sheet-exit: 300ms;
+  /* 视觉规范:字号按 iOS 文字样式分级(caption2 11 / caption 12 / footnote 13 / subhead 15 /
+     callout 16 / body 17 / title3 20 / title2 22 / title1 28 / large title 34)。
+     正文(阅读器、AI 回答)跟着用户选的字号走,不在这套里。输入框不低于 16px,否则 iOS 聚焦时会放大页面。 */
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 15px;
+  --text-callout: 16px;
+  --text-lg: 17px;
+  --text-xl: 20px;
+  --text-2xl: 22px;
+  --text-3xl: 28px;
+  --text-4xl: 34px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-pill: 999px;
+  /* 阴影四档:控件浮起、列表小封面、卡片大封面、悬浮层。 */
+  --shadow-control: 0 1px 3px rgb(0 0 0 / 12%);
+  --shadow-cover-sm: 0 1px 3px rgb(0 0 0 / 16%);
+  --shadow-cover: 0 1px 2px rgb(0 0 0 / 14%), 0 8px 20px rgb(0 0 0 / 16%);
+  --shadow-float: 0 8px 24px rgb(0 0 0 / 18%);
+  --dur-fast: 160ms;
+  --dur-base: 240ms;
   --paper: #f3f4f7;
   --paper-deep: #e7e8ef;
   --surface: #ffffff;
@@ -376,7 +402,7 @@ button:disabled {
 
 .ios-header h1 {
   margin: 0;
-  font-size: 34px;
+  font-size: var(--text-4xl);
   font-weight: 700;
   letter-spacing: -0.028em;
   line-height: 1.1;
@@ -406,7 +432,7 @@ button:disabled {
     inset 0 0.5px 0 var(--glass-sheen),
     inset 0 -0.5px 0 var(--glass-shade);
   color: var(--muted);
-  transition: transform 150ms ease;
+  transition: transform var(--dur-fast) ease;
 }
 
 .avatar-button:active {
@@ -424,9 +450,9 @@ button:disabled {
   background: transparent;
   color: var(--ink);
   transition:
-    background 160ms ease,
-    color 160ms ease,
-    transform 160ms ease;
+    background var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
 }
 
 /* 悬停样式只给有鼠标的设备。触屏上点过的按钮会一直停在悬停态，直到点别处。 */
@@ -467,13 +493,13 @@ button:disabled {
   justify-content: center;
   gap: 8px;
   padding: 0 20px;
-  border-radius: 980px;
-  font-size: 15px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-base);
   font-weight: 600;
   letter-spacing: -0.01em;
   transition:
-    transform 150ms ease,
-    background 150ms ease;
+    transform var(--dur-fast) ease,
+    background var(--dur-fast) ease;
 }
 
 .primary-button {
@@ -528,9 +554,7 @@ button:disabled {
   overflow: hidden;
   border-radius: 2px 6px 6px 2px;
   background: #e8e1d5;
-  box-shadow:
-    0 1px 2px rgb(0 0 0 / 18%),
-    0 10px 24px rgb(0 0 0 / 16%);
+  box-shadow: var(--shadow-cover);
 }
 
 /* 书脊：左边一道渐深的窄条，让平面封面看着像一本实体书。 */
@@ -636,7 +660,7 @@ button:disabled {
 .progress-track {
   height: 4px;
   overflow: hidden;
-  border-radius: 99px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--ink) 14%, transparent);
 }
 
@@ -645,14 +669,14 @@ button:disabled {
   height: 100%;
   border-radius: inherit;
   background: var(--accent);
-  transition: width 280ms ease;
+  transition: width var(--dur-base) ease;
 }
 
 .progress-label {
   display: block;
   margin-top: 5px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 
 .ios-search {
@@ -662,7 +686,7 @@ button:disabled {
   gap: 7px;
   margin-bottom: 18px;
   padding: 0 9px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--paper-deep);
   color: var(--muted);
 }
@@ -674,7 +698,7 @@ button:disabled {
   outline: 0;
   background: transparent;
   color: var(--ink);
-  font-size: 17px;
+  font-size: var(--text-lg);
 }
 
 .ios-search input::placeholder {
@@ -699,7 +723,7 @@ button:disabled {
 
 .shelf__title {
   margin: 0 20px 12px;
-  font-size: 22px;
+  font-size: var(--text-2xl);
   font-weight: 700;
   letter-spacing: -0.02em;
 }
@@ -741,7 +765,7 @@ button:disabled {
   display: block;
   padding: 0;
   background: transparent;
-  transition: transform 180ms ease;
+  transition: transform var(--dur-fast) ease;
 }
 
 .shelf-card__cover:active {
@@ -761,7 +785,7 @@ button:disabled {
   border-radius: 50%;
   background: color-mix(in srgb, var(--surface-strong) 88%, transparent);
   color: var(--accent);
-  box-shadow: 0 3px 10px rgb(0 0 0 / 22%);
+  box-shadow: var(--shadow-float);
   backdrop-filter: blur(10px);
 }
 
@@ -778,7 +802,7 @@ button:disabled {
 
 .shelf-card__text strong {
   overflow: hidden;
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
   letter-spacing: -0.01em;
   text-overflow: ellipsis;
@@ -788,15 +812,15 @@ button:disabled {
 .shelf-card__text small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .shelf-card__text em {
   margin-top: 2px;
-  color: var(--accent);
-  font-size: 12px;
+  color: var(--muted);
+  font-size: var(--text-sm);
   font-style: normal;
 }
 
@@ -806,7 +830,7 @@ button:disabled {
 
 .ios-section__title {
   margin: 0 0 9px;
-  font-size: 22px;
+  font-size: var(--text-2xl);
   font-weight: 700;
   letter-spacing: -0.02em;
 }
@@ -814,7 +838,7 @@ button:disabled {
 /* iOS 的内嵌分组列表：整组一个圆角块，行与行之间是缩进的细分隔线。 */
 .ios-inset-list {
   overflow: hidden;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--paper-deep);
 }
 
@@ -831,7 +855,7 @@ button:disabled {
   padding: 0 15px;
   background: transparent;
   color: var(--ink);
-  font-size: 17px;
+  font-size: var(--text-lg);
   text-align: left;
 }
 
@@ -868,7 +892,7 @@ button:disabled {
 
 .ios-row__main strong {
   overflow: hidden;
-  font-size: 16px;
+  font-size: var(--text-callout);
   font-weight: 600;
   letter-spacing: -0.01em;
   text-overflow: ellipsis;
@@ -878,15 +902,15 @@ button:disabled {
 .ios-row__main small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .ios-row__main em {
   margin-top: 1px;
-  color: var(--accent);
-  font-size: 12px;
+  color: var(--muted);
+  font-size: var(--text-sm);
   font-style: normal;
 }
 
@@ -904,7 +928,7 @@ button:disabled {
 
 .ios-row__value {
   color: var(--muted);
-  font-size: 16px;
+  font-size: var(--text-callout);
 }
 
 .ios-row__check {
@@ -938,14 +962,14 @@ button:disabled {
 
 .grid-heading h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: var(--text-2xl);
   font-weight: 700;
   letter-spacing: -0.02em;
 }
 
 .grid-heading small {
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 /* 主页：Apple「图书」式横滑大卡，卡片底色按封面主色染。 */
@@ -955,7 +979,7 @@ button:disabled {
 
 .home-row__title {
   margin: 0 20px 12px;
-  font-size: 22px;
+  font-size: var(--text-2xl);
   font-weight: 700;
   letter-spacing: -0.02em;
 }
@@ -983,7 +1007,7 @@ button:disabled {
   align-items: center;
   gap: 12px;
   padding: 13px 14px;
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   background: color-mix(
     in srgb,
     var(--book-accent, var(--accent)) 20%,
@@ -1005,7 +1029,7 @@ button:disabled {
   background: transparent;
   color: inherit;
   text-align: left;
-  transition: transform 120ms ease;
+  transition: transform var(--dur-fast) ease;
 }
 
 .home-card__open:active {
@@ -1027,7 +1051,7 @@ button:disabled {
 .home-card__meta strong {
   display: -webkit-box;
   overflow: hidden;
-  font-size: 16px;
+  font-size: var(--text-callout);
   font-weight: 600;
   line-height: 1.25;
   -webkit-box-orient: vertical;
@@ -1038,7 +1062,7 @@ button:disabled {
 .home-card__meta em {
   overflow: hidden;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-style: normal;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -1061,7 +1085,7 @@ button:disabled {
     inset 0 -0.5px 0 var(--glass-shade),
     0 3px 8px rgb(20 26 46 / 18%);
   color: var(--ink);
-  transition: transform 150ms ease;
+  transition: transform var(--dur-fast) ease;
 }
 
 .home-card__play:active {
@@ -1075,7 +1099,7 @@ button:disabled {
   gap: 22px;
   margin: 8px 20px 30px;
   padding: 26px 24px;
-  border-radius: 26px;
+  border-radius: var(--radius-xl);
   background:
     radial-gradient(
       120% 90% at 82% 8%,
@@ -1175,8 +1199,8 @@ button:disabled {
 
 .zen-board__caption {
   margin: 0;
-  font-family: var(--font-serif);
-  font-size: 17px;
+  font-family: var(--font-sans);
+  font-size: var(--text-lg);
   letter-spacing: 0.06em;
 }
 
@@ -1194,14 +1218,14 @@ button:disabled {
 
 .zen-board__stats dt {
   color: var(--subtle);
-  font-size: 11px;
+  font-size: var(--text-xs);
   letter-spacing: 0.16em;
 }
 
 .zen-board__stats dd {
   margin: 0;
-  font-family: var(--font-serif);
-  font-size: 15px;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
 }
 
 @media (max-width: 420px) {
@@ -1229,7 +1253,7 @@ button:disabled {
 .zen-log {
   margin: 0 20px 30px;
   padding: 22px 20px;
-  border-radius: 26px;
+  border-radius: var(--radius-xl);
   background: var(--surface);
   box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent);
 }
@@ -1243,8 +1267,8 @@ button:disabled {
 
 .zen-log__title {
   margin: 0;
-  font-family: var(--font-serif);
-  font-size: 16px;
+  font-family: var(--font-sans);
+  font-size: var(--text-callout);
   font-weight: 500;
 }
 
@@ -1255,7 +1279,7 @@ button:disabled {
   padding: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .zen-log__list {
@@ -1269,7 +1293,7 @@ button:disabled {
   align-items: baseline;
   gap: 12px;
   padding: 11px 0;
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .zen-log__entry + .zen-log__entry {
@@ -1280,7 +1304,7 @@ button:disabled {
   flex-shrink: 0;
   min-width: 4.5em;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1311,14 +1335,14 @@ button:disabled {
 
 .zen-history__head h2 {
   margin: 0;
-  font-family: var(--font-serif);
-  font-size: 15px;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
   font-weight: 500;
 }
 
 .zen-history__head small {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .book-grid {
@@ -1346,8 +1370,8 @@ button:disabled {
   width: 100%;
   height: auto;
   aspect-ratio: 2 / 3;
-  box-shadow: 0 12px 26px rgb(0 0 0 / 22%);
-  transition: transform 160ms ease;
+  box-shadow: var(--shadow-cover);
+  transition: transform var(--dur-fast) ease;
 }
 
 .grid-book__cover:active .book-cover {
@@ -1359,13 +1383,13 @@ button:disabled {
   top: 8px;
   left: 8px;
   padding: 3px 9px;
-  border-radius: 980px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: white;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
   letter-spacing: 0.01em;
-  box-shadow: 0 2px 6px rgb(0 0 0 / 22%);
+  box-shadow: var(--shadow-control);
 }
 
 .grid-book__footer {
@@ -1379,7 +1403,7 @@ button:disabled {
 .grid-book__progress {
   overflow: hidden;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
   letter-spacing: -0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1402,8 +1426,8 @@ button:disabled {
     inset 0 -0.5px 0 var(--glass-shade);
   color: var(--ink);
   transition:
-    background 150ms ease,
-    transform 150ms ease;
+    background var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
 }
 
 .grid-book__more:active {
@@ -1420,7 +1444,7 @@ button:disabled {
 .book-actions__author {
   margin: -4px 0 10px;
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .book-action {
@@ -1430,14 +1454,14 @@ button:disabled {
   width: 100%;
   min-height: 52px;
   padding: 0 6px;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: transparent;
   color: var(--ink);
-  font-size: 16px;
+  font-size: var(--text-callout);
   font-weight: 500;
   letter-spacing: -0.01em;
   text-align: left;
-  transition: background 150ms ease;
+  transition: background var(--dur-fast) ease;
 }
 
 .book-action:active {
@@ -1475,7 +1499,7 @@ button:disabled {
 
 .library-miss p {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.7;
   overflow-wrap: anywhere;
 }
@@ -1511,20 +1535,20 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 50%;
   background: color-mix(in srgb, var(--surface-strong) 45%, transparent);
-  color: var(--accent);
+  color: var(--subtle);
 }
 
 .empty-state h2 {
   margin: 18px 0 8px;
-  font-family: var(--font-serif);
-  font-size: 22px;
+  font-family: var(--font-sans);
+  font-size: var(--text-2xl);
 }
 
 .empty-state p {
   max-width: 350px;
   margin: 0 0 20px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.7;
 }
 
@@ -1540,7 +1564,7 @@ button:disabled {
 .ios-nav-bar > span {
   max-width: 60%;
   overflow: hidden;
-  font-size: 17px;
+  font-size: var(--text-lg);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1555,7 +1579,7 @@ button:disabled {
   padding: 6px;
   background: transparent;
   color: var(--accent);
-  font-size: 17px;
+  font-size: var(--text-lg);
 }
 
 .ios-segmented {
@@ -1564,16 +1588,16 @@ button:disabled {
   grid-auto-flow: column;
   margin-bottom: 20px;
   padding: 2px;
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: rgb(118 118 128 / 12%);
 }
 
 .ios-segmented button {
   min-height: 30px;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--ink);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 500;
 }
 
@@ -1593,7 +1617,7 @@ button:disabled {
 .notes-calendar {
   margin-bottom: 14px;
   padding: 14px 12px;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--paper-deep);
 }
 
@@ -1611,7 +1635,7 @@ button:disabled {
   justify-content: center;
   width: 26px;
   height: 26px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--muted);
 }
@@ -1619,8 +1643,8 @@ button:disabled {
 .notes-calendar__head strong {
   min-width: 92px;
   color: var(--ink);
-  font-family: var(--font-serif);
-  font-size: 14px;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
   text-align: center;
 }
 
@@ -1633,7 +1657,7 @@ button:disabled {
 .notes-calendar__weekdays span {
   padding-bottom: 6px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   text-align: center;
 }
 
@@ -1644,10 +1668,10 @@ button:disabled {
   justify-content: center;
   height: 34px;
   margin: 1px 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--ink);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
 }
 
 .notes-calendar__day:disabled {
@@ -1661,7 +1685,7 @@ button:disabled {
   left: 50%;
   width: 4px;
   height: 4px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   transform: translateX(-50%);
 }
@@ -1682,7 +1706,7 @@ button:disabled {
 .notes-calendar__empty {
   margin: 6px 0 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   text-align: center;
 }
 
@@ -1692,18 +1716,18 @@ button:disabled {
   gap: 6px;
   margin: 0 0 14px;
   padding: 6px 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent-deep);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   font-weight: 500;
 }
 
 .ink-summary {
   margin: 2px 0 14px;
   color: var(--muted);
-  font-family: var(--font-serif);
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
   letter-spacing: 0.04em;
 }
 
@@ -1725,8 +1749,8 @@ button:disabled {
   overflow: hidden;
   border-bottom: 1px solid color-mix(in srgb, var(--ink) 13%, transparent);
   color: var(--muted);
-  font-family: var(--font-serif);
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
   font-weight: 500;
   letter-spacing: 0.04em;
   text-overflow: ellipsis;
@@ -1748,8 +1772,8 @@ button:disabled {
 
 .book-notes-hero strong {
   overflow: hidden;
-  font-family: var(--font-serif);
-  font-size: 17px;
+  font-family: var(--font-sans);
+  font-size: var(--text-lg);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1758,21 +1782,21 @@ button:disabled {
 .book-notes-hero small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .book-notes-hero em {
-  color: var(--accent);
-  font-size: 12px;
+  color: var(--muted);
+  font-size: var(--text-sm);
   font-style: normal;
 }
 
 .notes-book-row__date {
   flex: 0 0 auto;
   color: var(--subtle);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .ink-note {
@@ -1809,7 +1833,7 @@ button:disabled {
   align-items: center;
   gap: 6px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 
 .ink-note__chapter {
@@ -1829,7 +1853,7 @@ button:disabled {
   margin: 0;
   color: var(--ink);
   font-family: var(--font-serif);
-  font-size: 15px;
+  font-size: var(--text-base);
   letter-spacing: 0.01em;
   line-height: 1.95;
 }
@@ -1877,11 +1901,11 @@ button:disabled {
 .ink-note__thought {
   display: block;
   padding: 10px 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--ink) 5%, transparent);
   color: var(--muted);
   font-family: var(--font-serif);
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.8;
 }
 
@@ -1899,7 +1923,7 @@ button:disabled {
   padding: 0;
   background: none;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .ink-note__actions button:last-child {
@@ -1919,19 +1943,19 @@ button:disabled {
   border-radius: 0 9px 9px 0;
   background: var(--paper-deep);
   font-family: var(--font-serif);
-  font-size: 15px;
+  font-size: var(--text-base);
   line-height: 1.7;
 }
 
 .thought-editor textarea {
   padding: 12px 13px;
   border: 0;
-  border-radius: 11px;
+  border-radius: var(--radius-md);
   outline: 0;
   background: var(--paper-deep);
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 16px;
+  font-size: var(--text-callout);
   line-height: 1.65;
   resize: vertical;
 }
@@ -1957,7 +1981,7 @@ button:disabled {
   font-family: var(--font-sans);
   font-size: max(13.5px, calc(var(--reader-font-size) * 0.8));
   line-height: 1.75;
-  animation: ai-inline-in 200ms ease both;
+  animation: ai-inline-in var(--dur-base) ease both;
 }
 
 @keyframes ai-inline-in {
@@ -1996,7 +2020,7 @@ button:disabled {
   align-items: center;
   justify-content: center;
   margin-right: -6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--reader-muted);
 }
@@ -2011,7 +2035,7 @@ button:disabled {
   gap: 8px;
   padding: 4px 4px 4px 14px;
   border: 1px solid var(--reader-line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--reader-surface);
 }
 
@@ -2037,7 +2061,7 @@ button:disabled {
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: #fff;
 }
@@ -2055,7 +2079,7 @@ button:disabled {
 .ai-inline__starter {
   padding: 6px 12px;
   border: 1px solid var(--reader-line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--reader-muted);
   font-family: inherit;
@@ -2122,7 +2146,7 @@ button:disabled {
   flex-direction: column;
   /* 一块平整的纸，不做渐变——之前那层冷灰渐变在半空的屏幕上像没加载完。 */
   background: var(--paper);
-  animation: fade-in 160ms ease both;
+  animation: fade-in var(--dur-fast) ease both;
 }
 
 /* 没有标题栏。之前那条铺满 safe-area 的纯色顶栏正是要躲开的挡块——现在内容
@@ -2137,11 +2161,11 @@ button:disabled {
   height: 38px;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--paper) 72%, transparent);
   backdrop-filter: blur(10px);
   color: color-mix(in srgb, var(--ink) 50%, transparent);
-  transition: opacity 0.22s ease;
+  transition: opacity var(--dur-base) ease;
 }
 
 .ai-chat__close:active {
@@ -2189,7 +2213,7 @@ button:disabled {
 
 .ai-chat__source > span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   letter-spacing: 0.08em;
 }
 
@@ -2202,8 +2226,8 @@ button:disabled {
 
 .ai-chat__intro strong {
   color: var(--ink);
-  font-family: var(--font-serif);
-  font-size: 30px;
+  font-family: var(--font-sans);
+  font-size: var(--text-3xl);
   font-weight: 500;
   letter-spacing: -0.03em;
 }
@@ -2211,7 +2235,7 @@ button:disabled {
 .ai-chat__intro p {
   margin: -4px 0 6px;
   color: var(--muted);
-  font-size: 14.5px;
+  font-size: var(--text-base);
   line-height: 1.65;
 }
 
@@ -2225,11 +2249,11 @@ button:disabled {
 .ai-chat__starter {
   padding: 15px 17px;
   border: 1px solid var(--line-soft);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 15px;
+  font-size: var(--text-base);
   text-align: left;
 }
 
@@ -2244,10 +2268,10 @@ button:disabled {
   margin: 0;
   padding: 14px 16px;
   border: 1px solid var(--line-soft);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.6;
 }
 
@@ -2260,7 +2284,7 @@ button:disabled {
   margin: 0;
   padding: 0 20px 6px;
   color: var(--danger);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .ai-chat__composer {
@@ -2292,7 +2316,7 @@ html[data-keyboard-open] .ai-chat__composer {
   gap: 8px;
   padding: 6px 6px 6px 18px;
   border: 1px solid var(--line-soft);
-  border-radius: 24px;
+  border-radius: var(--radius-xl);
   background: var(--surface);
   box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 6%, transparent);
 }
@@ -2315,7 +2339,7 @@ html[data-keyboard-open] .ai-chat__composer {
   background: transparent;
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 17px;
+  font-size: var(--text-lg);
   line-height: 1.5;
   resize: none;
 }
@@ -2331,10 +2355,10 @@ html[data-keyboard-open] .ai-chat__composer {
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: #fff;
-  transition: transform 140ms ease, opacity 140ms ease;
+  transition: transform var(--dur-fast) ease, opacity var(--dur-fast) ease;
 }
 
 .ai-chat__send:active {
@@ -2351,14 +2375,14 @@ html[data-keyboard-open] .ai-chat__composer {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
   color: color-mix(in srgb, var(--ink) 88%, transparent);
   font-family: var(--font-serif);
-  font-size: 15px;
+  font-size: var(--text-base);
   line-height: 1.75;
   overscroll-behavior: contain;
 }
 
 .ai-ask__reasoning {
   padding: 10px 13px;
-  border-radius: 11px;
+  border-radius: var(--radius-md);
   background: var(--paper-deep);
 }
 
@@ -2369,17 +2393,17 @@ html[data-keyboard-open] .ai-chat__composer {
   padding: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
 }
 
 .ai-ask__reasoning-toggle svg {
-  transition: transform 0.15s ease;
+  transition: transform var(--dur-fast) ease;
 }
 
 .ai-ask__reasoning-text {
   margin: 8px 0 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.65;
   white-space: pre-wrap;
 }
@@ -2395,7 +2419,7 @@ html[data-keyboard-open] .ai-chat__composer {
   margin: 0;
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 17px;
+  font-size: var(--text-lg);
   font-weight: 600;
   letter-spacing: -0.01em;
   line-height: 1.55;
@@ -2406,7 +2430,7 @@ html[data-keyboard-open] .ai-chat__composer {
 .ai-ask__quote--sent {
   max-height: 6em;
   padding: 9px 13px;
-  font-size: 13.5px;
+  font-size: var(--text-md);
   line-height: 1.65;
 }
 
@@ -2427,7 +2451,7 @@ html[data-keyboard-open] .ai-chat__composer {
 }
 
 .ai-ask__answer {
-  font-size: 16px;
+  font-size: var(--text-callout);
   line-height: 1.85;
 }
 
@@ -2512,7 +2536,7 @@ html[data-keyboard-open] .ai-chat__composer {
   overflow-x: auto;
   margin: 0 0 1em;
   padding: 0.85em 1em;
-  border-radius: 13px;
+  border-radius: var(--radius-md);
   background: var(--paper-deep);
 }
 
@@ -2557,7 +2581,7 @@ html[data-keyboard-open] .ai-chat__composer {
 
 :is(.ai-ask__answer, .ai-inline__answer) img {
   max-width: 100%;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
 }
 
 :is(.ai-ask__answer, .ai-inline__answer) input[type="checkbox"] {
@@ -2576,7 +2600,7 @@ html[data-keyboard-open] .ai-chat__composer {
   padding: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
 }
 
 .ai-ask__copy:active {
@@ -2599,11 +2623,11 @@ html[data-keyboard-open] .ai-chat__composer {
 }
 
 .ai-chat__thinking i:nth-child(2) {
-  animation-delay: 120ms;
+  animation-delay: var(--dur-fast);
 }
 
 .ai-chat__thinking i:nth-child(3) {
-  animation-delay: 240ms;
+  animation-delay: var(--dur-base);
 }
 
 @keyframes ai-thinking {
@@ -2643,7 +2667,7 @@ html[data-keyboard-open] .ai-chat__composer {
 
 .ai-setup__field > span {
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   letter-spacing: 0.02em;
 }
 
@@ -2651,12 +2675,12 @@ html[data-keyboard-open] .ai-chat__composer {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   outline: 0;
   background: var(--surface);
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 16px;
+  font-size: var(--text-callout);
 }
 
 .ai-setup__field input:focus {
@@ -2670,7 +2694,7 @@ html[data-keyboard-open] .ai-chat__composer {
 .ai-setup__note {
   margin: 0;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   line-height: 1.6;
 }
 
@@ -2685,7 +2709,7 @@ html[data-keyboard-open] .ai-chat__composer {
   margin: 0;
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 15px;
+  font-size: var(--text-base);
   font-weight: 600;
 }
 
@@ -2696,7 +2720,7 @@ html[data-keyboard-open] .ai-chat__composer {
   padding: 0;
   background: transparent;
   color: var(--accent-deep);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .ai-setup__reload:disabled {
@@ -2717,7 +2741,7 @@ html[data-keyboard-open] .ai-chat__composer {
 .ai-setup__status {
   margin: -4px 0 0;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   line-height: 1.6;
 }
 
@@ -2731,7 +2755,7 @@ html[data-keyboard-open] .ai-chat__composer {
   gap: 8px;
   padding: 0 13px;
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--muted);
 }
@@ -2744,14 +2768,14 @@ html[data-keyboard-open] .ai-chat__composer {
   background: transparent;
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 15px;
+  font-size: var(--text-base);
 }
 
 .ai-setup__models {
   overflow-y: auto;
   max-height: min(36dvh, 288px);
   border: 1px solid var(--line-soft);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   overscroll-behavior: contain;
 }
@@ -2768,7 +2792,7 @@ html[data-keyboard-open] .ai-chat__composer {
   background: transparent;
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 15px;
+  font-size: var(--text-base);
   text-align: left;
 }
 
@@ -2795,7 +2819,7 @@ html[data-keyboard-open] .ai-chat__composer {
   margin: 0;
   padding: 18px 15px;
   color: var(--muted);
-  font-size: 13.5px;
+  font-size: var(--text-md);
   text-align: center;
 }
 
@@ -2806,7 +2830,7 @@ html[data-keyboard-open] .ai-chat__composer {
   gap: 16px;
   padding: 14px 16px;
   border: 1px solid var(--line-soft);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
 }
 
@@ -2818,13 +2842,13 @@ html[data-keyboard-open] .ai-chat__composer {
 
 .ai-setup__switch strong {
   color: var(--ink);
-  font-size: 15px;
+  font-size: var(--text-base);
   font-weight: 600;
 }
 
 .ai-setup__switch em {
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   font-style: normal;
   line-height: 1.5;
 }
@@ -2851,9 +2875,9 @@ html[data-keyboard-open] .ai-chat__composer {
   display: block;
   width: 100%;
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--ink) 16%, transparent);
-  transition: background 0.2s ease;
+  transition: background var(--dur-base) ease;
 }
 
 .ai-switch__thumb {
@@ -2863,8 +2887,8 @@ html[data-keyboard-open] .ai-chat__composer {
   margin: 2px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 2px 6px rgb(0 0 0 / 18%);
-  transition: transform 0.2s ease;
+  box-shadow: var(--shadow-control);
+  transition: transform var(--dur-base) ease;
 }
 
 .ai-switch input:checked ~ .ai-switch__track {
@@ -2883,7 +2907,7 @@ html[data-keyboard-open] .ai-chat__composer {
 .settings-group {
   margin-bottom: 18px;
   padding: 16px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--paper-deep);
 }
 
@@ -2892,20 +2916,20 @@ html[data-keyboard-open] .ai-chat__composer {
   align-items: center;
   gap: 9px;
   margin-bottom: 14px;
-  color: var(--accent-deep);
+  color: var(--muted);
 }
 
 .settings-group__title h2 {
   margin: 0;
   color: var(--ink);
-  font-family: var(--font-serif);
-  font-size: 17px;
+  font-family: var(--font-sans);
+  font-size: var(--text-lg);
 }
 
 .settings-hint {
   margin: -6px 0 12px;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -2933,12 +2957,12 @@ html[data-keyboard-open] .ai-chat__composer {
 }
 
 .settings-row strong {
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .settings-row small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-2xs);
 }
 
 .settings-row select,
@@ -2948,11 +2972,11 @@ html[data-keyboard-open] .ai-chat__composer {
   min-height: 42px;
   padding: 0 11px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   outline: 0;
   background: var(--surface);
   color: var(--ink);
-  font-size: 16px;
+  font-size: var(--text-callout);
 }
 
 .settings-row input[type="checkbox"] {
@@ -2972,7 +2996,7 @@ input[type="range"] {
   display: grid;
   gap: 2px;
   padding: 2px;
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: rgb(118 118 128 / 12%);
 }
 
@@ -2989,10 +3013,10 @@ input[type="range"] {
 .compact-toggle button {
   min-height: 30px;
   padding: 0 12px;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--ink);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 500;
 }
 
@@ -3027,16 +3051,16 @@ input[type="range"] {
 }
 
 .storage-summary strong {
-  color: var(--accent-deep);
-  font-family: var(--font-serif);
-  font-size: 21px;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-2xl);
 }
 
 .storage-summary span,
 .privacy-note,
 .app-version {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   line-height: 1.65;
 }
 
@@ -3055,7 +3079,7 @@ input[type="range"] {
   gap: 7px;
   margin: 4px 0;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
 }
 
 .sync-status .spin {
@@ -3117,7 +3141,7 @@ html[data-keyboard-open] .bottom-bar {
   display: flex;
   gap: 2px;
   padding: 7px 8px;
-  border-radius: 32px;
+  border-radius: var(--radius-xl);
   border: 0.5px solid var(--glass-edge);
   background: var(--glass-fill);
   backdrop-filter: var(--glass-blur);
@@ -3136,14 +3160,14 @@ html[data-keyboard-open] .bottom-bar {
   justify-content: center;
   gap: 2px;
   padding: 4px 10px;
-  border-radius: 24px;
+  border-radius: var(--radius-xl);
   background: transparent;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   letter-spacing: 0.01em;
   transition:
-    color 160ms ease,
-    background 160ms ease;
+    color var(--dur-fast) ease,
+    background var(--dur-fast) ease;
 }
 
 .bottom-nav button.is-active {
@@ -3161,10 +3185,10 @@ html[data-keyboard-open] .bottom-bar {
   height: 46px;
   align-items: center;
   justify-content: center;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--accent);
   color: white;
-  box-shadow: 0 10px 20px rgb(72 88 106 / 16%);
+  box-shadow: var(--shadow-float);
 }
 
 .mini-player {
@@ -3181,7 +3205,7 @@ html[data-keyboard-open] .bottom-bar {
   margin: auto;
   padding: 7px 7px 7px 9px;
   border: 0.5px solid var(--glass-edge);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--surface-strong) 78%, transparent);
   backdrop-filter: var(--glass-blur);
   box-shadow:
@@ -3220,14 +3244,14 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .mini-player__main strong {
-  font-family: var(--font-serif);
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
 }
 
 .mini-player__main small {
   margin-top: 3px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-2xs);
 }
 
 .mini-player__stop {
@@ -3299,8 +3323,8 @@ html[data-keyboard-open] .bottom-bar {
   user-select: none;
   -webkit-touch-callout: none;
   transition:
-    opacity 240ms ease,
-    transform 240ms ease;
+    opacity var(--dur-base) ease,
+    transform var(--dur-base) ease;
 }
 
 /* 只有真正的控件才接触摸；进度、剩余页这类展示性 span 保持 pointer-events: none，
@@ -3358,14 +3382,14 @@ html[data-keyboard-open] .bottom-bar {
   width: 34px;
   height: 34px;
   border: 0.5px solid var(--glass-edge);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--glass-fill);
   backdrop-filter: var(--glass-blur);
   color: var(--reader-muted);
   opacity: 0.5;
   box-shadow: var(--glass-shadow);
   animation: recall-in 260ms ease both;
-  transition: opacity 160ms ease;
+  transition: opacity var(--dur-fast) ease;
 }
 
 .reader-recall:active {
@@ -3386,15 +3410,15 @@ html[data-keyboard-open] .bottom-bar {
   max-width: 62%;
   min-height: 36px;
   padding: 0 14px;
-  border-radius: 980px;
+  border-radius: var(--radius-pill);
   color: var(--reader-ink);
 }
 
 /* 顶部胶囊不带玻璃底：它悬在正文标题正上方，半透明+模糊会把滚过来的文字
    叠成一团糊字，看着像被挡住了。去掉背景，纯文字浮在正文之上就够。 */
 .reader-chrome__chapter {
-  font-family: var(--font-serif);
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
 }
 
 .reader-chrome__chapter span {
@@ -3413,7 +3437,7 @@ html[data-keyboard-open] .bottom-bar {
   align-items: center;
   height: 40px;
   padding: 0 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 0.5px solid var(--glass-edge);
   background: var(--glass-fill);
   backdrop-filter: var(--glass-blur);
@@ -3423,7 +3447,7 @@ html[data-keyboard-open] .bottom-bar {
     var(--glass-shadow);
   color: var(--reader-muted);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -3442,7 +3466,7 @@ html[data-keyboard-open] .bottom-bar {
   align-items: center;
   height: 40px;
   padding: 0 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 0.5px solid var(--glass-edge);
   background: var(--glass-fill);
   backdrop-filter: var(--glass-blur);
@@ -3452,7 +3476,7 @@ html[data-keyboard-open] .bottom-bar {
     var(--glass-shadow);
   color: var(--reader-muted);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: var(--text-sm);
   letter-spacing: 0.02em;
   transform: translateX(-50%);
   pointer-events: none;
@@ -3469,7 +3493,7 @@ html[data-keyboard-open] .bottom-bar {
   justify-content: center;
   border-radius: 50%;
   color: var(--reader-ink);
-  transition: transform 150ms ease;
+  transition: transform var(--dur-fast) ease;
 }
 
 .reader-chrome__menu {
@@ -3516,14 +3540,14 @@ html[data-keyboard-open] .bottom-bar {
   gap: 12px;
   padding: 13px 16px;
   border: 0.5px solid var(--glass-edge);
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: var(--glass-fill);
   backdrop-filter: var(--glass-blur);
   box-shadow: var(--glass-shadow);
   color: var(--reader-ink);
   font-family: var(--font-sans);
-  font-size: 15px;
-  transition: transform 150ms ease;
+  font-size: var(--text-base);
+  transition: transform var(--dur-fast) ease;
 }
 
 .reader-menu__row:active {
@@ -3719,9 +3743,9 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .reader-title span {
-  color: var(--accent);
+  color: var(--reader-muted);
   font-family: var(--font-sans);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   font-weight: 700;
   letter-spacing: 0.18em;
 }
@@ -3739,7 +3763,7 @@ html[data-keyboard-open] .bottom-bar {
   margin: 0;
   color: var(--reader-muted);
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 
 .reader-article .reader-block {
@@ -3841,8 +3865,8 @@ html[data-keyboard-open] .bottom-bar {
   box-decoration-break: clone;
   -webkit-tap-highlight-color: transparent;
   transition:
-    background 150ms ease,
-    box-shadow 150ms ease;
+    background var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
 }
 
 /* 用 box-shadow 而不是 padding 撑开朗读高亮，避免逐句推进时正文抖动。 */
@@ -3878,8 +3902,8 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .reader-end span {
-  color: var(--accent);
-  font-size: 10px;
+  color: var(--reader-muted);
+  font-size: var(--text-2xs);
   font-weight: 700;
   letter-spacing: 0.18em;
 }
@@ -3887,7 +3911,7 @@ html[data-keyboard-open] .bottom-bar {
 .reader-end p {
   margin: 8px 0 0;
   color: var(--reader-muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 
 /* 默认是贴着字脚的下划线；旧数据没有样式字段时也走这一种。
@@ -3954,7 +3978,7 @@ html[data-keyboard-open] .bottom-bar {
   flex-direction: column;
   padding: 4px;
   border: 0.5px solid rgb(255 255 255 / 12%);
-  border-radius: 13px;
+  border-radius: var(--radius-md);
   background: var(--popover-fill);
   backdrop-filter: var(--glass-blur);
   color: #f5f5f7;
@@ -3996,7 +4020,7 @@ html[data-keyboard-open] .bottom-bar {
   gap: 3px;
   margin: 4px 4px 0;
   padding: 2px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: rgb(255 255 255 / 8%);
 }
 
@@ -4005,7 +4029,7 @@ html[data-keyboard-open] .bottom-bar {
   padding: 0 12px;
   border-radius: 6px;
   color: rgb(245 245 247 / 72%);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .reader-popover__styles button.is-active {
@@ -4061,10 +4085,10 @@ html[data-keyboard-open] .bottom-bar {
   align-items: center;
   gap: 5px;
   padding: 0 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
-  font-size: 13px;
+  font-size: var(--text-md);
   white-space: nowrap;
 }
 
@@ -4088,7 +4112,7 @@ html[data-keyboard-open] .bottom-bar {
   align-items: center;
   justify-content: center;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   letter-spacing: 0.08em;
 }
 
@@ -4105,9 +4129,7 @@ html[data-keyboard-open] .bottom-bar {
 .player-main > .book-cover--large {
   width: 132px;
   height: 182px;
-  box-shadow:
-    0 23px 45px rgb(44 37 28 / 18%),
-    inset 7px 0 8px rgb(40 34 25 / 4%);
+  box-shadow: var(--shadow-cover);
 }
 
 .player-title {
@@ -4119,8 +4141,8 @@ html[data-keyboard-open] .bottom-bar {
 .player-title h1 {
   margin: 0 0 7px;
   overflow: hidden;
-  font-family: var(--font-serif);
-  font-size: 29px;
+  font-family: var(--font-sans);
+  font-size: var(--text-3xl);
   letter-spacing: -0.03em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4129,8 +4151,8 @@ html[data-keyboard-open] .bottom-bar {
 .player-title p {
   margin: 0;
   color: var(--muted);
-  font-family: var(--font-serif);
-  font-size: 14px;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
 }
 
 .player-mode-pills {
@@ -4138,23 +4160,23 @@ html[data-keyboard-open] .bottom-bar {
   gap: 4px;
   margin-bottom: 22px;
   padding: 3px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface);
 }
 
 .player-mode-pills button {
   min-width: 64px;
   padding: 6px 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   background: transparent;
 }
 
 .player-mode-pills button.is-active {
   background: var(--surface-strong);
   color: var(--ink);
-  box-shadow: 0 2px 8px rgb(44 37 28 / 10%);
+  box-shadow: var(--shadow-control);
 }
 
 .player-transcript-inline {
@@ -4171,14 +4193,14 @@ html[data-keyboard-open] .bottom-bar {
   margin: 0;
   color: var(--subtle);
   font-family: var(--font-serif);
-  font-size: 15px;
+  font-size: var(--text-base);
   line-height: 1.75;
   text-align: center;
 }
 
 .player-transcript-inline p.is-current {
   color: var(--ink);
-  font-size: 17px;
+  font-size: var(--text-lg);
 }
 
 .player-progress {
@@ -4195,7 +4217,7 @@ html[data-keyboard-open] .bottom-bar {
   justify-content: space-between;
   margin-top: 7px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-2xs);
 }
 
 .player-controls {
@@ -4231,7 +4253,7 @@ html[data-keyboard-open] .bottom-bar {
   border-radius: 50%;
   background: var(--accent);
   color: white;
-  box-shadow: 0 12px 25px rgb(83 101 121 / 23%);
+  box-shadow: var(--shadow-float);
 }
 
 .player-buffering-icon {
@@ -4242,7 +4264,7 @@ html[data-keyboard-open] .bottom-bar {
   width: 100%;
   margin: -8px 0 15px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   text-align: center;
 }
 
@@ -4269,7 +4291,7 @@ html[data-keyboard-open] .bottom-bar {
 
 .skip-control span {
   position: absolute;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 700;
 }
 
@@ -4277,10 +4299,10 @@ html[data-keyboard-open] .bottom-bar {
   width: 100%;
   margin: -8px 0 15px;
   padding: 10px 12px;
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: rgb(157 75 66 / 8%);
   color: var(--danger);
-  font-size: 11px;
+  font-size: var(--text-xs);
   text-align: center;
 }
 
@@ -4304,20 +4326,20 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .player-icon-row__static {
-  color: var(--accent-deep);
+  color: var(--muted);
 }
 
 .player-icon-row small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-2xs);
 }
 
 .player-icon-row__static small {
-  color: var(--accent-deep);
+  color: var(--muted);
 }
 
 .player-controls__text small {
-  font-size: 10px;
+  font-size: var(--text-2xs);
 }
 
 .view-current-text {
@@ -4330,13 +4352,13 @@ html[data-keyboard-open] .bottom-bar {
   background: transparent;
   color: var(--accent-deep);
   font-family: var(--font-serif);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .sync-status {
   margin: 1px 0 0;
   color: var(--subtle);
-  font-size: 9px;
+  font-size: var(--text-2xs);
 }
 
 .modal-backdrop {
@@ -4354,7 +4376,7 @@ html[data-keyboard-open] .bottom-bar {
   padding-top: 40px;
   background: rgb(25 23 20 / 34%);
   backdrop-filter: blur(5px);
-  animation: fade-in 240ms ease;
+  animation: fade-in var(--dur-base) ease;
   transition: opacity var(--sheet-exit) ease;
 }
 
@@ -4425,7 +4447,7 @@ html[data-keyboard-open] .modal-sheet {
   left: 50%;
   width: 36px;
   height: 4px;
-  border-radius: 99px;
+  border-radius: var(--radius-pill);
   background: var(--line);
   content: "";
   transform: translateX(-50%);
@@ -4453,8 +4475,8 @@ html[data-keyboard-open] .modal-sheet {
 
 .modal-sheet > header h2 {
   margin: 0;
-  font-family: var(--font-serif);
-  font-size: 20px;
+  font-family: var(--font-sans);
+  font-size: var(--text-xl);
 }
 
 .chapter-list {
@@ -4477,12 +4499,12 @@ html[data-keyboard-open] .modal-sheet {
 
 .chapter-list > button > span {
   color: var(--subtle);
-  font-size: 10px;
+  font-size: var(--text-2xs);
 }
 
 .chapter-list > button > strong {
-  font-family: var(--font-serif);
-  font-size: 14px;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
   font-weight: 500;
 }
 
@@ -4514,7 +4536,7 @@ html[data-keyboard-open] .modal-sheet {
 .toc__cover .book-cover {
   aspect-ratio: 2 / 3;
   border-radius: 5px;
-  box-shadow: 0 4px 12px rgb(0 0 0 / 18%);
+  box-shadow: var(--shadow-cover-sm);
 }
 
 .toc__meta {
@@ -4528,7 +4550,7 @@ html[data-keyboard-open] .modal-sheet {
   overflow: hidden;
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 21px;
+  font-size: var(--text-2xl);
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4536,12 +4558,12 @@ html[data-keyboard-open] .modal-sheet {
 
 .toc__meta span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .toc__meta small {
   color: var(--subtle);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 
 /* 目录自己滚，不带着整张 sheet 一起滚：打开时会直接落到当前章，
@@ -4549,9 +4571,12 @@ html[data-keyboard-open] .modal-sheet {
 .toc__list {
   flex: 1;
   max-height: none;
+  /* 列表铺满 sheet 宽度、用内边距把字收回来：当前章的灰底要往两边探出去，
+     探出的部分得落在列表自己的内边距里，否则左边被裁、右边还会多出一截横向滚动。 */
+  margin: 0 -20px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 4px 0 20px;
+  padding: 4px 20px 20px;
 }
 
 .toc__item {
@@ -4572,9 +4597,12 @@ html[data-keyboard-open] .modal-sheet {
 }
 
 .toc__item.is-active {
-  margin: 2px -20px;
-  padding: 16px 30px;
-  border-radius: 18px;
+  /* 灰底往两边各探出 10px，内边距同步加 10px，字和页码跟其它行对齐。
+     宽度要一起加上，只靠负外边距整行只会左移，右边的页码就缩进去了。 */
+  width: calc(100% + 20px);
+  margin: 2px -10px;
+  padding: 16px 20px;
+  border-radius: var(--radius-lg);
   background: rgb(120 120 128 / 16%);
 }
 
@@ -4588,7 +4616,7 @@ html[data-keyboard-open] .modal-sheet {
   overflow: hidden;
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 17px;
+  font-size: var(--text-lg);
   line-height: 1.4;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -4602,7 +4630,7 @@ html[data-keyboard-open] .modal-sheet {
   justify-content: flex-end;
   color: var(--muted);
   font-family: var(--font-sans);
-  font-size: 16px;
+  font-size: var(--text-callout);
   font-variant-numeric: tabular-nums;
 }
 
@@ -4646,7 +4674,7 @@ html[data-keyboard-open] .modal-sheet {
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   color: var(--ink);
-  box-shadow: 0 2px 10px rgb(0 0 0 / 8%);
+  box-shadow: var(--shadow-control);
 }
 
 .toc__pos {
@@ -4654,7 +4682,7 @@ html[data-keyboard-open] .modal-sheet {
   align-items: center;
   gap: 6px;
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .toc__pos b {
@@ -4721,13 +4749,13 @@ html[data-keyboard-open] .modal-sheet {
   height: 62px;
   align-items: center;
   justify-content: center;
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   border: 1px solid rgb(0 0 0 / 8%);
   font-family: var(--font-serif);
   font-size: 25px;
   transition:
-    box-shadow 150ms ease,
-    transform 150ms ease;
+    box-shadow var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
 }
 
 .rset-theme:active .rset-theme__glyph {
@@ -4756,7 +4784,7 @@ html[data-keyboard-open] .modal-sheet {
 
 .rset-theme__label {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .rset-theme.is-active .rset-theme__label {
@@ -4778,13 +4806,13 @@ html[data-keyboard-open] .modal-sheet {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  border-radius: 13px;
+  border-radius: var(--radius-md);
   border: 1.5px solid var(--line);
   background: color-mix(in srgb, var(--ink) 3%, transparent);
   color: var(--ink);
   transition:
-    border-color 150ms ease,
-    background 150ms ease;
+    border-color var(--dur-fast) ease,
+    background var(--dur-fast) ease;
 }
 
 .font-picker__item.is-active {
@@ -4793,7 +4821,7 @@ html[data-keyboard-open] .modal-sheet {
 }
 
 .font-picker__name {
-  font-size: 20px;
+  font-size: var(--text-xl);
   line-height: 1.2;
 }
 
@@ -4815,7 +4843,7 @@ html[data-keyboard-open] .modal-sheet {
 
 .rset-row__label {
   flex-shrink: 0;
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
 }
 
@@ -4825,7 +4853,7 @@ html[data-keyboard-open] .modal-sheet {
   width: 176px;
   grid-template-columns: 1fr 1fr;
   overflow: hidden;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--ink) 7%, transparent);
 }
 
@@ -4851,11 +4879,11 @@ html[data-keyboard-open] .modal-sheet {
 }
 
 .rset-a--sm {
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .rset-a--lg {
-  font-size: 22px;
+  font-size: var(--text-2xl);
 }
 
 .rset-slider {
@@ -4927,12 +4955,12 @@ html[data-keyboard-open] .modal-sheet {
 }
 
 .voice-settings strong {
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .voice-settings em {
   color: var(--accent-deep);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-style: normal;
 }
 
@@ -4944,7 +4972,7 @@ html[data-keyboard-open] .modal-sheet {
 
 .voice-list small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-2xs);
 }
 
 /* 「选中」和「正在播放」是两回事：云端失败退回系统朗读时两者会对不上，
@@ -4957,7 +4985,7 @@ html[data-keyboard-open] .modal-sheet {
   justify-content: flex-end;
   gap: 4px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-style: normal;
   white-space: nowrap;
 }
@@ -4976,21 +5004,21 @@ html[data-keyboard-open] .modal-sheet {
   align-items: center;
   justify-content: space-between;
   padding: 10px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   margin-top: 12px;
   background: var(--accent-soft);
   color: var(--accent-deep);
-  font-size: 12px;
+  font-size: var(--text-sm);
   gap: 12px;
 }
 
 .voice-retry button {
   min-height: 32px;
   padding: 0 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: #fff;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .import-overlay {
@@ -5017,15 +5045,15 @@ html[data-keyboard-open] .modal-sheet {
   align-items: center;
   justify-content: center;
   margin: 0 auto 18px;
-  border-radius: 18px;
+  border-radius: var(--radius-lg);
   background: var(--accent);
   color: white;
-  box-shadow: 0 14px 30px rgb(78 96 117 / 20%);
+  box-shadow: var(--shadow-float);
 }
 
 .import-overlay small {
-  color: var(--accent-deep);
-  font-size: 10px;
+  color: var(--muted);
+  font-size: var(--text-2xs);
   font-weight: 700;
   letter-spacing: 0.12em;
 }
@@ -5033,8 +5061,8 @@ html[data-keyboard-open] .modal-sheet {
 .import-overlay h2 {
   margin: 9px 0 8px;
   overflow: hidden;
-  font-family: var(--font-serif);
-  font-size: 22px;
+  font-family: var(--font-sans);
+  font-size: var(--text-2xl);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5042,14 +5070,14 @@ html[data-keyboard-open] .modal-sheet {
 .import-overlay p {
   margin: 0 0 17px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .import-overlay > section > span {
   display: block;
   margin-top: 8px;
   color: var(--subtle);
-  font-size: 10px;
+  font-size: var(--text-2xs);
 }
 
 .error-message,
@@ -5069,7 +5097,7 @@ html[data-keyboard-open] .modal-sheet {
 .confirm-dialog p {
   margin: 15px 0 20px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.75;
 }
 
@@ -5094,12 +5122,12 @@ html[data-keyboard-open] .modal-sheet {
   max-width: calc(100% - 36px);
   margin: auto;
   padding: 11px 16px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: #2d2b28;
   color: white;
-  box-shadow: 0 12px 28px rgb(26 22 18 / 22%);
-  font-size: 12px;
-  animation: toast-in 200ms ease both;
+  box-shadow: var(--shadow-float);
+  font-size: var(--text-sm);
+  animation: toast-in var(--dur-base) ease both;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -5113,7 +5141,7 @@ html[data-keyboard-open] .modal-sheet {
   border: 0;
   background: transparent;
   color: var(--mark-blue, #7fb3ff);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
   cursor: pointer;
 }
@@ -5129,7 +5157,7 @@ html[data-keyboard-open] .modal-sheet {
 .app-booting__note {
   margin: 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 @keyframes fade-in {
@@ -5154,7 +5182,7 @@ html[data-keyboard-open] .modal-sheet {
 
 /* 退场和进场走同一条路径，提示条是「滑回去」而不是凭空消失。 */
 .toast.is-leaving {
-  animation: toast-out 180ms ease forwards;
+  animation: toast-out var(--dur-fast) ease forwards;
 }
 
 @keyframes toast-out {
@@ -5192,7 +5220,7 @@ html[data-keyboard-open] .modal-sheet {
 
   .modal-sheet {
     border-bottom: 1px solid var(--glass-edge);
-    border-radius: 20px;
+    border-radius: var(--radius-xl);
   }
 
   .modal-grabber {
@@ -5223,7 +5251,7 @@ html[data-keyboard-open] .modal-sheet {
   .desktop-brand .app-mark {
     width: 42px;
     height: 42px;
-    border-radius: 12px;
+    border-radius: var(--radius-md);
   }
 
   .desktop-brand > div:last-child {
@@ -5233,7 +5261,7 @@ html[data-keyboard-open] .modal-sheet {
   }
 
   .desktop-brand strong {
-    font-family: var(--font-serif);
+    font-family: var(--font-sans);
     font-size: 19px;
   }
 
@@ -5276,11 +5304,11 @@ html[data-keyboard-open] .modal-sheet {
     gap: 12px;
     flex-direction: row;
     padding: 0 15px;
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
 
   .bottom-nav button {
-    border-radius: 10px;
+    border-radius: var(--radius-md);
   }
 
   .bottom-nav button.is-active {
