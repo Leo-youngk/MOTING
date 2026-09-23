@@ -36,6 +36,9 @@
   --shadow-cover-sm: 0 1px 3px rgb(0 0 0 / 16%);
   --shadow-cover: 0 1px 2px rgb(0 0 0 / 14%), 0 8px 20px rgb(0 0 0 / 16%);
   --shadow-float: 0 8px 24px rgb(0 0 0 / 18%);
+  /* 页面里的卡片:一圈发丝线 + 很浅的落影。毛玻璃只给浮在内容上面的层
+     (底栏、迷你播放条、阅读器浮层、弹出面板),页面里的东西底下是纯色,模糊不出东西。 */
+  --shadow-card: 0 0 0 0.5px var(--line-soft), 0 1px 2px rgb(0 0 0 / 5%);
   --dur-fast: 160ms;
   --dur-base: 240ms;
   --paper: #f3f4f7;
@@ -424,13 +427,10 @@ button:disabled {
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 0.5px solid var(--glass-edge);
+  border: 0.5px solid var(--line-soft);
   border-radius: 50%;
-  background: var(--glass-tint);
-  backdrop-filter: var(--glass-blur);
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-control);
   color: var(--muted);
   transition: transform var(--dur-fast) ease;
 }
@@ -469,17 +469,14 @@ button:disabled {
 .icon-button--filled {
   width: 34px;
   height: 34px;
-  border: 0.5px solid var(--glass-edge);
-  background: var(--glass-tint);
-  backdrop-filter: var(--glass-blur);
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade);
+  border: 0.5px solid var(--line-soft);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-control);
 }
 
 @media (hover: hover) {
   .icon-button--filled:hover {
-    background: var(--glass-tint-strong);
+    background: var(--surface);
   }
 }
 
@@ -514,18 +511,15 @@ button:disabled {
 }
 
 .secondary-button {
-  border: 0.5px solid var(--glass-edge);
-  background: var(--glass-tint);
-  backdrop-filter: var(--glass-blur);
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade);
+  border: 0.5px solid var(--line-soft);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-control);
   color: var(--ink);
 }
 
 @media (hover: hover) {
   .secondary-button:hover {
-    background: var(--glass-tint-strong);
+    background: var(--surface);
   }
 }
 
@@ -1013,10 +1007,7 @@ button:disabled {
     var(--book-accent, var(--accent)) 20%,
     var(--surface)
   );
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    0 0 0 0.5px var(--glass-edge),
-    var(--glass-shadow);
+  box-shadow: var(--shadow-card);
   scroll-snap-align: start;
 }
 
@@ -1076,14 +1067,10 @@ button:disabled {
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 0.5px solid var(--glass-edge);
+  border: 0.5px solid var(--line-soft);
   border-radius: 50%;
-  background: var(--glass-tint-strong);
-  backdrop-filter: var(--glass-blur);
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade),
-    0 3px 8px rgb(20 26 46 / 18%);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-control);
   color: var(--ink);
   transition: transform var(--dur-fast) ease;
 }
@@ -1107,10 +1094,7 @@ button:disabled {
       transparent 62%
     ),
     var(--surface);
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    0 0 0 0.5px var(--glass-edge),
-    var(--glass-shadow);
+  box-shadow: var(--shadow-card);
 }
 
 .zen-board__clock {
@@ -1255,7 +1239,7 @@ button:disabled {
   padding: 22px 20px;
   border-radius: var(--radius-xl);
   background: var(--surface);
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent);
+  box-shadow: var(--shadow-card);
 }
 
 .zen-log__head {
@@ -1417,13 +1401,10 @@ button:disabled {
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 0.5px solid var(--glass-edge);
+  border: 0.5px solid var(--line-soft);
   border-radius: 50%;
-  background: var(--glass-tint);
-  backdrop-filter: var(--glass-blur);
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-control);
   color: var(--ink);
   transition:
     background var(--dur-fast) ease,
@@ -1601,15 +1582,10 @@ button:disabled {
   font-weight: 500;
 }
 
-/* 滑块本身也是一片玻璃：半透 + 模糊，底下那层灰槽会透一点上来。 */
 .ios-segmented button.is-active {
-  background: color-mix(in srgb, var(--surface-strong) 82%, transparent);
-  backdrop-filter: var(--glass-blur);
+  background: var(--surface-strong);
   font-weight: 600;
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    0 0 0 0.5px var(--glass-edge),
-    var(--glass-shadow);
+  box-shadow: var(--shadow-control);
 }
 
 /* 笔记 tab：不用卡片，靠留白和一条墨线分段。摘录用宋体，
@@ -3022,13 +2998,9 @@ input[type="range"] {
 
 .segmented-control button.is-active,
 .compact-toggle button.is-active {
-  background: color-mix(in srgb, var(--surface-strong) 82%, transparent);
-  backdrop-filter: var(--glass-blur);
+  background: var(--surface-strong);
   font-weight: 600;
-  box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
-    0 0 0 0.5px var(--glass-edge),
-    var(--glass-shadow);
+  box-shadow: var(--shadow-control);
 }
 
 .storage-summary {
@@ -4903,10 +4875,9 @@ html[data-keyboard-open] .modal-sheet {
 }
 
 .modal-sheet--reader .compact-toggle button.is-active {
-  background: color-mix(in srgb, var(--reader-surface) 82%, transparent);
+  background: var(--reader-surface);
   color: var(--reader-ink);
   box-shadow:
-    inset 0 0.5px 0 var(--glass-sheen),
     0 1px 4px rgb(0 0 0 / 22%),
     0 0 0 0.5px color-mix(in srgb, var(--reader-ink) 14%, transparent);
 }
