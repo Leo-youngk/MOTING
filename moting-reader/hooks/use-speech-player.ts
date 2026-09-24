@@ -7,6 +7,7 @@ import {
   EDGE_VOICES,
   edgeVoiceName,
   isEdgeVoiceURI,
+  normalizeVoiceURI,
   resolvedEdgeVoiceURI,
 } from "../lib/edge-voices";
 import { isAbortError, SpeechClipStore } from "../lib/speech-cache";
@@ -185,9 +186,15 @@ interface PlayOptions {
 
 export function useSpeechPlayer({
   getBook,
-  settings,
+  settings: rawSettings,
   onProgress,
 }: SpeechPlayerOptions): SpeechPlayerState {
+  // 设置里可能还存着已经下架的音色或者以前选过的系统语音（旧版本、别的设备同步来的），
+  // 一律按默认音色读。系统语音只在云端不可用时自动顶上。
+  const settings = useMemo(() => {
+    const voiceURI = normalizeVoiceURI(rawSettings.voiceURI);
+    return voiceURI === rawSettings.voiceURI ? rawSettings : { ...rawSettings, voiceURI };
+  }, [rawSettings]);
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -294,17 +301,8 @@ export function useSpeechPlayer({
     };
   }, []);
 
-  const voices = useMemo<PlayerVoice[]>(
-    () => [
-      ...EDGE_VOICES,
-      ...systemVoices.map((voice) => ({
-        voiceURI: voice.voiceURI,
-        name: voice.name,
-        lang: voice.lang,
-      })),
-    ],
-    [systemVoices]
-  );
+  // 能选的只有云端音色；systemVoices 留着给云端断掉时自动顶上用。
+  const voices: PlayerVoice[] = EDGE_VOICES;
 
   const clearTimers = useCallback(() => {
     if (keepAliveRef.current) {

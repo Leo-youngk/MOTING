@@ -27,6 +27,7 @@ import {
   type ReactNode,
 } from "react";
 import { AiRequestError, fetchAiModels } from "../lib/ai";
+import { resolvedEdgeVoiceURI } from "../lib/edge-voices";
 import {
   READER_FONTS,
   READER_THEMES,
@@ -202,9 +203,9 @@ export function SettingsScreen({
   onOpen: (section: SettingsSection) => void;
   onBack: () => void;
 }) {
-  const voiceName = settings.voiceURI
-    ? voices.find((voice) => voice.voiceURI === settings.voiceURI)?.name ?? "已选音色"
-    : "自动选择";
+  const chosenVoice = resolvedEdgeVoiceURI(settings.voiceURI);
+  const voiceName =
+    voices.find((voice) => voice.voiceURI === chosenVoice)?.name.split(" · ")[0] ?? "云健";
   const themeName =
     READER_THEMES.find((theme) => theme.value === settings.theme)?.label ?? "原版";
   const fontName =
@@ -223,18 +224,12 @@ export function SettingsScreen({
       <div className="settings-screen">
         <PageBar title="朗读音色" subtitle="听书默认用这个声音" onBack={onBack} />
         <main className="settings-main">
-          <Section foot="云端音色更自然，系统语音可以离线用。听书时也能在播放页随时换。">
+          <Section foot="断网或云端暂时不可用时，会自动改用手机自带的朗读声音，播放页上会提示。">
             <div className="settings-card">
-              <OptionRow
-                selected={!settings.voiceURI}
-                label="自动选择"
-                detail="默认用云端自然人声"
-                onClick={() => onChange({ ...settings, voiceURI: "" })}
-              />
               {voices.map((voice) => (
                 <OptionRow
                   key={voice.voiceURI}
-                  selected={settings.voiceURI === voice.voiceURI}
+                  selected={chosenVoice === voice.voiceURI}
                   label={voice.name}
                   detail={voice.lang}
                   onClick={() => onChange({ ...settings, voiceURI: voice.voiceURI })}

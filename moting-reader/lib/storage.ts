@@ -1,3 +1,4 @@
+import { normalizeVoiceURI } from "./edge-voices";
 import type { BookMetadataPatch } from "./book-metadata-types";
 import { outlineOf } from "./content";
 import type {
@@ -691,6 +692,8 @@ export async function getSettings(): Promise<ReaderSettings> {
   };
   const mapped = legacyTheme[merged.theme as string];
   if (mapped) merged.theme = mapped;
+  // 选过已经下架的音色（或者系统语音）的，回到默认音色。
+  merged.voiceURI = normalizeVoiceURI(merged.voiceURI);
   return merged;
 }
 

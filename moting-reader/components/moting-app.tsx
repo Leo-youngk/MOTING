@@ -189,7 +189,7 @@ import {
   type Placement,
   type Rect,
 } from "../lib/popover-placement";
-import { EDGE_VOICES } from "../lib/edge-voices";
+import { EDGE_VOICES, resolvedEdgeVoiceURI } from "../lib/edge-voices";
 import { Bookstore } from "./bookstore";
 import { HomeStore } from "./home-store";
 import { OnlineLibrary } from "./online-library";
@@ -2349,6 +2349,12 @@ function ReaderPopover({
   const nodeRef = useRef<HTMLDivElement>(null);
   const [more, setMore] = useState(false);
   const [placement, setPlacement] = useState<Placement | null>(null);
+  /**
+   * 最近一次按在浮条上的时刻。长按选字抬手时，浏览器会在手指的位置补发一个 click，
+   * 而浮条正是这一刻弹出来的：要是正好弹在手指底下（比如最后一行字），这一下就会
+   * 点中浮条上的按钮，凭空多出一条划线。所以只认「按下也落在浮条上」的点击。
+   */
+  const pressedAtRef = useRef(-Infinity);
 
   const { top, bottom, left, right } = popup.anchor;
   // 已有划线只有一块锚点矩形，选区则是逐行的一串。
@@ -2415,9 +2421,20 @@ function ReaderPopover({
       style={style}
       role="dialog"
       aria-label="划线操作"
+      onPointerDownCapture={() => {
+        pressedAtRef.current = performance.now();
+      }}
       onPointerDown={(event) => {
         // 桌面按按钮时保留原生选区，避免 selectionchange 把菜单先卸载。
         if (event.pointerType === "mouse") event.preventDefault();
+      }}
+      onClickCapture={(event) => {
+        // 键盘触发的 click（detail 为 0）没有按下这一步，照常放行。
+        const pressedHere = performance.now() - pressedAtRef.current < 1500;
+        pressedAtRef.current = -Infinity;
+        if (pressedHere || event.detail === 0) return;
+        event.preventDefault();
+        event.stopPropagation();
       }}
     >
       {popup.kind === "mark" ? (
@@ -5250,21 +5267,9 @@ function PlayerScreen({
             ) : null}
 
             <div className="voice-list">
-              <button
-                type="button"
-                className={!settings.voiceURI ? "is-active" : ""}
-                onClick={() =>
-                  onSettingsChange({ ...settings, voiceURI: "" })
-                }
-              >
-                <span>
-                  <strong>自动选择</strong>
-                  <small>默认使用云端自然人声</small>
-                </span>
-                {!settings.voiceURI ? <Check size={18} /> : null}
-              </button>
               {player.voices.map((voice) => {
-                const chosen = settings.voiceURI === voice.voiceURI;
+                // 没选过（空串）就是默认音色，折算之后再比，默认那一个才会打勾。
+                const chosen = resolvedEdgeVoiceURI(settings.voiceURI) === voice.voiceURI;
                 // 「选中」是用户的意愿，「正在播放」是事实。云端失败退回系统朗读时
                 // 这两者会不一致，必须分开显示，不能拿勾当成已经在用这个声音。
                 const playing =

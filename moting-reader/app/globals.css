@@ -649,7 +649,9 @@ button:disabled {
   transform: scale(0.98);
 }
 
-/* 封面四角一样圆、不画书脊：跟页面上的白卡是同一种软形状。 */
+/* 封面四角一样圆、不画书脊：跟页面上的白卡是同一种软形状。
+   封面本身是个尺寸容器：没有图时自己画的那张封面，字号按封面宽度（cqw）缩放，
+   迷你条里 38px 的小封面和播放页 260px 的大封面排出来是同一个比例。 */
 .book-cover {
   position: relative;
   flex: 0 0 auto;
@@ -657,6 +659,7 @@ button:disabled {
   border-radius: 8px;
   background: #ece6dc;
   box-shadow: var(--shadow-cover);
+  container-type: inline-size;
 }
 
 .book-cover--small {
@@ -689,7 +692,7 @@ button:disabled {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 11px 8px 9px 12px;
+  padding: 12cqw 7cqw 10cqw 9cqw;
   background:
     linear-gradient(
       140deg,
@@ -704,40 +707,63 @@ button:disabled {
   overflow: hidden;
   color: #33302c;
   font-family: var(--font-serif);
-  font-size: 12px;
+  font-size: clamp(8px, 13cqw, 30px);
   font-weight: 700;
   letter-spacing: 0.04em;
   line-height: 1.35;
+  overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
 
-.book-cover--large .book-cover__generated strong {
-  font-size: 19px;
-}
-
 .book-cover__generated small {
-  margin-top: 6px;
+  max-width: 100%;
+  margin-top: 6cqw;
+  overflow: hidden;
   color: #817b72;
-  font-size: 7px;
+  font-size: clamp(6px, 6.5cqw, 14px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .book-cover__rule {
-  width: 22px;
-  height: 2px;
-  margin-bottom: 9px;
+  width: 18cqw;
+  height: max(1px, 1.6cqw);
+  margin-bottom: 8cqw;
   background: var(--book-accent);
   opacity: 0.8;
 }
 
 .book-cover__mark {
   position: absolute;
-  right: 7px;
-  bottom: 6px;
+  right: 6cqw;
+  bottom: 5cqw;
   color: var(--book-accent);
   font-family: var(--font-serif);
-  font-size: 6px;
+  font-size: clamp(5px, 5cqw, 12px);
   letter-spacing: 0.15em;
+}
+
+/* 小封面上作者和角标挤不下，只留书名，书名可以多占一行。 */
+@container (max-width: 64px) {
+  .book-cover__generated {
+    padding: 10cqw 8cqw;
+  }
+
+  .book-cover__generated small,
+  .book-cover__mark {
+    display: none;
+  }
+
+  .book-cover__rule {
+    margin-bottom: 7cqw;
+  }
+
+  .book-cover__generated strong {
+    font-size: clamp(8px, 21cqw, 13px);
+    line-height: 1.25;
+    -webkit-line-clamp: 4;
+  }
 }
 
 .progress-wrap {
@@ -4020,10 +4046,6 @@ html[data-keyboard-open] .bottom-bar {
   height: 100%;
   border-radius: 18px;
   box-shadow: var(--shadow-cover);
-}
-
-.player-stage .book-cover--large .book-cover__generated strong {
-  font-size: 22px;
 }
 
 .player-transcript-inline {
