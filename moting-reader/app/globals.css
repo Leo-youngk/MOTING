@@ -50,6 +50,8 @@
    * 底栏离屏幕底边多远：有 Home 指示条的机型把底栏压进安全区，停在指示条上沿；
    * 没有指示条的留 10px。迷你播放条、页面底部留白都从这两个值推出来，改一处全跟着走。
    * 高度写死成整数：高度带小数时，iOS 滚动中每一帧取整不一样，底栏里的图标会上下跳一个像素。
+   * 贴底的浮层（底栏、迷你播放条、提示条）还要再往下探 --viewport-fill-bottom：见 use-viewport-fill.ts，
+   * iOS 桌面图标打开时布局视口有时会比物理屏矮一个状态栏，不探的话底栏会整条抬高几十像素。
    */
   --tabbar-bottom: max(10px, calc(env(safe-area-inset-bottom) - 20px));
   --tabbar-height: 64px;
@@ -430,6 +432,11 @@ button:disabled {
   padding-bottom: calc(
     var(--tabbar-bottom) + var(--tabbar-height) + var(--mini-player-height) + 36px
   );
+}
+
+/* 在线找书自己管到底的留白：结果区一直铺到屏幕底。 */
+.app-frame.is-bare .app-content {
+  padding-bottom: 0;
 }
 
 /* 高度和底部留白都交给外面的 .app-content：这里再叠一层 100dvh 或 padding-bottom，
@@ -2977,7 +2984,7 @@ input[type="range"] {
   position: fixed;
   z-index: 40;
   right: 0;
-  bottom: 0;
+  bottom: calc(-1 * var(--viewport-fill-bottom, 0px));
   left: 0;
   display: flex;
   align-items: center;
@@ -3078,7 +3085,9 @@ html[data-keyboard-open] .bottom-bar {
   position: fixed;
   z-index: 35;
   right: 16px;
-  bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + 8px);
+  bottom: calc(
+    var(--tabbar-bottom) + var(--tabbar-height) + 8px - var(--viewport-fill-bottom, 0px)
+  );
   left: 16px;
   display: flex;
   max-width: 560px;
@@ -5094,7 +5103,9 @@ html[data-keyboard-open] .modal-sheet {
   position: fixed;
   z-index: 140;
   right: 18px;
-  bottom: calc(96px + env(safe-area-inset-bottom));
+  bottom: calc(
+    var(--tabbar-bottom) + var(--tabbar-height) + 16px - var(--viewport-fill-bottom, 0px)
+  );
   left: 18px;
   width: fit-content;
   max-width: calc(100% - 36px);
@@ -5115,8 +5126,31 @@ html[data-keyboard-open] .modal-sheet {
 /* 迷你播放条在的时候，提示条挪到它上面，别压住它。 */
 .app-shell:has(.mini-player) .toast {
   bottom: calc(
-    var(--tabbar-bottom) + var(--tabbar-height) + var(--mini-player-height) + 20px
+    var(--tabbar-bottom) + var(--tabbar-height) + var(--mini-player-height) + 20px -
+      var(--viewport-fill-bottom, 0px)
   );
+}
+
+/* 手机上没有底栏的页（在线找书）：底栏收起，迷你播放条和提示条落到底栏原来的位置。
+   宽屏的底栏是左侧栏，照常留着。 */
+@media (max-width: 719.98px) {
+  .app-frame.is-bare .bottom-bar {
+    display: none;
+  }
+
+  .app-frame.is-bare .mini-player {
+    bottom: calc(var(--tabbar-bottom) - var(--viewport-fill-bottom, 0px));
+  }
+
+  .app-shell:has(.app-frame.is-bare) .toast {
+    bottom: calc(var(--tabbar-bottom) + 16px - var(--viewport-fill-bottom, 0px));
+  }
+
+  .app-shell:has(.app-frame.is-bare .mini-player) .toast {
+    bottom: calc(
+      var(--tabbar-bottom) + var(--mini-player-height) + 20px - var(--viewport-fill-bottom, 0px)
+    );
+  }
 }
 
 .toast__undo {

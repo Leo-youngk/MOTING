@@ -9,11 +9,6 @@ import type { BookMeta } from "../lib/types";
 import { Modal } from "./sheet";
 import "./online-library.css";
 
-const FORMAT_CHIPS: Array<{ value: string; label: string }> = [
-  { value: "", label: "全部" },
-  ...ONLINE_BOOK_FORMATS.map((value) => ({ value, label: value.toUpperCase() })),
-];
-
 function bookKey(book: OnlineBook) {
   return `${book.id}:${book.hash}`;
 }
@@ -40,18 +35,22 @@ function OnlineCover({ book, large = false }: { book: OnlineBook; large?: boolea
   );
 }
 
-export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = "" }: {
+/**
+ * 在线找书：顶栏 + 搜索框，下面整块都是结果，不再常驻说明行和格式标签（搜索一律查全部支持的格式）。
+ * 一次性的消息（已加入书库、改搜书名、已连接）走外面的提示条；第一页就没搜成写在结果区的空状态里。
+ */
+export function OnlineLibrary({ books, onImport, onOpen, onBack, onToast, initialQuery = "" }: {
   books: BookMeta[];
   onImport: (file: File, sourceId: string, onProgress: (label: string) => void) => Promise<void>;
   onOpen: (book: BookMeta) => void;
   onBack: () => void;
+  onToast: (message: string) => void;
   /** 从书库搜不到、或从书城「去找这本书」进来时带的书名，进来就直接搜。 */
   initialQuery?: string;
 }) {
   const [query, setQuery] = useState(initialQuery);
-  const [format, setFormat] = useState("");
   const [results, setResults] = useState<OnlineBook[]>([]);
-  const [lastSearch, setLastSearch] = useState<{ query: string; format: string; page: number } | null>(null);
+  const [lastSearch, setLastSearch] = useState<{ query: string; page: number } | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [searching, setSearching] = useState(Boolean(initialQuery.trim()));
   const [connected, setConnected] = useState(false);
@@ -60,7 +59,6 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
   const [password, setPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
   const [downloading, setDownloading] = useState("");
   const [progress, setProgress] = useState("");
   const [saving, setSaving] = useState(false);
@@ -70,11 +68,16 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
   const authController = useRef<AbortController | null>(null);
   const importBusy = useRef(false);
   const resultsRef = useRef<HTMLDivElement | null>(null);
+  // 下面几个只跑一次的 effect 和异步回调里要发提示条，经由 ref 取最新的那个。
+  const toastRef = useRef(onToast);
+  useEffect(() => {
+    toastRef.current = onToast;
+  }, [onToast]);
 
   useEffect(() => {
     const controller = new AbortController();
     getZlibrarySession(controller.signal).then((data) => setConnected(data.connected)).catch((error) => {
-      if (!controller.signal.aborted) setError(error instanceof Error ? error.message : "无法读取登录状态");
+      if (!controller.signal.aborted) toastRef.current(error instanceof Error ? error.message : "无法读取登录状态");
     });
     return () => {
       controller.abort();
@@ -88,14 +91,14 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
     if (!initialQuery.trim()) return;
     const controller = new AbortController();
     searchController.current = controller;
-    searchOnce(initialQuery.trim(), 1, "", controller.signal).then(({ data, keyword, fellBackFrom }) => {
+    searchOnce(initialQuery.trim(), 1, controller.signal).then(({ data, keyword, fellBackFrom }) => {
       if (controller.signal.aborted) return;
       if (fellBackFrom) {
         setQuery(keyword);
-        setNotice(`没有「${fellBackFrom}」，改成只搜《${keyword}》。`);
+        toastRef.current(`没有「${fellBackFrom}」，改成只搜《${keyword}》`);
       }
       setResults(data.books);
-      setLastSearch({ query: keyword, format: "", page: data.page });
+      setLastSearch({ query: keyword, page: data.page });
       setHasMore(data.hasMore);
     }).catch((error) => {
       if (!controller.signal.aborted) showError(error);
@@ -126,12 +129,20 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
     };
   }, []);
 
-  function showError(error: unknown) {
-    setError(error instanceof Error ? error.message : "请求失败，请重试");
+  /**
+   * 出错：登录失效就打开账号面板，错误写在面板里；
+   * 结果区是空的（第一页就没搜出来）写在空状态里；已经有结果（翻页、下载失败）走提示条。
+   */
+  function showError(error: unknown, hasResults = false) {
+    const message = error instanceof Error ? error.message : "请求失败，请重试";
     if (error instanceof ZlibraryError && error.status === 401) {
+      setError(message);
       setConnected(false);
       setShowAccount(true);
+      return;
     }
+    if (hasResults) toastRef.current(message);
+    else setError(message);
   }
 
   /**
@@ -139,63 +150,49 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
    *
    * 书城的「去找这本书」带进来的就是「书名 作者」——加作者是为了甩掉同名书，
    * 但 Z-Library 上作者名的写法千奇百怪，加上去有时候会把结果搜成零。
-   * 那就自己退一步，并且在反馈栏里说清楚退过，别让人以为这本书根本没有。
+   * 那就自己退一步，并且用提示条说清楚退过，别让人以为这本书根本没有。
    */
-  async function searchOnce(keyword: string, page: number, fmt: string, signal: AbortSignal) {
-    const data = await searchZlibrary(keyword, page, fmt, signal);
+  async function searchOnce(keyword: string, page: number, signal: AbortSignal) {
+    const data = await searchZlibrary(keyword, page, signal);
     if (page > 1 || data.books.length || !keyword.includes(" ")) {
       return { data, keyword, fellBackFrom: "" };
     }
     const titleOnly = keyword.slice(0, keyword.lastIndexOf(" ")).trim();
     if (!titleOnly || titleOnly === keyword) return { data, keyword, fellBackFrom: "" };
-    const retry = await searchZlibrary(titleOnly, page, fmt, signal);
+    const retry = await searchZlibrary(titleOnly, page, signal);
     return { data: retry, keyword: titleOnly, fellBackFrom: keyword };
   }
 
-  async function search(nextPage = 1, formatOverride?: string) {
+  async function search(nextPage = 1) {
     const searchQuery = nextPage > 1 && lastSearch ? lastSearch.query : query.trim();
-    const searchFormat = nextPage > 1 && lastSearch ? lastSearch.format : formatOverride ?? format;
     if (!searchQuery || importBusy.current) return;
     searchController.current?.abort();
     const controller = new AbortController();
     searchController.current = controller;
     setSearching(true);
     setError("");
-    setNotice("");
     if (nextPage === 1) {
       setResults([]); setLastSearch(null); setHasMore(false);
       resultsRef.current?.scrollTo({ top: 0 });
     }
     try {
-      const { data, keyword, fellBackFrom } = await searchOnce(
-        searchQuery,
-        nextPage,
-        searchFormat,
-        controller.signal
-      );
+      const { data, keyword, fellBackFrom } = await searchOnce(searchQuery, nextPage, controller.signal);
       if (controller.signal.aborted) return;
       if (fellBackFrom) {
         setQuery(keyword);
-        setNotice(`没有「${fellBackFrom}」，改成只搜《${keyword}》。`);
+        toastRef.current(`没有「${fellBackFrom}」，改成只搜《${keyword}》`);
       }
       setResults((current) => {
         const all = nextPage === 1 ? data.books : [...current, ...data.books];
         return [...new Map(all.map((book) => [bookKey(book), book])).values()];
       });
-      setLastSearch({ query: keyword, format: searchFormat, page: data.page });
+      setLastSearch({ query: keyword, page: data.page });
       setHasMore(data.hasMore);
     } catch (error) {
-      if (!controller.signal.aborted) showError(error);
+      if (!controller.signal.aborted) showError(error, nextPage > 1);
     } finally {
       if (!controller.signal.aborted) setSearching(false);
     }
-  }
-
-  /** 换格式：已经搜过（或者框里有字）就按新格式立刻重搜，不用再按一次搜索。 */
-  function pickFormat(next: string) {
-    if (next === format) return;
-    setFormat(next);
-    if (query.trim() && !downloading) void search(1, next);
   }
 
   async function login(event: FormEvent<HTMLFormElement>) {
@@ -210,7 +207,7 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
       if (controller.signal.aborted) return;
       setConnected(true);
       setShowAccount(false);
-      setNotice("已连接 Z-Library");
+      toastRef.current("已连接 Z-Library");
       if (query.trim()) void search();
     } catch (error) {
       if (!controller.signal.aborted) showError(error);
@@ -227,7 +224,7 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
       await logoutZlibrary();
       setConnected(false);
       setShowAccount(false);
-      setNotice("已退出 Z-Library");
+      toastRef.current("已退出 Z-Library");
     } catch (error) { showError(error); }
     finally { setAuthBusy(false); }
   }
@@ -238,16 +235,14 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
     const controller = new AbortController();
     downloadController.current = controller;
     setDownloading(bookKey(book));
-    setError("");
-    setNotice("");
     try {
       const file = await downloadZlibrary(book, setProgress, controller.signal);
       if (controller.signal.aborted) return;
       setSaving(true);
       await onImport(file, `zlibrary:${bookKey(book)}`, setProgress);
-      setNotice(`《${book.title}》已加入书库`);
+      toastRef.current(`《${book.title}》已加入书库`);
     } catch (error) {
-      if (!controller.signal.aborted) showError(error);
+      if (!controller.signal.aborted) showError(error, true);
     } finally {
       importBusy.current = false;
       setDownloading("");
@@ -274,17 +269,13 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
     return { key, existing, active, label, blocked };
   }
 
-  // 登录面板开着时，错误写在面板里；关着才写在反馈行。两处都写，屏幕阅读器会念两遍。
-  const feedback = showAccount
-    ? notice
-    : error || notice || (connected ? "已连接 Z-Library · 下载后自动加入本地书库" : "Z-Library · 按书名查找，选择版本后加入书库");
   const detailState = detail ? stateOf(detail) : null;
 
   return (
     <div className="screen online-screen">
       <header className="online-bar">
         <button type="button" className="online-round" aria-label="返回" onClick={onBack}>
-          <ChevronLeft size={22} />
+          <ChevronLeft size={21} />
         </button>
         <h1>在线找书</h1>
         <button
@@ -294,7 +285,7 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
           disabled={authBusy}
           onClick={() => setShowAccount(true)}
         >
-          <UserRound size={21} />
+          <UserRound size={20} />
         </button>
       </header>
 
@@ -307,25 +298,6 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
           </label>
           <button className="online-search__submit" disabled={!query.trim() || !!downloading || authBusy || searching} type="submit">搜索</button>
         </form>
-
-        <div className="online-formats" role="group" aria-label="文件格式">
-          {FORMAT_CHIPS.map((chip) => (
-            <button
-              type="button"
-              key={chip.value || "all"}
-              className={format === chip.value ? "is-active" : ""}
-              aria-pressed={format === chip.value}
-              disabled={!!downloading}
-              onClick={() => pickFormat(chip.value)}
-            >
-              {chip.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="online-feedback" aria-live="polite">
-          {error && !showAccount ? <p role="alert" className="online-error">{error}</p> : <p>{feedback}</p>}
-        </div>
 
         <div className="online-results" ref={resultsRef} aria-busy={searching}>
           {results.map((book) => {
@@ -355,14 +327,34 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, initialQuery = 
                       {label}
                     </button>
                   )}
-                  {active && !saving ? <button type="button" className="text-button online-cancel" onClick={() => { downloadController.current?.abort(); setNotice("已取消下载"); }}>取消</button> : null}
+                  {active && !saving ? <button type="button" className="text-button online-cancel" onClick={() => { downloadController.current?.abort(); toastRef.current("已取消下载"); }}>取消</button> : null}
                 </div>
                 {active ? <p className="online-card__progress" role="status">{progress}</p> : null}
               </article>
             );
           })}
           {searching ? <div className="online-skeletons" role="status" aria-label="正在搜索书籍">{[0, 1, 2].map((i) => <div className="online-skeleton" key={i}><span /><div><i /><i /><i /></div></div>)}</div> : null}
-          {!searching && !results.length ? <div className="online-empty"><BookOpen size={28} /><h3>{lastSearch ? "没有找到匹配的书" : "下一本想读什么？"}</h3><p>{lastSearch ? "换个书名、作者，或调整格式后再搜索。" : "输入书名或作者，找到后直接加入书库。"}</p></div> : null}
+          {!searching && !results.length ? (
+            error && !showAccount ? (
+              <div className="online-empty" role="alert">
+                <BookOpen size={28} />
+                <h3>这次没搜成</h3>
+                <p className="online-error">{error}</p>
+              </div>
+            ) : (
+              <div className="online-empty">
+                <BookOpen size={28} />
+                <h3>{lastSearch ? "没有找到匹配的书" : "下一本想读什么？"}</h3>
+                <p>
+                  {lastSearch
+                    ? "换个书名或作者再搜一次。"
+                    : connected
+                      ? "在 Z-Library 上找，下载后自动加入书库。"
+                      : "在 Z-Library 上找，右上角登录后才能下载。"}
+                </p>
+              </div>
+            )
+          ) : null}
           {lastSearch && hasMore ? <button type="button" className="secondary-button online-more" disabled={searching || !!downloading} onClick={() => void search(lastSearch.page + 1)}>{searching ? "正在查找…" : "更多结果"}</button> : null}
         </div>
       </section>

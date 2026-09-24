@@ -275,11 +275,10 @@ export async function handleZlibrary(request: Request, fetcher: Fetcher = fetch)
       return setSession(json({ connected: true }), request, { id, key });
     }
     if (action === "search") {
-      const query = text(payload.query).trim(), page = Number(payload.page ?? 1), format = text(payload.format);
+      const query = text(payload.query).trim(), page = Number(payload.page ?? 1);
       if (!query || query.length > 200 || !Number.isInteger(page) || page < 1 || page > 500) throw new ServiceError("请输入书名或作者（最多 200 字）", 400);
-      if (format && !(ONLINE_BOOK_FORMATS as readonly string[]).includes(format)) throw new ServiceError("不支持这个文件格式", 400);
       const form = new URLSearchParams({ message: query, page: String(page), limit: String(PAGE_SIZE) });
-      (format ? [format] : ONLINE_BOOK_FORMATS).forEach((value, index) => form.append(`extensions[${index}]`, value));
+      ONLINE_BOOK_FORMATS.forEach((value, index) => form.append(`extensions[${index}]`, value));
       const data = await api("/eapi/book/search", request, fetcher, form, { timeoutMs: SEARCH_TIMEOUT_MS, retryTransient: true });
       const raw = Array.isArray(data.books) ? data.books : object(data.exactMatch).books;
       if (!Array.isArray(raw)) throw new ServiceError("Z-Library 搜索结果格式已变化，暂时无法读取");

@@ -10,7 +10,11 @@ const STATUS_BAR_MAX = 80;
  * 布局视口（连带 dvh／lvh／vh）比物理屏矮一截，`position: fixed; inset: 0` 的
  * 浮层只能铺到布局视口底，物理屏底部凭空露出一条 body 背景。CSS 拿不到物理屏高，
  * 只能用 `screen.height` 补——把差值写成 `--viewport-fill-bottom`，让贴底的浮层
- * 把底边往下探这么多。iOS 弹键盘不缩布局视口，所以这个差值竖屏下恒定。
+ * 把底边往下探这么多。
+ *
+ * 这个差值不是一直有：刚从桌面图标打开时布局视口往往是满屏的，点几下、弹过一次键盘之后
+ * 才缩成少一个状态栏（2026-09 真机截图：底栏离屏底 68pt = 设定的 14 + 状态栏 54）。
+ * 所以不能只量一次，布局视口、可视视口一变、切回前台都要重量。
  *
  * 只在 standalone 补偿：普通浏览器里 `screen.height` 是整块显示器高，跟窗口高的
  * 差值毫无意义，补了反而把布局顶坏。
@@ -31,12 +35,19 @@ export function useViewportFill() {
     };
 
     sync();
+    const viewport = window.visualViewport;
     window.addEventListener("resize", sync);
     window.addEventListener("orientationchange", sync);
+    window.addEventListener("pageshow", sync);
+    document.addEventListener("visibilitychange", sync);
+    viewport?.addEventListener("resize", sync);
 
     return () => {
       window.removeEventListener("resize", sync);
       window.removeEventListener("orientationchange", sync);
+      window.removeEventListener("pageshow", sync);
+      document.removeEventListener("visibilitychange", sync);
+      viewport?.removeEventListener("resize", sync);
       root.style.removeProperty("--viewport-fill-bottom");
     };
   }, []);

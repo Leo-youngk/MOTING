@@ -6821,7 +6821,8 @@ export default function MotingApp() {
         />
         ) : null
       ) : (
-        <div className="app-frame">
+        <div className={`app-frame${view.name === "find" ? " is-bare" : ""}`}>
+          {/* 在线找书是一段专心的事：手机上底栏收起（is-bare），结果区一直铺到屏幕底。 */}
           <div className="desktop-brand">
             <BearMark className="app-mark" />
             <div>
@@ -6892,6 +6893,7 @@ export default function MotingApp() {
                 onImport={handleOnlineImport}
                 onOpen={(book) => openReader(book)}
                 onBack={() => goBack({ name: "library" })}
+                onToast={showToast}
               />
             ) : view.name === "listen" ? (
               <ListenScreen

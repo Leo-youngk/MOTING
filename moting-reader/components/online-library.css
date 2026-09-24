@@ -1,18 +1,24 @@
 /*
- * 在线找书：顶栏两枚圆钮（返回 / 账号），搜索框 + 粉色「搜索」，格式标签，
- * 结果一本一张白卡。点卡片看版本详情（底部弹层），点右边的胶囊直接加入书库。
+ * 在线找书：一条矮顶栏（返回 / 账号两枚圆钮），搜索框 + 粉色「搜索」，
+ * 下面整块是结果，一本一张白卡。点卡片看版本详情（底部弹层），点右边的胶囊直接加入书库。
+ * 整页正好一屏高（手机上底栏收起），只有结果区自己滚。
  */
 
-.online-screen {
+.screen.online-screen {
+  display: flex;
+  height: 100dvh;
   min-width: 0;
+  flex-direction: column;
+  padding-top: calc(2px + env(safe-area-inset-top));
 }
 
 .online-bar {
   display: grid;
-  min-height: 56px;
-  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  grid-template-columns: 40px minmax(0, 1fr) 40px;
   align-items: center;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .online-bar h1 {
@@ -27,8 +33,8 @@
 
 .online-round {
   display: inline-flex;
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -48,7 +54,11 @@
 }
 
 .online-library {
+  display: flex;
   min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
   overflow-x: clip;
   touch-action: pan-y;
 }
@@ -87,68 +97,16 @@
   transform: scale(0.96);
 }
 
-/* 格式标签：一排胶囊，选中的浅粉底粉字。 */
-.online-formats {
-  display: flex;
-  gap: 8px;
-  margin-top: 14px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.online-formats::-webkit-scrollbar {
-  display: none;
-}
-
-.online-formats button {
-  min-height: 36px;
-  flex: 1 0 auto;
-  padding: 0 14px;
-  border-radius: var(--radius-pill);
-  background: var(--paper-deep);
-  color: var(--muted);
-  font-size: var(--text-base);
-}
-
-.online-formats button.is-active {
-  background: var(--accent-soft);
-  color: var(--accent-deep);
-  font-weight: 600;
-}
-
-.online-feedback {
-  min-height: 40px;
-  padding-block: 10px 8px;
-  color: var(--muted);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-
-.online-feedback p {
-  margin: 0;
-}
-
 .online-error {
   color: var(--danger);
 }
 
-/*
- * 结果在自己的框里滚，页面本身不动。框的高度按上面那几行和页面底部留白扣出来：
- * 页顶 14、顶栏 56+12、搜索 46、格式 14+36、反馈行 40，
- * 再减去 .app-content 给底栏留的那段（底栏离底 + 底栏高 + 28），两边必须对得上，
- * 多一像素整页就能上下滑。刘海那段也要减掉。
- */
+/* 结果在自己的框里滚，占满搜索框下面剩下的高度；底部留出 Home 指示条，有迷你播放条再让出它。 */
 .online-results {
-  height: max(
-    280px,
-    calc(
-      100svh - env(safe-area-inset-top) - 14px - 68px - 46px - 50px - 40px -
-        var(--tabbar-bottom) - var(--tabbar-height) - 28px
-    )
-  );
-  margin-inline: -4px;
-  padding: 4px 4px 16px;
+  min-height: 0;
+  flex: 1;
+  margin: 12px -4px 0;
+  padding: 4px 4px calc(16px + env(safe-area-inset-bottom));
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior-y: none;
@@ -157,13 +115,7 @@
 }
 
 .app-frame:has(.mini-player) .online-results {
-  height: max(
-    280px,
-    calc(
-      100svh - env(safe-area-inset-top) - 14px - 68px - 46px - 50px - 40px -
-        var(--tabbar-bottom) - var(--tabbar-height) - var(--mini-player-height) - 36px
-    )
-  );
+  padding-bottom: calc(var(--tabbar-bottom) + var(--mini-player-height) + 16px);
 }
 
 .online-card {

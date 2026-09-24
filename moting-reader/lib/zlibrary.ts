@@ -46,8 +46,8 @@ export async function logoutZlibrary(): Promise<void> {
   await request("logout", {});
 }
 
-export async function searchZlibrary(query: string, page: number, format: string, signal?: AbortSignal): Promise<OnlineSearchResult> {
-  return (await request("search", { query, page, format }, signal)).json();
+export async function searchZlibrary(query: string, page: number, signal?: AbortSignal): Promise<OnlineSearchResult> {
+  return (await request("search", { query, page }, signal)).json();
 }
 
 export async function downloadZlibrary(book: OnlineBook, onProgress: (label: string) => void, signal: AbortSignal): Promise<File> {

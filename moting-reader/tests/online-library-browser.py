@@ -85,6 +85,10 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="添加书籍", exact=True).click()
     page.get_by_role("button", name="在线找书", exact=True).click()
     expect(page.get_by_placeholder("搜索书名或作者")).to_be_visible()
+    # 找书页：手机上底栏收起，没有格式标签和说明行，整页正好一屏不滚。
+    expect(page.locator(".bottom-bar")).to_be_hidden()
+    expect(page.locator(".online-formats, .online-feedback")).to_have_count(0)
+    assert page.evaluate("document.documentElement.scrollHeight <= window.innerHeight")
     page.get_by_role("button", name="登录", exact=True).click()
     page.get_by_label("邮箱", exact=True).fill("test@example.org")
     page.get_by_label("密码", exact=True).fill("wrong")
@@ -93,7 +97,7 @@ with sync_playwright() as playwright:
     expect(page.get_by_label("密码", exact=True)).to_have_value("")
     page.get_by_label("密码", exact=True).fill("fixture-password")
     page.get_by_role("button", name="登录并继续").click()
-    # 登录成功后账号面板收起：右上角的钮换成「Z-Library 账号」，反馈行报已连接。
+    # 登录成功后账号面板收起：右上角的钮换成「Z-Library 账号」，提示条报已连接。
     expect(page.get_by_role("button", name="Z-Library 账号")).to_be_visible()
     expect(page.get_by_text("已连接 Z-Library", exact=True)).to_be_visible()
     page.get_by_label("在线搜索书名或作者").fill("测试 & 作者")
@@ -117,19 +121,17 @@ with sync_playwright() as playwright:
         pending.abort()
     state["mode"] = "broken"
     page.get_by_role("button", name="加入书库", exact=True).first.click()
-    expect(page.get_by_role("alert")).to_contain_text("网络不可用")
+    expect(page.locator(".toast")).to_contain_text("网络不可用")
     state["mode"] = "html"
     page.get_by_role("button", name="加入书库", exact=True).first.click()
-    expect(page.get_by_role("alert")).to_contain_text("网页而非书籍")
+    expect(page.locator(".toast")).to_contain_text("网页而非书籍")
     state["mode"] = "normal"
     page.get_by_role("button", name="加入书库", exact=True).first.click()
     expect(page.get_by_role("button", name="打开阅读")).to_be_visible(timeout=20000)
     page.reload()
     page.wait_for_load_state("networkidle")
-    page.get_by_role("button", name="书库", exact=True).click()
-    # 书库不空时「在线找书」收在右上角「+」里。
-    page.get_by_role("button", name="添加书籍", exact=True).click()
-    page.get_by_role("button", name="在线找书", exact=True).click()
+    # 刷新后回到的还是在线找书（底栏收着），直接再搜一次。
+    expect(page.get_by_label("在线搜索书名或作者")).to_be_visible()
     page.get_by_label("在线搜索书名或作者").fill("测试")
     page.get_by_role("button", name="搜索", exact=True).click()
     expect(page.get_by_role("button", name="打开阅读")).to_be_visible()

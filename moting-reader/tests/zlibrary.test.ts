@@ -52,7 +52,7 @@ test("session and logout do not expose credentials or make upstream requests", a
 });
 
 test("search encodes Chinese query, forwards only its account, normalizes results and pagination", async () => {
-  const response = await handleZlibrary(request("search", { query: "书名 & 作者", page: 2, format: "" }, { cookie: `${cookie}; unrelated=secret` }), fetcher((url, init) => {
+  const response = await handleZlibrary(request("search", { query: "书名 & 作者", page: 2 }, { cookie: `${cookie}; unrelated=secret` }), fetcher((url, init) => {
     assert.equal(url, `${ZLIBRARY_ORIGIN}/eapi/book/search`);
     const form = new URLSearchParams(String(init?.body));
     assert.equal(form.get("message"), "书名 & 作者");
@@ -86,10 +86,9 @@ test("search retries one transient upstream stall and reuses the form body", asy
 });
 
 test("guest search and exact match response are supported", async () => {
-  const response = await handleZlibrary(request("search", { query: "测试", format: "pdf" }), fetcher((_url, init) => {
+  const response = await handleZlibrary(request("search", { query: "测试" }), fetcher((_url, init) => {
     const form = new URLSearchParams(String(init?.body));
-    assert.equal(form.get("extensions[0]"), "pdf");
-    assert.equal(form.has("extensions[1]"), false);
+    assert.deepEqual(["epub", "pdf", "txt", "md"].map((_, index) => form.get(`extensions[${index}]`)), ["epub", "pdf", "txt", "md"]);
     return reply({ success: 1, exactMatch: { books: [{ ...sample, extension: "pdf" }] } });
   }));
   assert.equal((await responseJson<{ books: unknown[] }>(response)).books.length, 1);
@@ -112,11 +111,10 @@ test("auth rejection clears an expired session and opens a re-login path", async
   assert.match(response.headers.getSetCookie()[0], /Max-Age=0/);
 });
 
-test("cross-site requests, invalid methods, formats and identifiers never reach upstream", async () => {
+test("cross-site requests, invalid methods and identifiers never reach upstream", async () => {
   const cases: [Request, number][] = [
     [request("login", {}, { origin: "https://attacker.example" }), 403],
     [request("search", {}, { "sec-fetch-site": "cross-site" }), 403],
-    [request("search", { query: "x", format: "exe" }), 400],
     [request("search", { query: "x", page: -1 }), 400],
     [request("search", { query: "x", page: 1.5 }), 400],
     [request("search", { query: "x".repeat(201) }), 400],
