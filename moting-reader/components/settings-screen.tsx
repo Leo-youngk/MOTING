@@ -28,6 +28,7 @@ import {
 } from "react";
 import { AiRequestError, fetchAiModels } from "../lib/ai";
 import { resolvedEdgeVoiceURI } from "../lib/edge-voices";
+import type { AppUpdateStatus } from "../hooks/use-app-update";
 import {
   READER_FONTS,
   READER_THEMES,
@@ -95,6 +96,14 @@ function PageBar({
     </header>
   );
 }
+
+const UPDATE_LABEL: Record<AppUpdateStatus, string> = {
+  checking: "检查中…",
+  latest: "已是最新",
+  available: "点此更新",
+  offline: "离线，稍后再查",
+  unsupported: "开发版",
+};
 
 /** 设置首页的一行：图标、名字（可带一行说明）、当前值、右箭头，点进二级页。 */
 function LinkRow({
@@ -187,6 +196,7 @@ export function SettingsScreen({
   onSyncLogin,
   onSyncLogout,
   onSyncNow,
+  update,
   onOpen,
   onBack,
 }: {
@@ -200,6 +210,7 @@ export function SettingsScreen({
   onSyncLogin: (username: string, password: string) => Promise<void>;
   onSyncLogout: () => void;
   onSyncNow: () => void;
+  update: { status: AppUpdateStatus; check: () => void; apply: () => void };
   onOpen: (section: SettingsSection) => void;
   onBack: () => void;
 }) {
@@ -488,6 +499,12 @@ export function SettingsScreen({
               label="本地书库"
               value={`${books.length} 本书`}
               onClick={() => onOpen("library")}
+            />
+            <LinkRow
+              icon={<RefreshCw size={24} strokeWidth={1.7} />}
+              label={update.status === "available" ? "更新到新版本" : "检查更新"}
+              value={UPDATE_LABEL[update.status]}
+              onClick={update.status === "available" ? update.apply : update.check}
             />
           </div>
         </Section>

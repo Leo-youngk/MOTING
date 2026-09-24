@@ -5,7 +5,7 @@
 // Workers 每次发版只留新版文件，缓存里的旧页面要是缺了自己那一版的脚本，就再也跑不起来。
 //
 // 图标、manifest 这些文件名不带内容哈希，改了它们要顺手把版本号加一，否则已装的 PWA 永远拿旧的。
-const CACHE_NAME = "moting-shell-v13";
+const CACHE_NAME = "moting-shell-v14";
 const SHELL_FILES = [
   "/manifest.webmanifest",
   "/icon-192.png",
@@ -17,10 +17,24 @@ const SHELL_FILES = [
 /** 记着缓存里那份页面用到了哪些 /assets/ 文件，换版时据此清掉上一版的。 */
 const ASSET_LIST_KEY = "/__shell-assets.json";
 
+/** 缓存里那份页面用到的 /assets/ 文件。页面拿它跟自己开机时加载的比，多出来的就说明有新版。 */
+async function cachedAssets() {
+  const cache = await caches.open(CACHE_NAME);
+  const stored = await cache.match(ASSET_LIST_KEY);
+  return stored ? stored.json().catch(() => []) : [];
+}
+
+/** 把缓存里那一版的文件清单告诉页面（不指定就是所有打开着的页面）。 */
+async function announceShell(target, offline = false) {
+  const message = { type: "shell", assets: await cachedAssets(), offline };
+  const clients = target ? [target] : await self.clients.matchAll({ type: "window" });
+  clients.forEach((client) => client.postMessage(message));
+}
+
 async function refreshShell() {
   const response = await fetch("/", { cache: "no-store" });
   const type = response.headers.get("content-type") || "";
-  if (!response.ok || !type.includes("text/html")) return;
+  if (!response.ok || !type.includes("text/html")) throw new Error(`shell ${response.status}`);
   const html = await response.clone().text();
   const assets = [...new Set(html.match(/\/assets\/[^"'\s)<>]+\.(?:js|mjs|css)/g) || [])];
   const cache = await caches.open(CACHE_NAME);
@@ -82,6 +96,17 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// 页面开机、从后台切回来、在设置里点「检查更新」时发 check-update：去取一次最新页面，
+// 取不到（离线）就照旧回报缓存里的那一版，页面据此显示「已是最新」或「有新版本」。
+self.addEventListener("message", (event) => {
+  if (event.data?.type !== "check-update") return;
+  event.waitUntil(
+    refreshShell()
+      .then(() => announceShell(event.source))
+      .catch(() => announceShell(event.source, true))
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET") return;
@@ -92,7 +117,8 @@ self.addEventListener("fetch", (event) => {
 
   if (request.mode === "navigate") {
     // 后台取新版，打开这一下先用缓存里的；没有缓存（第一次打开）才等网络。
-    event.waitUntil(refreshShell().catch(() => undefined));
+    // 取完告诉页面：新版已经存好了，页面上会出「更新」，点一下重新载入就是新版。
+    event.waitUntil(refreshShell().catch(() => undefined).then(() => announceShell()));
     event.respondWith(
       caches
         .open(CACHE_NAME)

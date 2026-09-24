@@ -59,6 +59,7 @@ import {
   useState,
 } from "react";
 import { useAppNavigation } from "../hooks/use-app-navigation";
+import { useAppUpdate } from "../hooks/use-app-update";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
@@ -6204,6 +6205,7 @@ export default function MotingApp() {
     };
   }, [flushListeningProgress, flushReadingProgress]);
 
+  const appUpdate = useAppUpdate();
   const player = useSpeechPlayer({
     getBook: getFullBook,
     settings,
@@ -6800,6 +6802,7 @@ export default function MotingApp() {
           onSyncLogin={handleSyncLogin}
           onSyncLogout={() => void handleSyncLogout()}
           onSyncNow={() => void triggerSync(true)}
+          update={appUpdate}
           onOpen={(section) => navigate({ name: "settings", section })}
           onBack={() => goBack(view.section ? { name: "settings" } : { name: "home" })}
         />
@@ -6935,6 +6938,16 @@ export default function MotingApp() {
               onOpen={() => navigate({ name: "player", bookId: activeBook.id })}
               onStop={player.stop}
             />
+          ) : null}
+
+          {/* 新版已经在后台存好，点一下重新载入就换上。只在书架这几页出，不打断阅读和听书；有别的提示条时先让它。 */}
+          {appUpdate.status === "available" && !toast ? (
+            <div className="toast" role="status">
+              <span>新版本已就绪</span>
+              <button type="button" className="toast__undo" onClick={appUpdate.apply}>
+                更新
+              </button>
+            </div>
           ) : null}
         </div>
       )}
