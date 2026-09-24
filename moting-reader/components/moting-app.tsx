@@ -4,21 +4,18 @@ import "./book-metadata.css";
 
 import {
   ArrowDown,
-  ArrowLeft,
   ArrowUp,
+  AudioLines,
   BookOpen,
   Bookmark,
-  BookmarkCheck,
   Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Clock3,
   Cloud,
   Copy,
   Download,
   FileText,
-  Gauge,
   Headphones,
   Highlighter,
   Home,
@@ -28,18 +25,20 @@ import {
   List,
   LoaderCircle,
   MoreHorizontal,
+  NotebookText,
   Pause,
   PencilLine,
   Play,
   Plus,
   RefreshCw,
   Search,
+  Settings,
   Sparkles,
   Square,
+  Timer,
   Trash2,
   Type,
   Upload,
-  UserRound,
   Volume2,
   X,
 } from "lucide-react";
@@ -98,6 +97,7 @@ import {
   estimatePagination,
   nextChapterRange,
   pageAt,
+  positionAtPercent,
   positionFor,
   remainingCharacters,
 } from "../lib/content";
@@ -350,9 +350,9 @@ const NAV_ITEMS: Array<{
   icon: typeof Library;
 }> = [
   { id: "home", label: "主页", icon: Home },
-  { id: "library", label: "书库", icon: Library },
+  { id: "library", label: "书库", icon: BookOpen },
   { id: "listen", label: "听书", icon: Headphones },
-  { id: "notes", label: "笔记", icon: Highlighter },
+  { id: "notes", label: "笔记", icon: NotebookText },
 ];
 
 const HIGHLIGHT_COLORS: Array<{ id: HighlightColor; label: string }> = [
@@ -469,7 +469,7 @@ function BottomNavigation({
             aria-current={selected ? "page" : undefined}
             onClick={() => onChange(item.id)}
           >
-            <Icon size={21} strokeWidth={selected ? 2.2 : 1.7} />
+            <Icon size={23} strokeWidth={selected ? 2 : 1.7} />
             <span>{item.label}</span>
           </button>
         );
@@ -734,16 +734,33 @@ function EmptyState({
   );
 }
 
+/** 小熊：跟桌面图标同一只，从图标原图里裁出来的头像。 */
+function BearMark({ className }: { className: string }) {
+  return (
+    <span className={className} aria-hidden>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/bear-mark.png" alt="" width={48} height={48} />
+    </span>
+  );
+}
+
 function LargeHeader({
   title,
+  subtitle,
   actions,
 }: {
   title: string;
+  /** 页名下面那一行统计，比如「4 本书 · 28 条笔记」。 */
+  subtitle?: string;
   actions?: ReactNode;
 }) {
   return (
     <header className="ios-header">
-      <h1>{title}</h1>
+      <BearMark className="ios-header__mark" />
+      <div className="ios-header__text">
+        <h1>{title}</h1>
+        {subtitle ? <span className="ios-header__subtitle">{subtitle}</span> : null}
+      </div>
       {actions ? <div className="ios-header__actions">{actions}</div> : null}
     </header>
   );
@@ -812,44 +829,53 @@ function ShelfCard({
   );
 }
 
+/** 主页「继续阅读」的一张大卡：点封面或书名打开，右下的胶囊接着上次那一侧（读或听）往下走。 */
 function HomeCard({
   book,
+  percent,
   meta,
+  action,
   onOpen,
-  onPlay,
+  onAction,
 }: {
   book: BookMeta;
+  percent: number;
   meta: string;
+  action: string;
   onOpen: (book: BookMeta) => void;
-  onPlay?: (book: BookMeta) => void;
+  onAction: (book: BookMeta) => void;
 }) {
   return (
-    <article
-      className="home-card"
-      style={{ "--book-accent": book.accent } as CSSProperties}
-    >
+    <article className="home-card">
       <button
         type="button"
-        className="home-card__open"
+        className="home-card__cover"
+        aria-label={`打开${displayTitle(book.title)}`}
         onClick={() => onOpen(book)}
       >
-        <BookCover book={book} size="small" />
-        <span className="home-card__meta">
-          <strong>{displayTitle(book.title)}</strong>
-          <small>{book.author}</small>
-          <em>{meta}</em>
-        </span>
+        <BookCover book={book} size="medium" />
       </button>
-      {onPlay ? (
+      <div className="home-card__body">
         <button
           type="button"
-          className="home-card__play"
-          aria-label={`收听${book.title}`}
-          onClick={() => onPlay(book)}
+          className="home-card__info"
+          onClick={() => onOpen(book)}
         >
-          <Play size={16} fill="currentColor" />
+          <strong>{displayTitle(book.title)}</strong>
+          <small>{book.author}</small>
         </button>
-      ) : null}
+        <ProgressBar value={percent} />
+        <div className="home-card__foot">
+          <em>{meta}</em>
+          <button
+            type="button"
+            className="home-card__cta"
+            onClick={() => onAction(book)}
+          >
+            {action}
+          </button>
+        </div>
+      </div>
     </article>
   );
 }
@@ -1086,7 +1112,9 @@ function HomeScreen({
   onImport,
   onOpenHistory,
   onOpenSettings,
+  onOpenLibrary,
   onOpenStore,
+  onSearchStore,
 }: {
   books: BookMeta[];
   stats: ReadingStats;
@@ -1097,9 +1125,14 @@ function HomeScreen({
   onImport: () => void;
   onOpenHistory: () => void;
   onOpenSettings: () => void;
+  onOpenLibrary: () => void;
   /** 去书城。带 bookId 就直接落在那本书的详情上。 */
   onOpenStore: (bookId?: string) => void;
+  /** 在书城里搜这个词。 */
+  onSearchStore: (query: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+
   // 一本书一张卡：以前「继续阅读」和「继续收听」各排一行，
   // 同一本书既读过又听过就会上下重复出现，主页因此显得又长又乱。
   const resuming = books
@@ -1112,33 +1145,55 @@ function HomeScreen({
     .sort((a, b) => b.touchedAt - a.touchedAt);
   const untouched = resuming.length ? [] : books;
 
-  // 主行显示最近动过的那一侧，另一侧接在后面，两个位置差很远时也一眼看得到。
-  const resumeMeta = ({ book, listenLed }: (typeof resuming)[number]) => {
-    const read = book.readingPosition
-      ? `读到 ${Math.round(book.readingPosition.percent ?? 0)}%`
-      : "";
-    const listen = book.listeningPosition
-      ? formatRemaining(book, book.listeningPosition)
-      : "";
-    const ordered = listenLed ? [listen, read] : [read, listen];
-    return ordered.filter(Boolean).join(" · ");
-  };
+  // 卡片跟着最近动过的那一侧走：上次在听，进度条、「继续收听」都按听的位置算。
+  const ledPercent = ({ book, listenLed }: (typeof resuming)[number]) =>
+    Math.round(
+      (listenLed ? book.listeningPosition?.percent : book.readingPosition?.percent) ?? 0
+    );
 
   return (
     <div className="screen">
       <LargeHeader
-        title="主页"
+        title="墨听"
         actions={
           <button
             type="button"
-            className="avatar-button"
+            className="icon-button"
             aria-label="设置"
             onClick={onOpenSettings}
           >
-            <UserRound size={19} />
+            <Settings size={23} strokeWidth={1.8} />
           </button>
         }
       />
+
+      <form
+        role="search"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const keyword = query.trim();
+          if (!keyword) return;
+          (document.activeElement as HTMLElement | null)?.blur();
+          onSearchStore(keyword);
+        }}
+      >
+        <label className="ios-search">
+          <Search size={18} />
+          <input
+            value={query}
+            maxLength={100}
+            enterKeyHint="search"
+            aria-label="在书城搜索书籍"
+            placeholder="搜索书籍"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          {query ? (
+            <button type="button" aria-label="清除搜索" onClick={() => setQuery("")}>
+              <X size={15} />
+            </button>
+          ) : null}
+        </label>
+      </form>
 
       {!books.length ? (
         <EmptyState
@@ -1156,15 +1211,23 @@ function HomeScreen({
         <>
           {resuming.length ? (
             <section className="home-row">
-              <h2 className="home-row__title">继续</h2>
+              <div className="section-head">
+                <h2>继续阅读</h2>
+                <button type="button" className="section-link" onClick={onOpenLibrary}>
+                  查看全部
+                  <ChevronRight size={15} />
+                </button>
+              </div>
               <div className="home-row__track">
                 {resuming.map((entry) => (
                   <HomeCard
                     key={entry.book.id}
                     book={entry.book}
-                    meta={resumeMeta(entry)}
+                    percent={ledPercent(entry)}
+                    meta={`${entry.listenLed ? "已听" : "已读"} ${ledPercent(entry)}%`}
+                    action={entry.listenLed ? "继续收听" : "继续阅读"}
                     onOpen={entry.listenLed ? onOpenPlayer : onOpenReader}
-                    onPlay={entry.book.listeningPosition ? onPlay : undefined}
+                    onAction={entry.listenLed ? onPlay : onOpenReader}
                   />
                 ))}
               </div>
@@ -1173,14 +1236,23 @@ function HomeScreen({
 
           {untouched.length ? (
             <section className="home-row">
-              <h2 className="home-row__title">从这里开始</h2>
+              <div className="section-head">
+                <h2>从这里开始</h2>
+                <button type="button" className="section-link" onClick={onOpenLibrary}>
+                  查看全部
+                  <ChevronRight size={15} />
+                </button>
+              </div>
               <div className="home-row__track">
                 {untouched.map((book) => (
                   <HomeCard
                     key={book.id}
                     book={book}
-                    meta={book.author}
+                    percent={0}
+                    meta={formatRemaining(book)}
+                    action="开始阅读"
                     onOpen={onOpenReader}
+                    onAction={onOpenReader}
                   />
                 ))}
               </div>
@@ -1304,11 +1376,12 @@ function LibraryScreen({
                     <button
                       type="button"
                       className="grid-book__cover"
+                      aria-label={`阅读${displayTitle(book.title)}`}
                       onClick={() => onOpen(book)}
                     >
                       <BookCover book={book} size="large" />
-                      {isNew ? <span className="grid-book__badge">新增</span> : null}
                     </button>
+                    <strong className="grid-book__title">{displayTitle(book.title)}</strong>
                     <div className="grid-book__footer">
                       <span className="grid-book__progress">{progressLabel}</span>
                       <button
@@ -1630,10 +1703,10 @@ function ListenScreen({
           ) : null}
 
           <section className="ios-section">
-            <h2 className="ios-section__title">
-              {query ? "搜索结果" : "全部有声书"}
-            </h2>
-            <div className="ios-inset-list">
+            <div className="section-head">
+              <h2>{query ? "搜索结果" : "全部有声书"}</h2>
+            </div>
+            <div className="card-list">
               {visible.map((book) => (
                 <div className="ios-row ios-row--media" key={book.id}>
                   <button
@@ -1874,6 +1947,10 @@ function NotesScreen({
   const visibleShelves = shelves.filter(({ book }) => matches(book));
   const visibleChats = chatShelves.filter(({ book }) => matches(book));
   const totalNotes = shelves.reduce((sum, entry) => sum + entry.count, 0);
+  const totalRounds = chatShelves.reduce(
+    (sum, { chat }) => sum + chat.turns.filter((turn) => turn.role === "user").length,
+    0
+  );
 
   if (!shelves.length && !chatShelves.length) {
     return (
@@ -1890,11 +1967,14 @@ function NotesScreen({
 
   return (
     <div className="screen">
-      <LargeHeader title="笔记" />
-
-      <p className="ink-summary">
-        {shelves.length} 本书 · {totalNotes} 条笔记
-      </p>
+      <LargeHeader
+        title="笔记"
+        subtitle={
+          tab === "chat"
+            ? `${chatShelves.length} 本书 · ${totalRounds} 轮对话`
+            : `${shelves.length} 本书 · ${totalNotes} 条笔记`
+        }
+      />
 
       <div className="ios-segmented">
         {(
@@ -1938,10 +2018,12 @@ function NotesScreen({
         ) : !visibleChats.length ? (
           <p className="no-results">没有找到匹配的书籍。</p>
         ) : (
-          <div className="ios-inset-list">
+          <div className="card-list">
             {visibleChats.map(({ book, chat }) => {
-              const last = chat.turns[chat.turns.length - 1];
-              const rounds = chat.turns.filter((turn) => turn.role === "user").length;
+              // 列表里露最近问的那一句：回答是 Markdown，截一段下来全是星号和井号。
+              const asked = chat.turns.filter((turn) => turn.role === "user");
+              const last = asked[asked.length - 1];
+              const rounds = asked.length;
               return (
                 <button
                   type="button"
@@ -1973,7 +2055,7 @@ function NotesScreen({
       ) : !visibleShelves.length ? (
         <p className="no-results">没有找到匹配的书籍。</p>
       ) : (
-        <div className="ios-inset-list">
+        <div className="card-list">
           {visibleShelves.map(({ book, count, thoughts, latest }) => (
             <button
               type="button"
@@ -2466,7 +2548,7 @@ function SettingsPanel({
         <div className="segmented-control">
           {(
             [
-              ["white", "霜白"],
+              ["white", "软白"],
               ["cream", "宣纸"],
               ["black", "墨夜"],
             ] as const
@@ -3542,8 +3624,10 @@ function AiAskPanel({
     if (turn.role === "user") {
       return (
         <div className="ai-ask__turn-user" key={index}>
-          {turn.quote ? <blockquote className="ai-ask__quote-sent">{turn.quote}</blockquote> : null}
-          <p className="ai-ask__question">{turn.content}</p>
+          <div className="ai-ask__bubble">
+            {turn.quote ? <blockquote className="ai-ask__quote-sent">{turn.quote}</blockquote> : null}
+            <p className="ai-ask__question">{turn.content}</p>
+          </div>
         </div>
       );
     }
@@ -5581,7 +5665,15 @@ function PlayerScreen({
   const chapterListRef = useRevealActiveChapter(showChapters);
   const [showSleep, setShowSleep] = useState(false);
   const [showVoice, setShowVoice] = useState(false);
+  const [showMore, setShowMore] = useState(false);
   const [viewMode, setViewMode] = useState<"cover" | "text">("cover");
+  /**
+   * 拖进度条时先只挪圆点、预览拖到了哪一章哪一句，松手才真的跳过去——
+   * 拖的一路上每动一下就重新开播，云端合成会被来回掐断。
+   * ref 是同一个值的同步副本：松手时 pointerup 和 touchend 可能前后脚都到，只认第一次。
+   */
+  const [seeking, setSeeking] = useState<number | null>(null);
+  const seekRef = useRef<number | null>(null);
 
   const activeForBook = player.location?.bookId === book.id;
   const basePosition =
@@ -5592,18 +5684,29 @@ function PlayerScreen({
           player.location.sentenceIndex
         )
       : book.listeningPosition ?? initialPosition(book);
-  const chapter = book.chapters[basePosition.chapterIndex];
+  // 拖动时整块信息（章名、这一句、时长）都跟着预览拖到的位置。
+  const shown = seeking === null ? basePosition : positionAtPercent(book, seeking);
+  const chapter = book.chapters[shown.chapterIndex];
   const tocList = useMemo(() => tocIndexes(book.chapters), [book.chapters]);
   const tocActive = tocIndexFor(tocList, basePosition.chapterIndex);
   const sentences = chapter ? flattenChapter(chapter) : [];
-  const sentence = sentences[basePosition.sentenceIndex] ?? sentences[0];
+  const sentence = sentences[shown.sentenceIndex] ?? sentences[0];
   const playing = activeForBook && player.isPlaying;
-  const remaining = remainingCharacters(book, basePosition);
+  const remaining = remainingCharacters(book, shown);
   const elapsed = Math.max(0, book.characterCount - remaining);
+  const seekValue = seeking ?? shown.percent;
 
   const toggle = () => {
     if (activeForBook && (player.isPlaying || player.isPaused)) player.toggle();
     else player.start(book.id, basePosition);
+  };
+
+  const commitSeek = () => {
+    const value = seekRef.current;
+    seekRef.current = null;
+    setSeeking(null);
+    // 跟点目录换章一样：跳过去就从那里开始听。
+    if (value !== null) player.start(book.id, positionAtPercent(book, value));
   };
 
   // 进到这一页多半就是要听。趁用户还在看封面、调速度的这几秒把首段备上，
@@ -5638,113 +5741,116 @@ function PlayerScreen({
     player.cancelVoicePrefetch();
   };
 
+  const toggleView = () =>
+    setViewMode((mode) => (mode === "cover" ? "text" : "cover"));
+
+  const sleepLabel =
+    player.sleepMode === "off"
+      ? "定时"
+      : player.sleepMode === "chapter"
+        ? "本章结束"
+        : `${player.sleepMode} 分钟`;
+
   return (
     <div className="player-screen">
       <header className="player-header">
         <button
           type="button"
           className="icon-button"
-          aria-label="返回听书"
+          aria-label="返回"
           onClick={onBack}
         >
-          <ArrowLeft size={21} />
+          <ChevronLeft size={26} />
         </button>
-        <span>正在收听</span>
+        <span>正在听</span>
         <button
           type="button"
           className="icon-button"
-          aria-label="停止播放"
-          onClick={player.stop}
+          aria-label="更多"
+          onClick={() => setShowMore(true)}
         >
-          <Square size={17} />
+          <MoreHorizontal size={22} />
         </button>
       </header>
 
       <main className="player-main">
-        <div className="player-mode-pills">
-          <button
-            type="button"
-            className={viewMode === "cover" ? "is-active" : ""}
-            onClick={() => setViewMode("cover")}
-          >
-            封面
-          </button>
-          <button
-            type="button"
-            className={viewMode === "text" ? "is-active" : ""}
-            onClick={() => setViewMode("text")}
-          >
-            文稿
-          </button>
+        {/* 封面和文稿共用这一块，点一下来回切。 */}
+        <div
+          className="player-stage"
+          role="button"
+          tabIndex={0}
+          aria-label={viewMode === "cover" ? "显示文稿" : "显示封面"}
+          onClick={toggleView}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              toggleView();
+            }
+          }}
+        >
+          {viewMode === "cover" ? (
+            <BookCover book={book} size="large" />
+          ) : (
+            <div className="player-transcript-inline">
+              {sentences
+                .slice(
+                  Math.max(0, shown.sentenceIndex - 1),
+                  shown.sentenceIndex + 2
+                )
+                .map((item) => (
+                  <p
+                    key={item.id}
+                    className={item.id === sentence?.id ? "is-current" : ""}
+                  >
+                    {item.text}
+                  </p>
+                ))}
+            </div>
+          )}
         </div>
-
-        {viewMode === "cover" ? (
-          <BookCover book={book} size="large" />
-        ) : (
-          <div className="player-transcript-inline">
-            {sentences
-              .slice(
-                Math.max(0, basePosition.sentenceIndex - 1),
-                basePosition.sentenceIndex + 2
-              )
-              .map((item) => (
-                <p
-                  key={item.id}
-                  className={item.id === sentence?.id ? "is-current" : ""}
-                >
-                  {item.text}
-                </p>
-              ))}
-          </div>
-        )}
 
         <div className="player-title">
           <h1>{displayTitle(book.title)}</h1>
-          <p>{chapter ? chapterLabel(book.chapters, basePosition.chapterIndex) : "正文"}</p>
+          <p>{book.author}</p>
+          <strong>
+            {chapter ? chapterLabel(book.chapters, shown.chapterIndex) : "正文"}
+          </strong>
         </div>
 
-        <div className="player-icon-row">
-          <button type="button" onClick={() => setShowSleep(true)}>
-            <Clock3 size={20} />
-            <small>
-              {player.sleepMode === "off"
-                ? "定时关闭"
-                : player.sleepMode === "chapter"
-                  ? "本章结束"
-                  : `${player.sleepMode} 分钟`}
-            </small>
-          </button>
-          <button type="button" onClick={openVoicePanel}>
-            <Volume2 size={20} />
-            <small>{player.pendingVoiceURI && activeForBook ? "切换中" : "音色"}</small>
-          </button>
-          <button type="button" onClick={openVoicePanel}>
-            <Gauge size={20} />
-            <small>{settings.speechRate.toFixed(1)}×</small>
-          </button>
-          <div className="player-icon-row__static" aria-label="已加入书架">
-            <BookmarkCheck size={20} />
-            <small>已加入</small>
-          </div>
-        </div>
+        <p className="player-line" data-hidden={viewMode === "text" || undefined}>
+          {sentence?.text ?? ""}
+        </p>
 
-        <div className="player-progress">
-          <ProgressBar value={basePosition.percent} />
+        <div className="player-seek">
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="0.1"
+            aria-label="播放进度"
+            value={seekValue}
+            style={{ "--seek": `${seekValue}%` } as CSSProperties}
+            onChange={(event) => {
+              const value = Number(event.target.value);
+              seekRef.current = value;
+              setSeeking(value);
+            }}
+            onPointerUp={commitSeek}
+            onTouchEnd={commitSeek}
+            onKeyUp={commitSeek}
+            onBlur={() => {
+              // 拖到一半失焦（比如来电）就当没拖过，别在用户没松手时替他跳。
+              seekRef.current = null;
+              setSeeking(null);
+            }}
+          />
           <div>
-            <span>{formatReadingTime(elapsed)}</span>
+            <span>已听{formatReadingTime(elapsed)}</span>
             <span>剩余{formatReadingTime(remaining)}</span>
           </div>
         </div>
 
         <div className="player-controls">
-          <button
-            type="button"
-            className="player-controls__text"
-            onClick={() => onOpenReader(basePosition)}
-          >
-            <BookOpen size={19} />
-            <small>原文</small>
-          </button>
           <button
             type="button"
             className="skip-control"
@@ -5764,11 +5870,11 @@ function PlayerScreen({
             onClick={toggle}
           >
             {player.isBuffering && activeForBook ? (
-              <LoaderCircle className="player-buffering-icon" size={31} />
+              <LoaderCircle className="player-buffering-icon" size={30} />
             ) : playing ? (
-              <Pause size={33} fill="currentColor" />
+              <Pause size={32} fill="currentColor" />
             ) : (
-              <Play size={34} fill="currentColor" />
+              <Play size={32} fill="currentColor" style={{ marginLeft: 4 }} />
             )}
           </button>
           <button
@@ -5783,14 +5889,6 @@ function PlayerScreen({
           >
             <span>15</span>
           </button>
-          <button
-            type="button"
-            className="player-controls__text"
-            onClick={() => setShowChapters(true)}
-          >
-            <List size={19} />
-            <small>{tocList.length} 章</small>
-          </button>
         </div>
 
         {player.isBuffering && activeForBook ? (
@@ -5799,21 +5897,76 @@ function PlayerScreen({
           <p className="player-error">{player.error}</p>
         ) : null}
 
-        <button
-          type="button"
-          className="view-current-text"
-          onClick={() => onAddNote(basePosition, sentence?.text ?? "听书标记")}
-        >
-          <Bookmark size={15} />
-          标记这一句
-        </button>
-        <p className="sync-status">
-          已记录听书位置 · 第 {basePosition.sentenceIndex + 1} 句
-        </p>
+        <div className="player-tools">
+          <button type="button" onClick={() => setShowChapters(true)}>
+            <List size={22} />
+            <small>目录</small>
+          </button>
+          <button type="button" aria-label="朗读速度" onClick={openVoicePanel}>
+            <span className="player-tools__speed">
+              {settings.speechRate.toFixed(1)}×
+            </span>
+            <small>倍速</small>
+          </button>
+          <button
+            type="button"
+            className={player.sleepMode === "off" ? "" : "is-on"}
+            onClick={() => setShowSleep(true)}
+          >
+            <Timer size={22} />
+            <small>{sleepLabel}</small>
+          </button>
+          <button type="button" onClick={openVoicePanel}>
+            <AudioLines size={22} />
+            <small>{player.pendingVoiceURI && activeForBook ? "切换中" : "音色"}</small>
+          </button>
+        </div>
       </main>
 
+      {showMore ? (
+        <Modal title="更多" onClose={() => setShowMore(false)}>
+          <div className="book-actions">
+            <button
+              type="button"
+              className="book-action"
+              onClick={() => {
+                setShowMore(false);
+                onOpenReader(basePosition);
+              }}
+            >
+              <BookOpen size={19} />
+              <span>查看原文</span>
+            </button>
+            <button
+              type="button"
+              className="book-action"
+              onClick={() => {
+                setShowMore(false);
+                onAddNote(basePosition, sentence?.text ?? "听书标记");
+              }}
+            >
+              <Bookmark size={19} />
+              <span>标记这一句</span>
+            </button>
+            {activeForBook ? (
+              <button
+                type="button"
+                className="book-action book-action--danger"
+                onClick={() => {
+                  setShowMore(false);
+                  player.stop();
+                }}
+              >
+                <Square size={17} />
+                <span>停止播放</span>
+              </button>
+            ) : null}
+          </div>
+        </Modal>
+      ) : null}
+
       {showChapters ? (
-        <Modal title="章节列表" onClose={() => setShowChapters(false)}>
+        <Modal title="目录" onClose={() => setShowChapters(false)}>
           <div className="chapter-list" ref={chapterListRef}>
             {tocList.map((index, number) => (
               <button
@@ -5960,6 +6113,7 @@ function PlayerScreen({
 function MiniPlayer({
   book,
   chapterTitle,
+  line,
   isPlaying,
   isBuffering,
   onToggle,
@@ -5968,6 +6122,8 @@ function MiniPlayer({
 }: {
   book: BookMeta;
   chapterTitle: string;
+  /** 正在读的那一句。正文还没读进来时是空串，这一行就先写章名。 */
+  line: string;
   isPlaying: boolean;
   isBuffering: boolean;
   onToggle: () => void;
@@ -5979,13 +6135,16 @@ function MiniPlayer({
       <button type="button" className="mini-player__main" onClick={onOpen}>
         <BookCover book={book} size="small" />
         <span>
-          <strong>{displayTitle(book.title)}</strong>
-          <small>{chapterTitle}</small>
+          <strong>
+            {displayTitle(book.title)}
+            {line ? ` · ${chapterTitle}` : ""}
+          </strong>
+          <small>{line || chapterTitle}</small>
         </span>
       </button>
       <button
         type="button"
-        className="icon-button"
+        className="icon-button mini-player__toggle"
         aria-label={isBuffering ? "正在准备音频" : isPlaying ? "暂停" : "继续"}
         onClick={onToggle}
       >
@@ -6854,6 +7013,14 @@ export default function MotingApp() {
   const activeBook = player.location
     ? books.find((book) => book.id === player.location?.bookId)
     : undefined;
+  // 迷你条上那一句：正在听的那本正文一直钉在内存里（pinnedContentRef），直接从里面取。
+  // 摊平一章只是把段落里的句子接成一列，每句换一次才重算一回，不值得再缓存。
+  const speakingChapter = activeBook
+    ? contents.get(activeBook.id)?.[player.location?.chapterIndex ?? -1]
+    : undefined;
+  const speakingLine = speakingChapter
+    ? flattenChapter(speakingChapter)[player.location?.sentenceIndex ?? -1]?.text ?? ""
+    : "";
   const selectedMeta = viewNeedsContent(view)
     ? books.find((book) => book.id === view.bookId)
     : undefined;
@@ -7427,9 +7594,7 @@ export default function MotingApp() {
       ) : (
         <div className="app-frame">
           <div className="desktop-brand">
-            <div className="app-mark">
-              <BookOpen size={22} />
-            </div>
+            <BearMark className="app-mark" />
             <div>
               <strong>墨听</strong>
               <small>阅读，也聆听</small>
@@ -7455,9 +7620,11 @@ export default function MotingApp() {
                 onImport={() => fileInputRef.current?.click()}
                 onOpenHistory={() => navigate({ name: "history" })}
                 onOpenSettings={() => setShowSettings(true)}
+                onOpenLibrary={() => selectTab("library")}
                 onOpenStore={(bookId) =>
                   navigate(bookId ? { name: "store", bookId } : { name: "store" })
                 }
+                onSearchStore={(query) => navigate({ name: "store", query })}
               />
             ) : view.name === "history" ? (
               <HistoryScreen
@@ -7478,8 +7645,10 @@ export default function MotingApp() {
             ) : view.name === "store" ? (
               <div className="screen">
                 <Bookstore
+                  key={view.query ?? ""}
                   books={books}
                   initialBookId={view.bookId ?? ""}
+                  initialQuery={view.query ?? ""}
                   onBack={() => goBack({ name: "home" })}
                   onFindBook={(title, author) =>
                     navigate({ name: "find", query: bookSearchQuery(title, author) })
@@ -7533,6 +7702,7 @@ export default function MotingApp() {
                 activeBook.chapterOutline,
                 player.location?.chapterIndex ?? 0
               )}
+              line={speakingLine}
               isPlaying={player.isPlaying}
               isBuffering={player.isBuffering}
               onToggle={player.toggle}

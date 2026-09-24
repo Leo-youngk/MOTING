@@ -197,7 +197,9 @@ export function StoreRow({
   return (
     <button type="button" className="store-row" onClick={() => onOpen(book)}>
       {rank ? (
-        <span className={`store-rank${rank <= 3 ? " store-rank--top" : ""}`}>{rank}</span>
+        <span className={`store-rank${rank <= 3 ? " store-rank--top" : ""}`}>
+          {String(rank).padStart(2, "0")}
+        </span>
       ) : null}
       <Cover book={book} size="row" priority={priority} />
       <span className="store-row__info">
@@ -205,6 +207,7 @@ export function StoreRow({
         <small>{book.author || "作者未提供"}</small>
         <Rating book={book} />
       </span>
+      <ChevronRight className="store-row__chevron" size={16} aria-hidden="true" />
     </button>
   );
 }
@@ -259,6 +262,7 @@ export function Bookstore({
   onBack,
   onFindBook,
   initialBookId = "",
+  initialQuery = "",
 }: {
   /** 本地书库。最近读的那本会被当成「相似推荐」的种子。 */
   books: BookMeta[];
@@ -266,6 +270,8 @@ export function Bookstore({
   onFindBook: (title: string, author: string) => void;
   /** 从主页的书城条点进来时带的书，直接落在这本书的详情上。 */
   initialBookId?: string;
+  /** 从主页搜索框进来时带的词，一进来就搜。 */
+  initialQuery?: string;
 }) {
   // 「为你推荐」跟主页用的是同一份：主页已经取到过的话，进书城直接画，不再出骨架。
   const [initialFeed] = useState(() => readFeed());
@@ -301,9 +307,9 @@ export function Bookstore({
   const [rankAll, setRankAll] = useState(false);
   const [browseShown, setBrowseShown] = useState(BROWSE_STEP);
 
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [results, setResults] = useState<WereadBook[] | null>(null);
-  const [searching, setSearching] = useState(false);
+  const [searching, setSearching] = useState(Boolean(initialQuery));
   const [searchMore, setSearchMore] = useState(false);
   const [searchIdx, setSearchIdx] = useState(0);
 
@@ -462,6 +468,15 @@ export function Bookstore({
         if (!controller.signal.aborted) setSearching(false);
       });
   }
+
+  // 主页搜索框带着词进来：直接出结果，不用再按一次搜索。
+  // 书城页按查询词做 key，换一个词就是新挂载一次，这里只在挂载时跑一遍。
+  const initialSearchRef = useRef(initialQuery);
+  useEffect(() => {
+    const keyword = initialSearchRef.current.trim();
+    initialSearchRef.current = "";
+    if (keyword) runSearch(keyword, 0);
+  }, []);
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

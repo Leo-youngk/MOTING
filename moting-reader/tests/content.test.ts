@@ -11,6 +11,7 @@ import {
   movePosition,
   nextChapterRange,
   outlineOf,
+  positionAtPercent,
   positionFor,
   remainingCharacters,
   sliceSpeechBlock,
@@ -254,6 +255,33 @@ test("阅读位置能够跨章节移动并计算进度", () => {
   assert.equal(nextChapter.chapterIndex, 1);
   assert.equal(nextChapter.sentenceIndex, 0);
   assert.equal(end.percent, 100);
+});
+
+test("进度条拖到哪个百分比就落在对应的章和句，读回来还是那个百分比", () => {
+  const first = createChapter("第一章", [{ text: "甲。乙。丙。" }], 0);
+  const second = createChapter("第二章", [{ text: "丁。戊。己。庚。" }], 1);
+  assert.ok(first);
+  assert.ok(second);
+  const book = createBook({ title: "测试书", format: "txt", chapters: [first, second] });
+
+  const start = positionAtPercent(book, 0);
+  assert.equal(start.chapterIndex, 0);
+  assert.equal(start.sentenceIndex, 0);
+
+  // 共 7 句，第 4 句（下标 3）是第二章的第一句，50% 正好落在它上面。
+  const middle = positionAtPercent(book, 50);
+  assert.equal(middle.chapterIndex, 1);
+  assert.equal(middle.sentenceIndex, 0);
+  assert.equal(middle.percent, 50);
+
+  const end = positionAtPercent(book, 100);
+  assert.equal(end.chapterIndex, 1);
+  assert.equal(end.sentenceIndex, 3);
+  assert.equal(end.percent, 100);
+
+  // 越界的值收回到两端，不抛错。
+  assert.equal(positionAtPercent(book, -20).percent, 0);
+  assert.equal(positionAtPercent(book, 180).percent, 100);
 });
 
 const scrollWindow = (over: Partial<Parameters<typeof nextChapterRange>[1]> = {}) => ({

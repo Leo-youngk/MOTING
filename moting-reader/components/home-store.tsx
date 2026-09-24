@@ -177,31 +177,32 @@ export function HomeStore({
   return (
     <>
       <section className="home-row home-store">
-        <div className="home-store__head">
-          <h2 className="home-row__title home-store__title">书城</h2>
-          <button type="button" className="text-button" onClick={onOpenStore}>
-            全部
-            <ChevronRight size={15} aria-hidden="true" />
-          </button>
-        </div>
-
-        {/* 推荐要实时查接口，它挂了就只收起这一段，榜单读的是本地书目，照常显示。 */}
-        {feedFailed && !feed.length ? (
-          <p className="home-store__subhead home-store__quiet">推荐暂时取不到，先看看榜单</p>
-        ) : (
-          <>
-            <div className="home-store__subhead">
-              <small>为你推荐 · 微信读书按你的阅读记录挑的</small>
+        <div className="section-head">
+          <h2>为你推荐</h2>
+          <div className="section-head__actions">
+            {feedFailed && !feed.length ? null : (
               <button
                 type="button"
-                className="text-button"
+                className="section-link"
                 disabled={feedLoading}
                 onClick={shuffle}
               >
                 <RefreshCw size={13} aria-hidden="true" />
                 换一批
               </button>
-            </div>
+            )}
+            <button type="button" className="section-link" onClick={onOpenStore}>
+              查看全部
+              <ChevronRight size={15} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+
+        {/* 推荐要实时查接口，它挂了就只收起这一段，榜单读的是本地书目，照常显示。 */}
+        {feedFailed && !feed.length ? (
+          <p className="home-store__quiet">推荐暂时取不到，先看看榜单</p>
+        ) : (
+          <>
 
             {/* 骨架和成品是同一套卡片尺寸，数据到了原地换上，不会把下面的榜单推走。 */}
             <div className="home-row__track" aria-busy={feedLoading}>
@@ -222,13 +223,17 @@ export function HomeStore({
 
       {rankLoading || rank.length ? (
         <section className="home-store__rank">
-          <div className="home-store__rank-head">
-            <h3>
-              <Trophy size={15} aria-hidden="true" />
+          <div className="section-head">
+            <h2>
+              <Trophy size={17} aria-hidden="true" />
               {category}榜
-            </h3>
-            <small>按微信读书推荐值排序，墨听自己排的</small>
+            </h2>
+            <button type="button" className="section-link" onClick={onOpenStore}>
+              查看全部
+              <ChevronRight size={15} aria-hidden="true" />
+            </button>
           </div>
+          <p className="home-store__note">按微信读书推荐值排序，墨听自己排的</p>
 
           <div
             className="store-ranklist"

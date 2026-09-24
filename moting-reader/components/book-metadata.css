@@ -75,7 +75,7 @@
 
 .book-metadata__list button[aria-pressed="true"] {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
+  color: var(--accent-deep);
 }
 
 .book-metadata__list button:disabled {

@@ -1,79 +1,30 @@
 /*
  * 主页的书城条。
- * 标题与横滑轨道沿用主页 .home-row 那套出血留白（轨道要能贴到屏幕边缘），
+ * 标题行用主页通用的 .section-head；横滑轨道沿用 .home-row 那套出血留白（轨道要能贴到屏幕边缘），
  * 卡片和榜单行直接复用书城页的零件，两处的手感必须是同一个。
  */
-
-.home-store__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0 20px 4px;
-}
-
-.home-store__title {
-  margin: 0;
-}
-
-/* .text-button 自带 7px 内边距，右端要拉回来才能和 20px 的版心对齐。 */
-.home-store__head .text-button,
-.home-store__subhead .text-button {
-  flex: 0 0 auto;
-  gap: 2px;
-  margin-right: -7px;
-}
-
-.home-store__head .text-button {
-  font-size: var(--text-base);
-}
-
-.home-store__subhead {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0 20px 12px;
-}
-
-.home-store__subhead small {
-  color: var(--muted);
-  font-size: var(--text-sm);
-  line-height: 1.5;
-}
-
-.home-store__subhead .text-button {
-  gap: 4px;
-  font-size: var(--text-md);
-}
-
-.home-store__subhead .text-button:disabled {
-  color: var(--subtle);
-}
 
 .home-store__rank {
   margin-bottom: 26px;
 }
 
-.home-store__rank-head {
-  margin-bottom: 12px;
-}
-
-.home-store__rank-head h3 {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-  font-size: var(--text-xl);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-.home-store__rank-head small {
-  display: block;
-  margin-top: 3px;
+/* 榜不是微信读书的官方榜，是按它的推荐值自己排的，这一行交代清楚。 */
+.home-store__note {
+  margin: -8px 0 12px;
   color: var(--muted);
   font-size: var(--text-sm);
+}
+
+/* 榜单行在主页上是一张张白卡。 */
+.home-store__rank .store-row {
+  padding: 12px 14px 12px 12px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.home-store__rank .store-ranklist {
+  gap: 10px;
 }
 
 /* 书城整个取不到时只留一行交代，不在主页上摆空白，也不弹红色报错。 */

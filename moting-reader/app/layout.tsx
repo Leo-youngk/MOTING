@@ -9,7 +9,7 @@ export const metadata: Metadata = {
   icons: {
     icon: "/icon-512.png",
     shortcut: "/icon-192.png",
-    apple: "/icon-192.png",
+    apple: "/apple-touch-icon.png",
   },
 };
 
@@ -56,8 +56,8 @@ export default function RootLayout({
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <meta name="apple-mobile-web-app-title" content="墨听" />
-        {/* 初始值对应默认书架「霜白」，开机脚本按上次的配色改写。 */}
-        <meta name="theme-color" content="#f3f4f7" />
+        {/* 初始值对应默认书架「软白」，开机脚本按上次的配色改写。 */}
+        <meta name="theme-color" content="#f6f7fb" />
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} />
       </head>
       <body>{children}</body>

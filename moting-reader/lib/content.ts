@@ -572,6 +572,22 @@ export function initialPosition(book: Book): BookPosition {
   return positionFor(book, 0, 0);
 }
 
+/**
+ * positionFor 的反方向：进度条拖到百分之几，落在哪一章哪一句。
+ * 进度按句子数算（跟 positionFor 同一把尺子），所以拖到 37% 再读出来还是 37%。
+ */
+export function positionAtPercent(book: Book, percent: number): BookPosition {
+  const clamped = Math.max(0, Math.min(100, percent));
+  let target = Math.round((clamped / 100) * Math.max(book.sentenceCount - 1, 0));
+  for (let chapterIndex = 0; chapterIndex < book.chapters.length; chapterIndex++) {
+    const count = book.chapters[chapterIndex].sentenceCount;
+    if (target < count) return positionFor(book, chapterIndex, target);
+    target -= count;
+  }
+  // 走到这里只可能是浮点误差让下标多出一点点：落在最后一句（positionFor 会把下标收回来）。
+  return positionFor(book, book.chapters.length - 1, Number.MAX_SAFE_INTEGER);
+}
+
 /** 连续滚动时同时挂在 DOM 里的那一段章节，闭区间。 */
 export interface ChapterRange {
   start: number;

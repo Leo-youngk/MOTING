@@ -13,8 +13,17 @@
 }
 
 .store-search .ios-search {
+  min-width: 0;
   flex: 1;
   margin: 0;
+}
+
+/* 跟搜索框一样高，字不换行：输入框一宽，按钮就被挤成竖排的两个字。 */
+.store-search .primary-button {
+  min-height: 46px;
+  flex: 0 0 auto;
+  padding: 0 18px;
+  white-space: nowrap;
 }
 
 .store-lane {
@@ -170,7 +179,7 @@
   padding: 1px 5px;
   border-radius: 5px;
   background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
+  color: var(--accent-deep);
   font-size: var(--text-2xs);
   font-weight: 600;
 }
@@ -241,6 +250,11 @@
   font-size: var(--text-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.store-row__chevron {
+  flex: 0 0 auto;
+  color: var(--subtle);
 }
 
 /* 详情页 */
@@ -502,7 +516,7 @@
 
 .store-chips button[aria-pressed="true"] {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
 }
 
@@ -514,7 +528,7 @@
 
 /* 名次。宽度写死，1 和 10 对齐同一条竖线。 */
 .store-rank {
-  width: 22px;
+  width: 26px;
   flex: 0 0 auto;
   color: var(--subtle);
   font-size: var(--text-base);
@@ -539,7 +553,7 @@
   align-items: center;
   gap: 2px;
   flex: 0 0 auto;
-  color: var(--accent);
+  color: var(--accent-deep);
   font-size: var(--text-base);
 }
 

@@ -1,9 +1,10 @@
 @import "tailwindcss";
 @import "./fonts.css";
 
-/* 外壳这一层照着 iOS「图书」走：分组底 + 浮起的白卡 + 系统橙。
-   底色不用纯白：页面留一层极淡的冷灰，白卡片才浮得起来，否则整屏白压白很扁。
-   阅读器内部另有一套 --reader-* 暖色变量，不受这里影响。 */
+/* 外壳这一层是「云朵软白」：偏冷的云白底 + 纯白大圆角卡片 + 柔和的大范围落影，
+   文字用墨蓝，强调色取图标小熊的腮红粉。粉色只给能点的东西和「正在进行」的状态，
+   粉底上的字一律用墨蓝，浅粉配白字看不清。
+   阅读器内部另有一套 --reader-* 纸张变量，不受这里影响。 */
 :root {
   /* 软键盘挡住的高度，由 useKeyboardInset 量出来写进来。 */
   --keyboard-inset: 0px;
@@ -29,49 +30,63 @@
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
+  /* 页面里的白卡片统一这一档，比 iOS 分组列表圆一圈，软一点。 */
+  --radius-card: 20px;
   --radius-xl: 24px;
   --radius-pill: 999px;
-  /* 阴影四档:控件浮起、列表小封面、卡片大封面、悬浮层。 */
-  --shadow-control: 0 1px 3px rgb(0 0 0 / 12%);
-  --shadow-cover-sm: 0 1px 3px rgb(0 0 0 / 16%);
-  --shadow-cover: 0 1px 2px rgb(0 0 0 / 14%), 0 8px 20px rgb(0 0 0 / 16%);
-  --shadow-float: 0 8px 24px rgb(0 0 0 / 18%);
-  /* 页面里的卡片:一圈发丝线 + 很浅的落影。毛玻璃只给浮在内容上面的层
+  /* 阴影四档:控件浮起、列表小封面、卡片大封面、悬浮层。落影都用墨蓝调，
+     铺得开、压得淡，像云底下的影子，不是一圈灰边。 */
+  --shadow-control: 0 1px 2px rgb(31 35 64 / 6%), 0 4px 14px rgb(31 35 64 / 7%);
+  --shadow-cover-sm: 0 1px 2px rgb(31 35 64 / 10%), 0 3px 10px rgb(31 35 64 / 12%);
+  --shadow-cover: 0 2px 4px rgb(31 35 64 / 8%), 0 12px 28px rgb(31 35 64 / 16%);
+  --shadow-float: 0 10px 30px rgb(31 35 64 / 14%);
+  /* 页面里的卡片:一层很淡的近影 + 一层铺得很开的远影。毛玻璃只给浮在内容上面的层
      (底栏、迷你播放条、阅读器浮层、弹出面板),页面里的东西底下是纯色,模糊不出东西。 */
-  --shadow-card: 0 0 0 0.5px var(--line-soft), 0 1px 2px rgb(0 0 0 / 5%);
+  --shadow-card: 0 1px 2px rgb(31 35 64 / 4%), 0 8px 26px rgb(31 35 64 / 6%);
   --dur-fast: 160ms;
   --dur-base: 240ms;
-  --paper: #f3f4f7;
-  --paper-deep: #e7e8ef;
+  --paper: #f6f7fb;
+  --paper-deep: #eceef5;
   --surface: #ffffff;
   --surface-strong: #ffffff;
-  --ink: #16181f;
-  --muted: #7e828f;
-  --subtle: #bfc3ce;
-  --line: #d4d7e0;
-  --line-soft: #e5e7ee;
-  /* 页面顶部一层几乎看不见的冷光晕，纯平涂会显得廉价。 */
-  --paper-wash: rgb(116 138 190 / 10%);
-  --accent: #ff9500;
-  --accent-deep: #d97a00;
-  --accent-soft: #fff3e2;
+  --ink: #1f2340;
+  --muted: #8a8fa6;
+  --subtle: #c3c7d5;
+  --line: #dde0ea;
+  --line-soft: #eceef4;
+  /* 进度条、滑杆没走到的那一段。 */
+  --track: color-mix(in srgb, var(--ink) 8%, transparent);
+  /* 页面顶部一层几乎看不见的淡紫光晕，纯平涂会显得廉价。 */
+  --paper-wash: rgb(190 180 240 / 18%);
+  --accent: #ef7b96;
+  /* 粉色当文字用时的那一档，白底上要读得清。 */
+  --accent-deep: #d65a7a;
+  /* 提问气泡、当前句胶囊这类大面积的浅粉底。 */
+  --accent-soft: #fde6eb;
+  /* 按钮的粉底，比气泡深一档，看得出能点。 */
+  --accent-tint: #fbd5de;
+  /* 粉底上的字。 */
+  --accent-ink: var(--ink);
+  /* 实心粉底（发送键、选中的日期）上的字和图标。 */
+  --on-accent: #ffffff;
   --terracotta: #a26f5f;
   --danger: #ff3b30;
-  --shadow-soft: 0 10px 30px rgb(20 26 46 / 9%);
+  --shadow-soft: 0 10px 30px rgb(31 35 64 / 8%);
   /* 毛玻璃材质。Apple 的做法不只是模糊：还要提饱和（透出来的颜色才不发灰）、
      一道内侧顶高光当玻璃厚度、一道内侧底暗边当背面反射。缺了高光就只是模糊，不像玻璃。
-     --glass-fill 给浮层（底下是内容），--glass-tint 给贴在卡片上的小控件。 */
+     --glass-fill 给浮层（底下是内容），--glass-tint 给贴在卡片上的小控件。
+     软白这一档的浮层几乎是白的：底栏、迷你条要像一张浮起来的白卡。 */
   /* 只写不带前缀的 backdrop-filter，-webkit- 交给 Lightning CSS 自动补。
      手写一行 -webkit-backdrop-filter 反而会让它把标准属性整个删掉（值是 var() 时必踩）。 */
   --glass-blur: saturate(180%) blur(24px);
-  --glass-fill: color-mix(in srgb, var(--paper) 70%, transparent);
-  --glass-tint: color-mix(in srgb, var(--ink) 6%, transparent);
-  --glass-tint-strong: color-mix(in srgb, var(--ink) 11%, transparent);
-  --glass-edge: color-mix(in srgb, var(--ink) 13%, transparent);
-  --glass-sheen: rgb(255 255 255 / 70%);
-  --glass-shade: rgb(20 26 46 / 6%);
+  --glass-fill: color-mix(in srgb, var(--surface) 88%, transparent);
+  --glass-tint: color-mix(in srgb, var(--ink) 5%, transparent);
+  --glass-tint-strong: color-mix(in srgb, var(--ink) 10%, transparent);
+  --glass-edge: color-mix(in srgb, var(--ink) 8%, transparent);
+  --glass-sheen: rgb(255 255 255 / 80%);
+  --glass-shade: rgb(31 35 64 / 5%);
   --glass-shadow:
-    0 1px 2px rgb(20 26 46 / 7%), 0 12px 32px rgb(20 26 46 / 13%);
+    0 1px 2px rgb(31 35 64 / 5%), 0 10px 30px rgb(31 35 64 / 10%);
   --mark-yellow: #ffd426;
   --mark-green: #6ee06a;
   --mark-blue: #64b5ff;
@@ -96,48 +111,70 @@
     "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
 }
 
-/* 书架外观三档：霜白 / 宣纸 / 墨夜。只覆盖外壳这一层的 shell token；
-   阅读器有独立的 --reader-* 变量，换书架不会波及书内配色。 */
+/* 书架外观三档：软白 / 宣纸 / 墨夜。只覆盖外壳这一层的 shell token；
+   阅读器有独立的 --reader-* 变量，换书架不会波及书内配色。
+   三档共用同一套形状（白卡大圆角、腮红粉强调），只换底色、墨色和粉的冷暖。 */
 
-/* 宣纸：偏暖的纸浆色，但把黄压掉一档往灰里靠，否则容易发陈发闷。 */
+/* 宣纸：偏暖的米白纸浆色，粉往珊瑚那边偏一点，跟暖底搭。 */
 html[data-shell="cream"] {
-  --paper: #efe9dc;
-  --paper-deep: #e3dbc9;
-  --surface: #faf7f0;
-  --surface-strong: #fffdf8;
-  --ink: #2c2820;
-  --muted: #877c69;
-  --subtle: #bfb49f;
-  --line: #d8ceb8;
-  --line-soft: #e6ddca;
-  --paper-wash: rgb(186 146 82 / 13%);
-  --shadow-soft: 0 10px 30px rgb(74 55 22 / 11%);
-  --glass-sheen: rgb(255 253 246 / 75%);
-  --glass-shade: rgb(74 55 22 / 7%);
-  --glass-shadow: 0 1px 2px rgb(74 55 22 / 8%), 0 12px 32px rgb(74 55 22 / 15%);
+  --paper: #f4efe6;
+  --paper-deep: #ebe4d7;
+  --surface: #fffdf9;
+  --surface-strong: #fffdf9;
+  --ink: #2f2a26;
+  --muted: #8f8474;
+  --subtle: #cbc1b0;
+  --line: #e1d8c8;
+  --line-soft: #ede6d9;
+  --paper-wash: rgb(240 176 150 / 16%);
+  --accent: #e98292;
+  --accent-deep: #c95d70;
+  --accent-soft: #fbe6e3;
+  --accent-tint: #f7d3d2;
+  --shadow-control: 0 1px 2px rgb(74 55 22 / 6%), 0 4px 14px rgb(74 55 22 / 8%);
+  --shadow-cover-sm: 0 1px 2px rgb(74 55 22 / 10%), 0 3px 10px rgb(74 55 22 / 12%);
+  --shadow-cover: 0 2px 4px rgb(74 55 22 / 8%), 0 12px 28px rgb(74 55 22 / 16%);
+  --shadow-card: 0 1px 2px rgb(74 55 22 / 4%), 0 8px 26px rgb(74 55 22 / 7%);
+  --shadow-soft: 0 10px 30px rgb(74 55 22 / 10%);
+  --glass-sheen: rgb(255 253 246 / 80%);
+  --glass-shade: rgb(74 55 22 / 6%);
+  --glass-shadow: 0 1px 2px rgb(74 55 22 / 6%), 0 10px 30px rgb(74 55 22 / 12%);
 }
 
-/* 墨夜：底不是死黑，抬一点点蓝让卡片分层看得见。 */
+/* 墨夜：夜空一样的深墨蓝，不是死黑；卡片抬一层让分层看得见，粉提亮一档。 */
 html[data-shell="black"] {
-  --paper: #08090c;
-  --paper-deep: #1a1b20;
-  --surface: #16171c;
-  --surface-strong: #24252c;
-  --ink: #f2f2f5;
-  --muted: #93949f;
-  --subtle: #5a5b66;
-  --line: #34353d;
-  --line-soft: #26272e;
-  --paper-wash: rgb(96 116 176 / 14%);
-  --shadow-soft: 0 16px 40px rgb(0 0 0 / 55%);
+  --paper: #121420;
+  --paper-deep: #1f2232;
+  --surface: #1b1e2c;
+  --surface-strong: #252939;
+  --ink: #eef0f8;
+  --muted: #8f94ab;
+  --subtle: #555a71;
+  --line: #2f3346;
+  --line-soft: #262a3a;
+  --track: color-mix(in srgb, var(--ink) 14%, transparent);
+  --paper-wash: rgb(150 140 230 / 14%);
+  --accent: #f497ad;
+  /* 深底上当文字用的粉反而要更亮，才读得清。 */
+  --accent-deep: #f8b0c0;
+  --accent-soft: rgb(244 151 173 / 15%);
+  --accent-tint: rgb(244 151 173 / 24%);
+  --accent-ink: #fde8ee;
+  --on-accent: #1b1e2c;
+  --shadow-control: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 14px rgb(0 0 0 / 28%);
+  --shadow-cover-sm: 0 1px 2px rgb(0 0 0 / 35%), 0 3px 10px rgb(0 0 0 / 35%);
+  --shadow-cover: 0 2px 4px rgb(0 0 0 / 30%), 0 12px 28px rgb(0 0 0 / 45%);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 25%), 0 8px 26px rgb(0 0 0 / 30%);
+  --shadow-float: 0 10px 30px rgb(0 0 0 / 45%);
+  --shadow-soft: 0 16px 40px rgb(0 0 0 / 50%);
   /* 暗色玻璃：底色压得更透一点让背景透上来，高光换成一线白，暗边加重。 */
-  --glass-fill: color-mix(in srgb, var(--paper) 62%, transparent);
-  --glass-tint: color-mix(in srgb, var(--ink) 11%, transparent);
-  --glass-tint-strong: color-mix(in srgb, var(--ink) 17%, transparent);
-  --glass-edge: color-mix(in srgb, var(--ink) 17%, transparent);
-  --glass-sheen: rgb(255 255 255 / 16%);
-  --glass-shade: rgb(0 0 0 / 34%);
-  --glass-shadow: 0 1px 2px rgb(0 0 0 / 45%), 0 16px 40px rgb(0 0 0 / 55%);
+  --glass-fill: color-mix(in srgb, var(--surface-strong) 78%, transparent);
+  --glass-tint: color-mix(in srgb, var(--ink) 10%, transparent);
+  --glass-tint-strong: color-mix(in srgb, var(--ink) 16%, transparent);
+  --glass-edge: color-mix(in srgb, var(--ink) 12%, transparent);
+  --glass-sheen: rgb(255 255 255 / 12%);
+  --glass-shade: rgb(0 0 0 / 30%);
+  --glass-shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 14px 36px rgb(0 0 0 / 50%);
   color-scheme: dark;
 }
 
@@ -289,8 +326,7 @@ img {
     .ai-ask__reasoning-toggle,
     .reader-popover__back,
     .toc__close,
-    .view-current-text,
-    .player-controls__text,
+    .section-link,
     .bottom-nav button,
     .ios-segmented button,
     .store-chips button,
@@ -352,7 +388,7 @@ button:disabled {
 }
 
 ::selection {
-  background: rgb(255 149 0 / 26%);
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .visually-hidden {
@@ -380,6 +416,11 @@ button:disabled {
   padding-bottom: calc(96px + env(safe-area-inset-bottom));
 }
 
+/* 迷你播放条浮在底栏上面，内容再往上让出它那一截，最后一张卡才不会被它压住。 */
+.app-frame:has(.mini-player) .app-content {
+  padding-bottom: calc(170px + env(safe-area-inset-bottom));
+}
+
 /* 高度和底部留白都交给外面的 .app-content：这里再叠一层 100dvh 或 padding-bottom，
    就会把它避让 tab bar 的留白顶出视口，短页面也能滑动。 */
 .screen {
@@ -394,49 +435,61 @@ button:disabled {
   margin-inline: 20px;
 }
 
+/* 页头：左边一枚小熊（跟桌面图标同一只），右边页名，页名下面可以跟一行统计。 */
 .ios-header {
   display: flex;
-  min-height: 52px;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
+  min-height: 56px;
+  align-items: center;
+  gap: 12px;
   margin-bottom: 16px;
+}
+
+.ios-header__mark {
+  display: block;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: var(--shadow-control);
+}
+
+.ios-header__mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ios-header__text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .ios-header h1 {
   margin: 0;
-  font-size: var(--text-4xl);
+  font-size: var(--text-3xl);
   font-weight: 700;
-  letter-spacing: -0.028em;
-  line-height: 1.1;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+
+.ios-header__subtitle {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ios-header__actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 2px;
-  padding-bottom: 3px;
-}
-
-/* 页面上的小圆钮走「薄玻璃」：半透墨色 + 模糊 + 顶端一线高光。
-   贴在白卡上时模糊本身看不出来，起作用的是那道高光带来的厚度感。 */
-.avatar-button {
-  display: inline-flex;
-  width: 32px;
-  height: 32px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0.5px solid var(--line-soft);
-  border-radius: 50%;
-  background: var(--surface-strong);
-  box-shadow: var(--shadow-control);
-  color: var(--muted);
-  transition: transform var(--dur-fast) ease;
-}
-
-.avatar-button:active {
-  transform: scale(0.92);
 }
 
 .icon-button {
@@ -467,9 +520,8 @@ button:disabled {
 }
 
 .icon-button--filled {
-  width: 34px;
-  height: 34px;
-  border: 0.5px solid var(--line-soft);
+  width: 40px;
+  height: 40px;
   background: var(--surface-strong);
   box-shadow: var(--shadow-control);
 }
@@ -499,14 +551,15 @@ button:disabled {
     background var(--dur-fast) ease;
 }
 
+/* 主按钮是粉底墨字：浅粉配白字在手机上看不清。 */
 .primary-button {
-  background: var(--accent);
-  color: white;
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 @media (hover: hover) {
   .primary-button:hover {
-    background: var(--accent-deep);
+    background: color-mix(in srgb, var(--accent) 38%, var(--surface));
   }
 }
 
@@ -532,8 +585,51 @@ button:disabled {
   min-height: 38px;
   padding: 0 7px;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-deep);
   font-weight: 400;
+}
+
+/* 分段标题：左边标题，右边一个灰色的「查看全部 ›」，不抢标题。 */
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.section-head h2 {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.section-head__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.section-link {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 1px;
+  min-height: 32px;
+  padding: 0 0 0 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.section-link:disabled {
+  color: var(--subtle);
 }
 
 .primary-button:active,
@@ -542,34 +638,20 @@ button:disabled {
   transform: scale(0.98);
 }
 
+/* 封面四角一样圆、不画书脊：跟页面上的白卡是同一种软形状。 */
 .book-cover {
   position: relative;
   flex: 0 0 auto;
   overflow: hidden;
-  border-radius: 2px 6px 6px 2px;
-  background: #e8e1d5;
+  border-radius: 8px;
+  background: #ece6dc;
   box-shadow: var(--shadow-cover);
-}
-
-/* 书脊：左边一道渐深的窄条，让平面封面看着像一本实体书。 */
-.book-cover::after {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 9px;
-  background: linear-gradient(
-    to right,
-    rgb(0 0 0 / 22%),
-    rgb(0 0 0 / 4%) 55%,
-    rgb(255 255 255 / 18%)
-  );
-  content: "";
 }
 
 .book-cover--small {
   width: 46px;
   height: 68px;
+  border-radius: 6px;
 }
 
 .book-cover--medium {
@@ -652,10 +734,10 @@ button:disabled {
 }
 
 .progress-track {
-  height: 4px;
+  height: 5px;
   overflow: hidden;
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--ink) 14%, transparent);
+  background: var(--track);
 }
 
 .progress-track span {
@@ -673,15 +755,17 @@ button:disabled {
   font-size: var(--text-xs);
 }
 
+/* 搜索框是一条白色胶囊卡，跟页面上的卡片一样浮着。 */
 .ios-search {
   display: flex;
-  min-height: 36px;
+  min-height: 46px;
   align-items: center;
-  gap: 7px;
-  margin-bottom: 18px;
-  padding: 0 9px;
-  border-radius: var(--radius-md);
-  background: var(--paper-deep);
+  gap: 9px;
+  margin-bottom: 20px;
+  padding: 0 16px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
   color: var(--muted);
 }
 
@@ -717,9 +801,9 @@ button:disabled {
 
 .shelf__title {
   margin: 0 20px 12px;
-  font-size: var(--text-2xl);
+  font-size: var(--text-xl);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
 }
 
 .shelf__track {
@@ -778,7 +862,7 @@ button:disabled {
   padding-left: 2px;
   border-radius: 50%;
   background: color-mix(in srgb, var(--surface-strong) 88%, transparent);
-  color: var(--accent);
+  color: var(--accent-deep);
   box-shadow: var(--shadow-float);
   backdrop-filter: blur(10px);
 }
@@ -822,24 +906,6 @@ button:disabled {
   margin-bottom: 28px;
 }
 
-.ios-section__title {
-  margin: 0 0 9px;
-  font-size: var(--text-2xl);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-/* iOS 的内嵌分组列表：整组一个圆角块，行与行之间是缩进的细分隔线。 */
-.ios-inset-list {
-  overflow: hidden;
-  border-radius: var(--radius-md);
-  background: var(--paper-deep);
-}
-
-.ios-inset-list--top {
-  margin-top: 4px;
-}
-
 .ios-row {
   display: flex;
   width: 100%;
@@ -851,10 +917,6 @@ button:disabled {
   color: var(--ink);
   font-size: var(--text-lg);
   text-align: left;
-}
-
-.ios-row + .ios-row {
-  box-shadow: inset 0 0.5px 0 color-mix(in srgb, var(--ink) 12%, transparent);
 }
 
 .ios-row:active {
@@ -884,7 +946,7 @@ button:disabled {
   gap: 2px;
 }
 
-.ios-row__main strong {
+.ios-row__main > span > strong {
   overflow: hidden;
   font-size: var(--text-callout);
   font-weight: 600;
@@ -893,7 +955,7 @@ button:disabled {
   white-space: nowrap;
 }
 
-.ios-row__main small {
+.ios-row__main > span > small {
   overflow: hidden;
   color: var(--muted);
   font-size: var(--text-md);
@@ -901,32 +963,11 @@ button:disabled {
   white-space: nowrap;
 }
 
-.ios-row__main em {
+.ios-row__main > span > em {
   margin-top: 1px;
   color: var(--muted);
   font-size: var(--text-sm);
   font-style: normal;
-}
-
-.ios-row__label {
-  display: inline-flex;
-  min-width: 0;
-  flex: 1;
-  align-items: center;
-  gap: 9px;
-}
-
-.ios-row__label--tint {
-  color: var(--accent);
-}
-
-.ios-row__value {
-  color: var(--muted);
-  font-size: var(--text-callout);
-}
-
-.ios-row__check {
-  color: var(--accent);
 }
 
 .ios-row__chevron {
@@ -934,17 +975,56 @@ button:disabled {
   color: var(--subtle);
 }
 
+/* 书卡列表（笔记、AI 对话、听书）：一本书一张白卡，卡与卡之间留缝。 */
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.card-list > .ios-row {
+  min-height: 100px;
+  padding: 0 14px 0 12px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.card-list > .ios-row:active {
+  background: color-mix(in srgb, var(--ink) 3%, var(--surface));
+}
+
+.card-list .ios-row__main {
+  gap: 14px;
+  padding: 12px 0;
+}
+
+.card-list .ios-row__main > span {
+  gap: 3px;
+}
+
+.card-list .ios-row__main > span > strong {
+  font-size: var(--text-lg);
+  font-weight: 700;
+}
+
+.card-list .book-cover--small {
+  width: 58px;
+  height: 80px;
+}
+
 .ios-play-button {
   display: flex;
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   padding-left: 2px;
   border-radius: 50%;
-  background: rgb(255 149 0 / 14%);
-  color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .grid-heading {
@@ -956,9 +1036,9 @@ button:disabled {
 
 .grid-heading h2 {
   margin: 0;
-  font-size: var(--text-2xl);
+  font-size: var(--text-xl);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
 }
 
 .grid-heading small {
@@ -966,23 +1046,22 @@ button:disabled {
   font-size: var(--text-md);
 }
 
-/* 主页：Apple「图书」式横滑大卡，卡片底色按封面主色染。 */
+/* 主页的每一段：标题行和横滑轨道。轨道出血到屏幕边缘，所以 .home-row 自己管左右留白。 */
 .home-row {
   margin-bottom: 26px;
 }
 
-.home-row__title {
-  margin: 0 20px 12px;
-  font-size: var(--text-2xl);
-  font-weight: 700;
-  letter-spacing: -0.02em;
+.home-row > .section-head {
+  margin-inline: 20px;
 }
 
 .home-row__track {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   overflow-x: auto;
-  padding: 2px 20px;
+  /* 上下留出卡片落影的位置，不然被滚动容器切成一条直边。 */
+  padding: 2px 20px 14px;
+  margin-bottom: -12px;
   /* 没有这一行，吸附会把第一张卡对齐到屏幕边上，跟上面的标题错开 20px。 */
   scroll-padding-inline: 20px;
   scroll-snap-type: x proximity;
@@ -993,104 +1072,132 @@ button:disabled {
   display: none;
 }
 
+/* 「继续阅读」：一本书一张大白卡——封面、书名、作者、粉色进度，右下一个「继续」胶囊。
+   只有一本时整张铺满版心；多本时横滑，露出下一张的边。 */
 .home-card {
-  position: relative;
   display: flex;
-  width: min(84vw, 340px);
+  width: min(84vw, 360px);
   flex: 0 0 auto;
-  align-items: center;
-  gap: 12px;
-  padding: 13px 14px;
-  border-radius: var(--radius-lg);
-  background: color-mix(
-    in srgb,
-    var(--book-accent, var(--accent)) 20%,
-    var(--surface)
-  );
+  gap: 16px;
+  padding: 14px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
   box-shadow: var(--shadow-card);
   scroll-snap-align: start;
 }
 
-.home-card__open {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  align-items: center;
-  gap: 12px;
+.home-row__track > .home-card:only-child {
+  width: 100%;
+}
+
+.home-card__cover {
+  display: block;
+  flex: 0 0 auto;
+  padding: 0;
   background: transparent;
-  color: inherit;
-  text-align: left;
   transition: transform var(--dur-fast) ease;
 }
 
-.home-card__open:active {
-  transform: scale(0.98);
+.home-card__cover:active {
+  transform: scale(0.97);
 }
 
 .home-card .book-cover {
-  width: 52px;
-  flex: 0 0 auto;
+  width: 84px;
+  height: 120px;
+  box-shadow: var(--shadow-cover-sm);
 }
 
-.home-card__meta {
+.home-card__body {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  padding-top: 4px;
+}
+
+.home-card__info {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
 }
 
-.home-card__meta strong {
+.home-card__info strong {
   display: -webkit-box;
   overflow: hidden;
-  font-size: var(--text-callout);
-  font-weight: 600;
-  line-height: 1.25;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: 1.3;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 
-.home-card__meta small,
-.home-card__meta em {
+.home-card__info small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-card__body .progress-wrap {
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.home-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.home-card__foot em {
   overflow: hidden;
   color: var(--muted);
   font-size: var(--text-md);
   font-style: normal;
-  white-space: nowrap;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.home-card__play {
+.home-card__cta {
   display: inline-flex;
-  width: 34px;
-  height: 34px;
+  min-height: 34px;
   flex: 0 0 auto;
   align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0.5px solid var(--line-soft);
-  border-radius: 50%;
-  background: var(--surface-strong);
-  box-shadow: var(--shadow-control);
-  color: var(--ink);
+  gap: 4px;
+  padding: 0 16px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
+  font-size: var(--text-md);
+  font-weight: 600;
   transition: transform var(--dur-fast) ease;
 }
 
-.home-card__play:active {
-  transform: scale(0.9);
+.home-card__cta:active {
+  transform: scale(0.95);
 }
 
-/* 主页阅读看板：一只极简时钟，指针按今日读了多少分钟转，只用墨色，不掺主题橙。 */
+/* 主页阅读看板：一只极简时钟，指针按今日读了多少分钟转，走过的那一段是淡粉。 */
 .zen-board {
   display: flex;
   align-items: center;
   gap: 22px;
-  margin: 8px 20px 30px;
-  padding: 26px 24px;
-  border-radius: var(--radius-xl);
+  margin: 8px 20px 20px;
+  padding: 24px;
+  border-radius: var(--radius-card);
   background:
     radial-gradient(
       120% 90% at 82% 8%,
-      color-mix(in srgb, var(--ink) 4%, transparent),
+      color-mix(in srgb, var(--accent) 7%, transparent),
       transparent 62%
     ),
     var(--surface);
@@ -1123,10 +1230,10 @@ button:disabled {
   stroke-width: 1.5;
 }
 
-/* 走过的那一段留一道淡墨，满一圈正好 60 分钟。 */
+/* 走过的那一段留一道淡粉，满一圈正好 60 分钟。 */
 .zen-clock__sweep {
   fill: none;
-  stroke: color-mix(in srgb, var(--ink) 14%, transparent);
+  stroke: color-mix(in srgb, var(--accent) 55%, transparent);
   stroke-linecap: round;
   stroke-width: 5;
   transition: stroke-dasharray 900ms cubic-bezier(0.22, 0.7, 0.24, 1);
@@ -1236,8 +1343,8 @@ button:disabled {
 
 .zen-log {
   margin: 0 20px 30px;
-  padding: 22px 20px;
-  border-radius: var(--radius-xl);
+  padding: 20px;
+  border-radius: var(--radius-card);
   background: var(--surface);
   box-shadow: var(--shadow-card);
 }
@@ -1252,8 +1359,8 @@ button:disabled {
 .zen-log__title {
   margin: 0;
   font-family: var(--font-sans);
-  font-size: var(--text-callout);
-  font-weight: 500;
+  font-size: var(--text-lg);
+  font-weight: 700;
 }
 
 .zen-log__all {
@@ -1331,14 +1438,15 @@ button:disabled {
 
 .book-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 26px 22px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 22px 14px;
   margin-bottom: 30px;
 }
 
 .grid-book {
   position: relative;
   display: flex;
+  min-width: 0;
   flex-direction: column;
 }
 
@@ -1362,57 +1470,48 @@ button:disabled {
   transform: scale(0.97);
 }
 
-.grid-book__badge {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  padding: 3px 9px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: white;
-  font-size: var(--text-xs);
+.grid-book__title {
+  overflow: hidden;
+  margin-top: 10px;
+  font-size: var(--text-base);
   font-weight: 600;
-  letter-spacing: 0.01em;
-  box-shadow: var(--shadow-control);
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .grid-book__footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-top: 10px;
+  gap: 4px;
+  margin-top: 1px;
 }
 
 .grid-book__progress {
   overflow: hidden;
   color: var(--muted);
-  font-size: var(--text-md);
-  letter-spacing: -0.01em;
+  font-size: var(--text-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .grid-book__more {
   display: inline-flex;
-  flex-shrink: 0;
   width: 30px;
-  height: 30px;
+  height: 26px;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
+  margin-right: -6px;
   padding: 0;
-  border: 0.5px solid var(--line-soft);
-  border-radius: 50%;
-  background: var(--surface-strong);
-  box-shadow: var(--shadow-control);
-  color: var(--ink);
-  transition:
-    background var(--dur-fast) ease,
-    transform var(--dur-fast) ease;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
 }
 
 .grid-book__more:active {
-  transform: scale(0.9);
+  background: var(--glass-tint);
 }
 
 .book-actions {
@@ -1559,7 +1658,7 @@ button:disabled {
   gap: 1px;
   padding: 6px;
   background: transparent;
-  color: var(--accent);
+  color: var(--ink);
   font-size: var(--text-lg);
 }
 
@@ -1567,23 +1666,24 @@ button:disabled {
   display: grid;
   grid-auto-columns: 1fr;
   grid-auto-flow: column;
-  margin-bottom: 20px;
-  padding: 2px;
-  border-radius: var(--radius-sm);
-  background: rgb(118 118 128 / 12%);
+  margin-bottom: 16px;
+  padding: 4px;
+  border-radius: var(--radius-lg);
+  background: var(--paper-deep);
 }
 
 .ios-segmented button {
-  min-height: 30px;
-  border-radius: var(--radius-sm);
+  min-height: 40px;
+  border-radius: var(--radius-md);
   background: transparent;
-  color: var(--ink);
-  font-size: var(--text-md);
+  color: var(--muted);
+  font-size: var(--text-base);
   font-weight: 500;
 }
 
 .ios-segmented button.is-active {
   background: var(--surface-strong);
+  color: var(--ink);
   font-weight: 600;
   box-shadow: var(--shadow-control);
 }
@@ -1672,7 +1772,7 @@ button:disabled {
 
 .notes-calendar__day.is-selected {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .notes-calendar__day.is-selected i {
@@ -1697,14 +1797,6 @@ button:disabled {
   color: var(--accent-deep);
   font-size: var(--text-sm);
   font-weight: 500;
-}
-
-.ink-summary {
-  margin: 2px 0 14px;
-  color: var(--muted);
-  font-family: var(--font-sans);
-  font-size: var(--text-md);
-  letter-spacing: 0.04em;
 }
 
 .ink-feed {
@@ -2039,7 +2131,7 @@ button:disabled {
   justify-content: center;
   border-radius: var(--radius-pill);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .ai-inline__send:active {
@@ -2180,8 +2272,9 @@ button:disabled {
   justify-self: center;
   padding: 0;
   border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--muted);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-control);
+  color: var(--ink);
 }
 
 .ai-chat__scroll {
@@ -2310,10 +2403,9 @@ html[data-keyboard-open] .ai-chat__composer {
   display: flex;
   flex-direction: column;
   padding: 6px 6px 6px 18px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-xl);
+  border-radius: 26px;
   background: var(--surface);
-  box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 6%, transparent);
+  box-shadow: var(--shadow-card);
 }
 
 /* 从正文划词带进来的原文：挂在输入框里，最多两行。 */
@@ -2368,7 +2460,7 @@ html[data-keyboard-open] .ai-chat__composer {
   justify-content: center;
   border-radius: var(--radius-pill);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   transition:
     background var(--dur-fast) ease,
     color var(--dur-fast) ease,
@@ -2416,21 +2508,26 @@ html[data-keyboard-open] .ai-chat__composer {
   transform: translate(-50%, 0);
 }
 
-/* 提问：右对齐的浅色气泡，一眼跟满宽的回答分开。 */
+/* 提问：右对齐的浅粉气泡，一眼跟满宽的回答分开。带着的原文摘录也装在气泡里。 */
 .ai-ask__turn-user {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 6px;
+}
+
+.ai-ask__bubble {
+  display: flex;
+  max-width: 88%;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: 20px 20px 6px 20px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
 }
 
 .ai-ask__question {
-  max-width: 85%;
   margin: 0;
-  padding: 9px 14px;
-  border-radius: var(--radius-lg);
-  background: var(--paper-deep);
-  color: var(--ink);
   font-family: var(--font-sans);
   font-size: var(--text-callout);
   line-height: 1.6;
@@ -2438,15 +2535,14 @@ html[data-keyboard-open] .ai-chat__composer {
   white-space: pre-wrap;
 }
 
-/* 带着的原文摘录跟在提问上面，收一档、压低对比度，最多三行。 */
+/* 原文摘录收一档、压低对比度，最多三行。 */
 .ai-ask__quote-sent {
   display: -webkit-box;
   overflow: hidden;
-  max-width: 85%;
   margin: 0;
   padding: 1px 0 1px 10px;
-  border-left: 2px solid var(--line);
-  color: var(--muted);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  color: color-mix(in srgb, var(--accent-ink) 68%, transparent);
   font-family: var(--font-serif);
   font-size: var(--text-md);
   line-height: 1.6;
@@ -3098,13 +3194,13 @@ html[data-keyboard-open] .ai-chat__composer {
 .settings-row input[type="checkbox"] {
   width: 20px;
   height: 20px;
-  accent-color: var(--accent);
+  accent-color: var(--accent-deep);
   flex-shrink: 0;
 }
 
 input[type="range"] {
   width: 100%;
-  accent-color: var(--accent);
+  accent-color: var(--accent-deep);
 }
 
 .segmented-control,
@@ -3236,7 +3332,7 @@ input[type="range"] {
   align-items: center;
   justify-content: center;
   gap: 14px;
-  padding: 0 18px calc(10px + env(safe-area-inset-bottom));
+  padding: 0 16px calc(10px + env(safe-area-inset-bottom));
   pointer-events: none;
 }
 
@@ -3249,42 +3345,45 @@ html[data-keyboard-open] .bottom-bar {
   display: none;
 }
 
+/* 底栏是一张浮起来的白卡，四个 tab 均分；选中的那个图标填一层淡粉、字变粉。 */
 .bottom-nav {
   display: flex;
-  gap: 2px;
-  padding: 7px 8px;
-  border-radius: var(--radius-xl);
+  width: 100%;
+  max-width: 560px;
+  padding: 6px;
   border: 0.5px solid var(--glass-edge);
+  border-radius: 26px;
   background: var(--glass-fill);
   backdrop-filter: var(--glass-blur);
   box-shadow:
     inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade),
     var(--glass-shadow);
 }
 
 .bottom-nav button {
   display: flex;
-  min-width: 58px;
-  min-height: 44px;
+  min-height: 50px;
+  flex: 1;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
-  padding: 4px 10px;
-  border-radius: var(--radius-xl);
+  gap: 3px;
+  padding: 4px 0;
+  border-radius: 20px;
   background: transparent;
   color: var(--muted);
-  font-size: var(--text-2xs);
-  letter-spacing: 0.01em;
-  transition:
-    color var(--dur-fast) ease,
-    background var(--dur-fast) ease;
+  font-size: var(--text-xs);
+  transition: color var(--dur-fast) ease;
 }
 
 .bottom-nav button.is-active {
+  color: var(--accent-deep);
+  font-weight: 600;
+}
+
+.bottom-nav button.is-active svg {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  fill: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .desktop-brand {
@@ -3292,37 +3391,41 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .app-mark {
-  display: flex;
+  display: block;
   width: 46px;
   height: 46px;
-  align-items: center;
-  justify-content: center;
+  overflow: hidden;
   border-radius: var(--radius-lg);
-  background: var(--accent);
-  color: white;
-  box-shadow: var(--shadow-float);
+  background: #fff;
+  box-shadow: var(--shadow-control);
 }
 
+.app-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* 迷你播放条：跟底栏同宽的一张白卡，贴在底栏上面。 */
 .mini-player {
   position: fixed;
   z-index: 35;
-  right: 10px;
-  bottom: calc(76px + env(safe-area-inset-bottom));
-  left: 10px;
+  right: 16px;
+  bottom: calc(84px + env(safe-area-inset-bottom));
+  left: 16px;
   display: flex;
-  max-width: 760px;
+  max-width: 560px;
   min-height: 66px;
   align-items: center;
   gap: 2px;
   margin: auto;
-  padding: 7px 7px 7px 9px;
+  padding: 8px 6px 8px 10px;
   border: 0.5px solid var(--glass-edge);
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--surface-strong) 78%, transparent);
+  border-radius: 22px;
+  background: var(--glass-fill);
   backdrop-filter: var(--glass-blur);
   box-shadow:
     inset 0 0.5px 0 var(--glass-sheen),
-    inset 0 -0.5px 0 var(--glass-shade),
     var(--glass-shadow);
 }
 
@@ -3331,42 +3434,54 @@ html[data-keyboard-open] .bottom-bar {
   min-width: 0;
   flex: 1;
   align-items: center;
-  gap: 11px;
+  gap: 12px;
+  padding: 0;
   background: transparent;
   text-align: left;
 }
 
 .mini-player .book-cover {
-  width: 36px;
-  height: 48px;
-  box-shadow: none;
+  width: 38px;
+  height: 50px;
+  border-radius: 6px;
+  box-shadow: var(--shadow-cover-sm);
 }
 
 .mini-player__main > span {
   display: flex;
   min-width: 0;
   flex-direction: column;
+  gap: 3px;
 }
 
-.mini-player__main strong,
-.mini-player__main small {
+.mini-player__main > span > strong,
+.mini-player__main > span > small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.mini-player__main strong {
+.mini-player__main > span > strong {
   font-family: var(--font-sans);
   font-size: var(--text-md);
+  font-weight: 600;
 }
 
-.mini-player__main small {
-  margin-top: 3px;
+.mini-player__main > span > small {
   color: var(--muted);
-  font-size: var(--text-2xs);
+  font-size: var(--text-sm);
 }
 
-.mini-player__stop {
+.mini-player__toggle.icon-button {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  background: var(--paper-deep);
+}
+
+.mini-player__stop.icon-button {
+  width: 34px;
+  flex: 0 0 auto;
   color: var(--muted);
 }
 
@@ -3407,13 +3522,11 @@ html[data-keyboard-open] .bottom-bar {
   z-index: 30;
   top: 0;
   display: grid;
-  min-height: calc(62px + env(safe-area-inset-top));
+  min-height: calc(54px + env(safe-area-inset-top));
   grid-template-columns: 48px 1fr 48px;
-  align-items: end;
-  padding: env(safe-area-inset-top) 10px 6px;
-  border-bottom: 1px solid var(--line-soft);
-  background: color-mix(in srgb, var(--paper) 92%, transparent);
-  backdrop-filter: blur(16px);
+  align-items: center;
+  padding: env(safe-area-inset-top) 6px 0;
+  background: var(--paper);
 }
 
 /* 沉浸阅读：顶部/底部两条浮层控件，浮在全屏正文之上，点空白处整体淡出。 */
@@ -4223,81 +4336,60 @@ html[data-keyboard-open] .bottom-bar {
   min-height: 44px;
   align-items: center;
   justify-content: center;
-  color: var(--muted);
-  font-size: var(--text-xs);
-  letter-spacing: 0.08em;
+  font-size: var(--text-lg);
+  font-weight: 600;
 }
 
 .player-main {
   display: flex;
-  width: min(calc(100% - 36px), 540px);
-  min-height: calc(100dvh - 70px);
+  width: min(calc(100% - 40px), 480px);
   flex-direction: column;
   align-items: center;
   margin: 0 auto;
-  padding: 43px 0 calc(32px + env(safe-area-inset-bottom));
+  padding: 10px 0 calc(20px + env(safe-area-inset-bottom));
 }
 
-.player-main > .book-cover--large {
-  width: 132px;
-  height: 182px;
+/*
+ * 封面和文稿共用同一块地方，点一下来回切，高度不变。
+ * 宽度跟着屏幕高度走：矮屏收小一点，让下面的控件一屏放得下；高屏最大 260。
+ */
+.player-stage {
+  --stage-width: clamp(
+    160px,
+    calc(
+      (100dvh - 520px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) * 0.72
+    ),
+    260px
+  );
+  display: flex;
+  width: 100%;
+  height: calc(var(--stage-width) * 1.4);
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.player-stage .book-cover--large {
+  width: var(--stage-width);
+  height: 100%;
+  border-radius: 18px;
   box-shadow: var(--shadow-cover);
 }
 
-.player-title {
-  max-width: 100%;
-  margin: 25px 0 13px;
-  text-align: center;
-}
-
-.player-title h1 {
-  margin: 0 0 7px;
-  overflow: hidden;
-  font-family: var(--font-sans);
-  font-size: var(--text-3xl);
-  letter-spacing: -0.03em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.player-title p {
-  margin: 0;
-  color: var(--muted);
-  font-family: var(--font-sans);
-  font-size: var(--text-base);
-}
-
-.player-mode-pills {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 22px;
-  padding: 3px;
-  border-radius: var(--radius-pill);
-  background: var(--surface);
-}
-
-.player-mode-pills button {
-  min-width: 64px;
-  padding: 6px 14px;
-  border-radius: var(--radius-pill);
-  color: var(--muted);
-  font-size: var(--text-sm);
-  background: transparent;
-}
-
-.player-mode-pills button.is-active {
-  background: var(--surface-strong);
-  color: var(--ink);
-  box-shadow: var(--shadow-control);
+.player-stage .book-cover--large .book-cover__generated strong {
+  font-size: 22px;
 }
 
 .player-transcript-inline {
   display: flex;
   width: 100%;
-  min-height: 182px;
+  height: 100%;
   flex-direction: column;
   justify-content: center;
   gap: 14px;
+  overflow: hidden;
   padding: 0 6px;
 }
 
@@ -4315,57 +4407,157 @@ html[data-keyboard-open] .bottom-bar {
   font-size: var(--text-lg);
 }
 
-.player-progress {
+.player-title {
+  max-width: 100%;
+  margin: 22px 0 0;
+  text-align: center;
+}
+
+.player-title h1 {
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-title p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-base);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-title strong {
+  display: block;
+  margin-top: 12px;
+  overflow: hidden;
+  font-size: var(--text-base);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 正在读的这一句：浅粉胶囊，只占一行，换句时高度不跳。 */
+.player-line {
+  max-width: 100%;
+  min-height: 38px;
+  margin: 10px 0 0;
+  padding: 9px 18px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: var(--text-base);
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 文稿模式下这一句已经在上面放大了，胶囊留着位置但不显示，下面的控件不跟着挪。 */
+.player-line[data-hidden] {
+  visibility: hidden;
+}
+
+/* 进度条：可以拖。拖的时候只挪圆点和预览的时间，松手才跳过去。 */
+.player-seek {
   width: 100%;
-  margin-top: 8px;
+  margin-top: 22px;
 }
 
-.player-progress .progress-track {
-  height: 3px;
+.player-seek input[type="range"] {
+  --seek: 0%;
+  display: block;
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  touch-action: pan-y;
 }
 
-.player-progress > div:last-child {
+.player-seek input[type="range"]::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    to right,
+    var(--accent) var(--seek),
+    var(--track) var(--seek)
+  );
+}
+
+.player-seek input[type="range"]::-moz-range-track {
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    to right,
+    var(--accent) var(--seek),
+    var(--track) var(--seek)
+  );
+}
+
+.player-seek input[type="range"]::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  margin-top: -6.5px;
+  border: 3px solid var(--surface);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgb(31 35 64 / 25%);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.player-seek input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 3px solid var(--surface);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgb(31 35 64 / 25%);
+}
+
+.player-seek > div {
   display: flex;
   justify-content: space-between;
-  margin-top: 7px;
+  margin-top: 4px;
   color: var(--muted);
-  font-size: var(--text-2xs);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 .player-controls {
-  display: grid;
-  width: 100%;
-  grid-template-columns: 1fr 1fr 1.4fr 1fr 1fr;
-  align-items: center;
-  gap: 4px;
-  margin: 26px 0 23px;
-}
-
-.player-controls > button {
   display: flex;
-  min-width: 48px;
-  min-height: 54px;
+  width: 100%;
   align-items: center;
   justify-content: center;
-  gap: 2px;
-  flex-direction: column;
-  background: transparent;
-}
-
-.player-controls > button small {
-  color: var(--muted);
-  font-size: 8px;
+  gap: 40px;
+  margin: 18px 0 20px;
 }
 
 .player-controls .player-primary-control {
-  width: 78px;
-  height: 78px;
-  min-height: 78px;
-  justify-self: center;
+  display: flex;
+  width: 82px;
+  height: 82px;
+  align-items: center;
+  justify-content: center;
   border-radius: 50%;
-  background: var(--accent);
-  color: white;
-  box-shadow: var(--shadow-float);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow:
+    0 2px 6px rgb(31 35 64 / 6%),
+    0 14px 34px rgb(31 35 64 / 12%);
+  transition: transform var(--dur-fast) ease;
+}
+
+.player-controls .player-primary-control:active {
+  transform: scale(0.95);
 }
 
 .player-buffering-icon {
@@ -4374,7 +4566,7 @@ html[data-keyboard-open] .bottom-bar {
 
 .player-preparing {
   width: 100%;
-  margin: -8px 0 15px;
+  margin: -6px 0 14px;
   color: var(--muted);
   font-size: var(--text-sm);
   text-align: center;
@@ -4386,11 +4578,24 @@ html[data-keyboard-open] .bottom-bar {
   }
 }
 
+/* 快退 / 快进 15 秒：一道缺口圆弧，中间写 15。 */
+.skip-control {
+  position: relative;
+  display: flex;
+  width: 50px;
+  height: 50px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+}
+
 .skip-control::before {
   display: block;
-  width: 37px;
-  height: 37px;
-  border: 2px solid currentColor;
+  width: 36px;
+  height: 36px;
+  border: 2.2px solid currentColor;
   border-right-color: transparent;
   border-radius: 50%;
   content: "";
@@ -4403,74 +4608,72 @@ html[data-keyboard-open] .bottom-bar {
 
 .skip-control span {
   position: absolute;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: 700;
 }
 
 .player-error {
   width: 100%;
-  margin: -8px 0 15px;
+  margin: -6px 0 14px;
   padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: rgb(157 75 66 / 8%);
+  border-radius: var(--radius-md);
+  background: rgb(255 59 48 / 8%);
   color: var(--danger);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   text-align: center;
 }
 
-.player-icon-row {
+/* 底部工具卡：目录 / 倍速 / 定时 / 音色。 */
+.player-tools {
   display: grid;
   width: 100%;
   grid-template-columns: repeat(4, 1fr);
-  margin-bottom: 22px;
+  padding: 8px 4px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
 }
 
-.player-icon-row button,
-.player-icon-row__static {
+.player-tools button {
   display: flex;
-  min-height: 54px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+  min-width: 0;
+  min-height: 58px;
   flex-direction: column;
-  color: var(--ink);
-  background: transparent;
-}
-
-.player-icon-row__static {
-  color: var(--muted);
-}
-
-.player-icon-row small {
-  color: var(--muted);
-  font-size: var(--text-2xs);
-}
-
-.player-icon-row__static small {
-  color: var(--muted);
-}
-
-.player-controls__text small {
-  font-size: var(--text-2xs);
-}
-
-.view-current-text {
-  display: flex;
-  min-height: 48px;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  margin-top: 10px;
+  gap: 5px;
+  padding: 0 2px;
+  border-radius: var(--radius-md);
   background: transparent;
-  color: var(--accent-deep);
-  font-family: var(--font-serif);
-  font-size: var(--text-md);
+  color: var(--ink);
 }
 
-.sync-status {
-  margin: 1px 0 0;
-  color: var(--subtle);
-  font-size: var(--text-2xs);
+.player-tools button:active {
+  background: var(--glass-tint);
+}
+
+.player-tools small {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-tools button.is-on,
+.player-tools button.is-on small {
+  color: var(--accent-deep);
+}
+
+/* 倍速这一格没有图标，数字本身就是图标，跟旁边的图标一样高。 */
+.player-tools__speed {
+  display: block;
+  height: 22px;
+  font-size: var(--text-callout);
+  font-weight: 700;
+  line-height: 22px;
+  font-variant-numeric: tabular-nums;
 }
 
 .modal-backdrop {
@@ -4928,7 +5131,7 @@ html[data-keyboard-open] .modal-sheet {
 }
 
 .font-picker__item.is-active {
-  border-color: var(--accent);
+  border-color: var(--accent-deep);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
@@ -4941,7 +5144,7 @@ html[data-keyboard-open] .modal-sheet {
   position: absolute;
   right: 6px;
   bottom: 6px;
-  color: var(--accent);
+  color: var(--accent-deep);
 }
 
 /* 通用设置行：左标签 + 右控件。 */
@@ -5001,7 +5204,7 @@ html[data-keyboard-open] .modal-sheet {
 .rset-slider {
   flex: 1;
   max-width: 232px;
-  accent-color: var(--accent);
+  accent-color: var(--accent-deep);
 }
 
 /* sheet 跟随阅读主题时，分段控件的底轨和选中片也要换到 reader 色，
@@ -5128,7 +5331,7 @@ html[data-keyboard-open] .modal-sheet {
   padding: 0 14px;
   border-radius: var(--radius-pill);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-size: var(--text-sm);
 }
 
@@ -5158,7 +5361,7 @@ html[data-keyboard-open] .modal-sheet {
   margin: 0 auto 18px;
   border-radius: var(--radius-lg);
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
   box-shadow: var(--shadow-float);
 }
 
@@ -5309,7 +5512,7 @@ html[data-keyboard-open] .modal-sheet {
   }
 
   .shelf__title,
-  .home-row__title {
+  .home-row > .section-head {
     margin-inline: 36px;
   }
 
@@ -5320,7 +5523,7 @@ html[data-keyboard-open] .modal-sheet {
   }
 
   .book-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 30px 22px;
   }
 
@@ -5423,7 +5626,7 @@ html[data-keyboard-open] .modal-sheet {
   }
 
   .bottom-nav button.is-active {
-    background: rgb(255 149 0 / 12%);
+    background: var(--accent-soft);
   }
 
   .app-content {
@@ -5436,7 +5639,7 @@ html[data-keyboard-open] .modal-sheet {
   }
 
   .book-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 
   .mini-player {
