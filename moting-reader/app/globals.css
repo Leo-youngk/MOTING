@@ -1,9 +1,10 @@
 @import "tailwindcss";
 @import "./fonts.css";
 
-/* 外壳这一层是「云朵软白」：偏冷的云白底 + 纯白大圆角卡片 + 柔和的大范围落影，
-   文字用墨蓝，强调色取图标小熊的腮红粉。粉色只给能点的东西和「正在进行」的状态，
-   粉底上的字一律用墨蓝，浅粉配白字看不清。
+/* 外壳这一层是「云朵软白」：几乎纯白的底 + 纯白大圆角卡片 + 柔和的大范围落影，
+   卡片靠落影浮起来，不靠底色压灰。文字用墨蓝，强调色取图标小熊的腮红粉。
+   粉色只给能点的东西和「正在进行」的状态，粉底上的字一律用墨蓝，浅粉配白字看不清。
+   色值按用户给的效果图取样。
    阅读器内部另有一套 --reader-* 纸张变量，不受这里影响。 */
 :root {
   /* 软键盘挡住的高度，由 useKeyboardInset 量出来写进来。 */
@@ -45,8 +46,8 @@
   --shadow-card: 0 1px 2px rgb(31 35 64 / 4%), 0 8px 26px rgb(31 35 64 / 6%);
   --dur-fast: 160ms;
   --dur-base: 240ms;
-  --paper: #f6f7fb;
-  --paper-deep: #eceef5;
+  --paper: #fafbfd;
+  --paper-deep: #f0f2f7;
   --surface: #ffffff;
   --surface-strong: #ffffff;
   --ink: #1f2340;
@@ -56,19 +57,20 @@
   --line-soft: #eceef4;
   /* 进度条、滑杆没走到的那一段。 */
   --track: color-mix(in srgb, var(--ink) 8%, transparent);
-  /* 页面顶部一层几乎看不见的淡紫光晕，纯平涂会显得廉价。 */
-  --paper-wash: rgb(190 180 240 / 18%);
-  --accent: #ef7b96;
+  /* 页面顶部的光晕。软白这一档不要：底要白，一加就发灰。宣纸、墨夜各自有一层。 */
+  --paper-wash: transparent;
+  /* 进度条、选中的 tab 图标这类填色的粉。 */
+  --accent: #f5a0b4;
   /* 粉色当文字用时的那一档，白底上要读得清。 */
-  --accent-deep: #d65a7a;
+  --accent-deep: #de7390;
   /* 提问气泡、当前句胶囊这类大面积的浅粉底。 */
-  --accent-soft: #fde6eb;
+  --accent-soft: #fde8eb;
   /* 按钮的粉底，比气泡深一档，看得出能点。 */
-  --accent-tint: #fbd5de;
+  --accent-tint: #fdd6dd;
   /* 粉底上的字。 */
   --accent-ink: var(--ink);
-  /* 实心粉底（发送键、选中的日期）上的字和图标。 */
-  --on-accent: #ffffff;
+  /* 实心粉底（发送键、选中的日期）上的字和图标：粉很浅，白字看不清，用墨蓝。 */
+  --on-accent: var(--ink);
   --terracotta: #a26f5f;
   --danger: #ff3b30;
   --shadow-soft: 0 10px 30px rgb(31 35 64 / 8%);
@@ -127,8 +129,8 @@ html[data-shell="cream"] {
   --line: #e1d8c8;
   --line-soft: #ede6d9;
   --paper-wash: rgb(240 176 150 / 16%);
-  --accent: #e98292;
-  --accent-deep: #c95d70;
+  --accent: #ec9aa8;
+  --accent-deep: #c9637a;
   --accent-soft: #fbe6e3;
   --accent-tint: #f7d3d2;
   --shadow-control: 0 1px 2px rgb(74 55 22 / 6%), 0 4px 14px rgb(74 55 22 / 8%);

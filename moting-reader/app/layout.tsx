@@ -57,7 +57,7 @@ export default function RootLayout({
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <meta name="apple-mobile-web-app-title" content="墨听" />
         {/* 初始值对应默认书架「软白」，开机脚本按上次的配色改写。 */}
-        <meta name="theme-color" content="#f6f7fb" />
+        <meta name="theme-color" content="#fafbfd" />
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} />
       </head>
       <body>{children}</body>

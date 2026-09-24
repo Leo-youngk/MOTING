@@ -5,7 +5,7 @@
 // Workers 每次发版只留新版文件，缓存里的旧页面要是缺了自己那一版的脚本，就再也跑不起来。
 //
 // 图标、manifest 这些文件名不带内容哈希，改了它们要顺手把版本号加一，否则已装的 PWA 永远拿旧的。
-const CACHE_NAME = "moting-shell-v12";
+const CACHE_NAME = "moting-shell-v13";
 const SHELL_FILES = [
   "/manifest.webmanifest",
   "/icon-192.png",
