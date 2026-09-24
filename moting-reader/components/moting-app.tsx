@@ -500,12 +500,13 @@ function useRevealActiveChapter(open: boolean) {
 let scrollLockCount = 0;
 let lockedScrollY = 0;
 // 关闭浮层的同一个事件里如果发生了跳转（比如点目录），跳转后的滚动位置才是
-// 用户想要的，不能被这里的"还原到开浮层前的位置"覆盖掉。跳转代码负责调用
-// suppressScrollRestore() 声明"这次关闭不要还原"。
-let suppressNextScrollRestore = false;
+// 用户想要的，不能被这里的"还原到开浮层前的位置"覆盖掉。而且锁着的时候 body 是
+// position: fixed，这期间的滚动全都不算数，所以跳转的滚动得挪到解锁那一刻再做。
+let scrollAfterUnlock: (() => void) | null = null;
 
-function suppressScrollRestore() {
-  suppressNextScrollRestore = true;
+function scrollWhenUnlocked(scroll: () => void) {
+  if (scrollLockCount > 0) scrollAfterUnlock = scroll;
+  else scroll();
 }
 
 // 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
@@ -522,11 +523,10 @@ function useScrollLock() {
       if (--scrollLockCount > 0) return;
       document.body.classList.remove("is-scroll-locked");
       document.body.style.top = "";
-      if (suppressNextScrollRestore) {
-        suppressNextScrollRestore = false;
-      } else {
-        window.scrollTo(0, lockedScrollY);
-      }
+      const scroll = scrollAfterUnlock;
+      scrollAfterUnlock = null;
+      if (scroll) scroll();
+      else window.scrollTo(0, lockedScrollY);
     };
   }, []);
 }
@@ -4516,16 +4516,13 @@ function ReaderScreen({
     const pending = pendingScrollRef.current;
     if (!pending) return;
     pendingScrollRef.current = null;
-    articleRef.current
-      ?.querySelector<HTMLElement>(pending.selector)
-      ?.scrollIntoView({ block: pending.block });
+    // 目录之类的浮层通常是"点了就关"，跳转落地时它可能还在收起、body 还锁着。
+    scrollWhenUnlocked(() =>
+      articleRef.current
+        ?.querySelector<HTMLElement>(pending.selector)
+        ?.scrollIntoView({ block: pending.block })
+    );
   }, [range]);
-
-  // 跳章落地时目标章节的开头正好贴着视口顶部，头部哨兵这一下会"碰巧"进缓冲区，
-  // 但这不是用户在往上翻，是刚跳过去的假象。哨兵观察器重新订阅后的第一次回调只是
-  // 报告落地瞬间的状态，不是真的滚动触发，得跳过，否则会把跳转前一章接回来，
-  // 看起来就像跳章跳错到了上一章。
-  const justJumpedRef = useRef(false);
 
   // 改排版会让正文整体重排。分页模式在 measure() 里按句子重新对页，连续滚动这边得自己来：
   // 先记下锚点句在视口里的位置，重排后按位移把滚动条推回去，否则调一次字号就找不到读到哪了。
@@ -4616,10 +4613,6 @@ function ReaderScreen({
       (entries) => {
         // 拖选期间保留当前章节 DOM，避免窗口裁剪删掉仍在选区里的起点。
         if (selectionActiveRef.current) return;
-        if (justJumpedRef.current) {
-          justJumpedRef.current = false;
-          return;
-        }
         const current = rangeRef.current;
         const hit = (target: Element) =>
           entries.some((entry) => entry.target === target && entry.isIntersecting);
@@ -4653,7 +4646,6 @@ function ReaderScreen({
     // 这里是在换书／切模式后同步重置窗口，避免旧章节窗口短暂残留。
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setRange(reset);
-    justJumpedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book.id, paged]);
 
@@ -4823,19 +4815,23 @@ function ReaderScreen({
     setPopup(null);
     goToPage(0);
     // 跳章是重新开窗，不是接章，所以这里不做锚点补偿，直接回到章首。
+    // 前后两章一起挂上：落地时两端的哨兵往往已经在缓冲区里，observer 不会再为它们
+    // 报第二次，只挂目标章的话就再也接不上邻章，只能在这一章里上下滑。
     anchorRef.current = null;
-    rangeRef.current = { start: safe, end: safe };
-    setRange({ start: safe, end: safe });
+    const jumped = paged
+      ? { start: safe, end: safe }
+      : {
+          start: Math.max(0, safe - 1),
+          end: Math.min(currentBook.chapters.length - 1, safe + 1),
+        };
+    rangeRef.current = jumped;
+    setRange(jumped);
     // 分页模式靠平移正文切页，不动滚动条。
     if (!paged) {
       pendingScrollRef.current = {
         selector: `[data-chapter-section="${safe}"]`,
         block: "start",
       };
-      justJumpedRef.current = true;
-      // 目录之类的浮层通常是"点了就关"，关闭动作会触发 useScrollLock 把滚动位置
-      // 还原到开浮层前——但这里已经跳到新章节了，不能被那次还原覆盖回旧位置。
-      if (scrollLockCount > 0) suppressScrollRestore();
     }
   }, [clearTextSelection, goToPage, onProgress, paged]);
 
