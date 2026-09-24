@@ -44,7 +44,7 @@ npm run deploy:dry-run
 | 路径 | 用途 |
 |---|---|
 | `app/` | 路由与页面 |
-| `components/` | UI 组件 |
+| `components/` | UI 组件。底部弹层和滚动锁统一在 `sheet.tsx`（`Modal`），滑杆统一用 `soft-range.tsx`，设置是独立的分级页面 `settings-screen.tsx` |
 | `hooks/` | React hooks，TTS 播放器在 `use-speech-player.ts` |
 | `lib/` | 核心逻辑，`content.ts` 负责章节/段落/句子解析，`types.ts` 是共享类型 |
 | `worker/` | Cloudflare Worker 入口 |

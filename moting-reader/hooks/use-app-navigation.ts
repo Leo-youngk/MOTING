@@ -31,6 +31,8 @@ function parentOf(view: AppView): AppView {
       return { name: "library" };
     case "store":
       return { name: "home" };
+    case "settings":
+      return view.section ? { name: "settings" } : { name: "home" };
     case "history":
       return { name: "home" };
     default:
@@ -39,7 +41,9 @@ function parentOf(view: AppView): AppView {
 }
 
 function viewKey(view: AppView): string {
-  return "bookId" in view ? `${view.name}:${view.bookId}` : view.name;
+  if ("bookId" in view) return `${view.name}:${view.bookId}`;
+  if (view.name === "settings" && view.section) return `settings:${view.section}`;
+  return view.name;
 }
 
 /** 阅读器和播放器按阅读进度自己定位，别用列表页那套滚动记忆去冲掉它。 */

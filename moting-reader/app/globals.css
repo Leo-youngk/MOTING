@@ -46,6 +46,14 @@
   --shadow-card: 0 1px 2px rgb(31 35 64 / 4%), 0 8px 26px rgb(31 35 64 / 6%);
   --dur-fast: 160ms;
   --dur-base: 240ms;
+  /*
+   * 底栏离屏幕底边多远：有 Home 指示条的机型把底栏压进安全区，停在指示条上沿；
+   * 没有指示条的留 10px。迷你播放条、页面底部留白都从这两个值推出来，改一处全跟着走。
+   * 高度写死成整数：高度带小数时，iOS 滚动中每一帧取整不一样，底栏里的图标会上下跳一个像素。
+   */
+  --tabbar-bottom: max(10px, calc(env(safe-area-inset-bottom) - 20px));
+  --tabbar-height: 64px;
+  --mini-player-height: 66px;
   --paper: #fafbfd;
   --paper-deep: #f0f2f7;
   --surface: #ffffff;
@@ -324,7 +332,6 @@ img {
     .ios-back,
     .toast__undo,
     .zen-log__all,
-    .ai-setup__reload,
     .ai-ask__reasoning-toggle,
     .reader-popover__back,
     .toc__close,
@@ -415,12 +422,14 @@ button:disabled {
 
 .app-content {
   min-height: 100dvh;
-  padding-bottom: calc(96px + env(safe-area-inset-bottom));
+  padding-bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + 28px);
 }
 
 /* 迷你播放条浮在底栏上面，内容再往上让出它那一截，最后一张卡才不会被它压住。 */
 .app-frame:has(.mini-player) .app-content {
-  padding-bottom: calc(170px + env(safe-area-inset-bottom));
+  padding-bottom: calc(
+    var(--tabbar-bottom) + var(--tabbar-height) + var(--mini-player-height) + 36px
+  );
 }
 
 /* 高度和底部留白都交给外面的 .app-content：这里再叠一层 100dvh 或 padding-bottom，
@@ -2659,6 +2668,7 @@ html[data-keyboard-open] .ai-chat__composer {
 :is(.ai-ask__answer, .ai-inline__answer) > :first-child {
   margin-top: 0;
 }
+
 :is(.ai-ask__answer, .ai-inline__answer) > :last-child {
   margin-bottom: 0;
 }
@@ -2857,216 +2867,6 @@ html[data-keyboard-open] .ai-chat__composer {
   }
 }
 
-/* --- 模型配置（装在底部 sheet 里） ----------------------------------- */
-
-/* 装在主页设置的「AI 助手」分组里，外面已经有分组标题和底色，自己不再套卡片。 */
-.ai-setup {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-.ai-setup__group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-/* 输入框有可见的底，之前那种右对齐的裸文字看不出能点。 */
-.ai-setup__field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.ai-setup__field > span {
-  color: var(--muted);
-  font-size: var(--text-sm);
-  letter-spacing: 0.02em;
-}
-
-.ai-setup__field :is(input, select) {
-  width: 100%;
-  padding: 12px 14px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-md);
-  outline: 0;
-  background: var(--surface);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: var(--text-callout);
-}
-
-.ai-setup__field :is(input, select):focus {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line-soft));
-}
-
-.ai-setup__field input::placeholder {
-  color: var(--subtle);
-}
-
-.ai-setup__note {
-  margin: 0;
-  color: var(--muted);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-
-.ai-setup__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.ai-setup__head h3 {
-  margin: 0;
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: var(--text-base);
-  font-weight: 600;
-}
-
-.ai-setup__reload {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0;
-  background: transparent;
-  color: var(--accent-deep);
-  font-size: var(--text-md);
-}
-
-.ai-setup__reload:disabled {
-  color: var(--subtle);
-}
-
-.ai-setup__reload .is-spinning {
-  animation: ai-setup-spin 0.9s linear infinite;
-}
-
-@keyframes ai-setup-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* 拉列表的结果一定说出来：拿到几个、失败了为什么、现在是不是在手填。 */
-.ai-setup__status {
-  margin: -4px 0 0;
-  color: var(--muted);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-
-.ai-setup__status--error {
-  color: var(--danger);
-}
-
-.ai-setup__search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 13px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  color: var(--muted);
-}
-
-.ai-setup__search input {
-  width: 100%;
-  padding: 11px 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: var(--text-base);
-}
-
-.ai-setup__models {
-  overflow-y: auto;
-  max-height: min(36dvh, 288px);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  overscroll-behavior: contain;
-}
-
-.ai-setup__model {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 13px 15px;
-  border: 0;
-  border-bottom: 1px solid var(--line-soft);
-  background: transparent;
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: var(--text-base);
-  text-align: left;
-}
-
-.ai-setup__model:last-child {
-  border-bottom: 0;
-}
-
-.ai-setup__model span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ai-setup__model.is-active {
-  color: var(--accent-deep);
-  font-weight: 600;
-}
-
-.ai-setup__model:active {
-  background: var(--paper-deep);
-}
-
-.ai-setup__empty {
-  margin: 0;
-  padding: 18px 15px;
-  color: var(--muted);
-  font-size: var(--text-md);
-  text-align: center;
-}
-
-.ai-setup__switch {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 16px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-}
-
-.ai-setup__switch > span:first-child {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.ai-setup__switch strong {
-  color: var(--ink);
-  font-size: var(--text-base);
-  font-weight: 600;
-}
-
-.ai-setup__switch em {
-  color: var(--muted);
-  font-size: var(--text-sm);
-  font-style: normal;
-  line-height: 1.5;
-}
-
 .ai-switch {
   position: relative;
   display: inline-flex;
@@ -3113,99 +2913,11 @@ html[data-keyboard-open] .ai-chat__composer {
   transform: translateX(20px);
 }
 
-.settings-panel {
-  display: flex;
-  flex-direction: column;
-}
-
-.settings-group {
-  margin-bottom: 18px;
-  padding: 16px;
-  border-radius: var(--radius-md);
-  background: var(--paper-deep);
-}
-
-.settings-group__title {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-bottom: 14px;
-  color: var(--muted);
-}
-
-.settings-group__title h2 {
-  margin: 0;
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: var(--text-lg);
-}
-
-.settings-hint {
-  margin: -6px 0 12px;
-  color: var(--muted);
-  font-size: var(--text-sm);
-  line-height: 1.5;
-}
-
-.settings-row {
-  display: flex;
-  min-height: 60px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  border-top: 1px solid var(--line-soft);
-}
-
-.settings-row--stack {
-  align-items: stretch;
-  flex-direction: column;
-  gap: 10px;
-  padding: 13px 0;
-}
-
-.settings-row > span,
-.settings-row--stack > span {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.settings-row strong {
-  font-size: var(--text-md);
-}
-
-.settings-row small {
-  color: var(--muted);
-  font-size: var(--text-2xs);
-}
-
-.settings-row select,
-.settings-row input[type="text"],
-.settings-row input[type="password"] {
-  width: 100%;
-  min-height: 42px;
-  padding: 0 11px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  outline: 0;
-  background: var(--surface);
-  color: var(--ink);
-  font-size: var(--text-callout);
-}
-
-.settings-row input[type="checkbox"] {
-  width: 20px;
-  height: 20px;
-  accent-color: var(--accent-deep);
-  flex-shrink: 0;
-}
-
 input[type="range"] {
   width: 100%;
-  accent-color: var(--accent-deep);
+  accent-color: var(--accent);
 }
 
-.segmented-control,
 .compact-toggle {
   display: grid;
   gap: 2px;
@@ -3214,16 +2926,10 @@ input[type="range"] {
   background: rgb(118 118 128 / 12%);
 }
 
-.segmented-control {
-  grid-template-columns: repeat(3, 1fr);
-  margin: 4px 0 10px;
-}
-
 .compact-toggle {
   grid-template-columns: repeat(2, 1fr);
 }
 
-.segmented-control button,
 .compact-toggle button {
   min-height: 30px;
   padding: 0 12px;
@@ -3234,96 +2940,13 @@ input[type="range"] {
   font-weight: 500;
 }
 
-.segmented-control button.is-active,
 .compact-toggle button.is-active {
   background: var(--surface-strong);
   font-weight: 600;
   box-shadow: var(--shadow-control);
 }
 
-.storage-summary {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  margin-bottom: 13px;
-  border-block: 1px solid var(--line-soft);
-}
-
-.storage-summary div {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 16px 2px;
-}
-
-.storage-summary div + div {
-  padding-left: 18px;
-  border-left: 1px solid var(--line-soft);
-}
-
-.storage-summary strong {
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: var(--text-2xl);
-}
-
-.storage-summary span,
-.privacy-note,
-.app-version {
-  color: var(--muted);
-  font-size: var(--text-2xs);
-  line-height: 1.65;
-}
-
-.settings-group .danger-button {
-  width: 100%;
-  margin-top: 8px;
-}
-
-.sync-status {
-  margin: 10px 0 4px;
-}
-
-.sync-status p {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 4px 0;
-  color: var(--muted);
-  font-size: var(--text-sm);
-}
-
-.sync-status .spin {
-  animation: ai-setup-spin 0.9s linear infinite;
-}
-
-.sync-error {
-  color: var(--danger, #c0392b) !important;
-}
-
-.sync-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.sync-login {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.sync-login .primary-button {
-  margin-top: 10px;
-}
-
-.app-version {
-  margin: 30px 0 0;
-  text-align: center;
-}
-
-/* Apple「图书」的底部：一个悬浮胶囊装 tab，外加右下一个独立的圆形搜索键。
-   外层容器铺满宽度但不吃点击，靠子元素各自 re-enable。 */
+/* 底栏：外层容器铺满宽度但不吃点击，里面那张浮起来的白卡再把点击接回来。 */
 .bottom-bar {
   position: fixed;
   z-index: 40;
@@ -3334,8 +2957,10 @@ input[type="range"] {
   align-items: center;
   justify-content: center;
   gap: 14px;
-  padding: 0 16px calc(10px + env(safe-area-inset-bottom));
+  padding: 0 16px var(--tabbar-bottom);
   pointer-events: none;
+  /* 单独合成一层：滚动时整条底栏由合成器平移，里面的图标不跟着页面一起重画。 */
+  will-change: transform;
 }
 
 .bottom-bar > * {
@@ -3347,35 +2972,49 @@ html[data-keyboard-open] .bottom-bar {
   display: none;
 }
 
-/* 底栏是一张浮起来的白卡，四个 tab 均分；选中的那个图标填一层淡粉、字变粉。 */
+/* 底栏是一张浮起来的白卡，四个 tab 均分；选中的那个图标填一层淡粉、字变粉。
+   描边用内阴影画：0.5px 的 border 会把整条的高度撑出小数。 */
 .bottom-nav {
   display: flex;
   width: 100%;
   max-width: 560px;
+  height: var(--tabbar-height);
   padding: 6px;
-  border: 0.5px solid var(--glass-edge);
   border-radius: 26px;
   background: var(--glass-fill);
   backdrop-filter: var(--glass-blur);
   box-shadow:
+    inset 0 0 0 0.5px var(--glass-edge),
     inset 0 0.5px 0 var(--glass-sheen),
     var(--glass-shadow);
 }
 
+/* 52 = 图标 24 + 间距 2 + 字 14 + 上下各 6，全是整数，图标落在整像素上。 */
 .bottom-nav button {
   display: flex;
-  min-height: 50px;
+  height: 52px;
   flex: 1;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  padding: 4px 0;
+  gap: 2px;
+  padding: 0;
   border-radius: 20px;
   background: transparent;
   color: var(--muted);
   font-size: var(--text-xs);
+  line-height: 14px;
   transition: color var(--dur-fast) ease;
+}
+
+.bottom-nav button svg {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.bottom-nav button span {
+  display: block;
+  height: 14px;
 }
 
 .bottom-nav button.is-active {
@@ -3408,27 +3047,28 @@ html[data-keyboard-open] .bottom-bar {
   height: 100%;
 }
 
-/* 迷你播放条：跟底栏同宽的一张白卡，贴在底栏上面。 */
+/* 迷你播放条：跟底栏同宽的一张白卡，贴在底栏上面。跟底栏一样写死整数高度、单独成层。 */
 .mini-player {
   position: fixed;
   z-index: 35;
   right: 16px;
-  bottom: calc(84px + env(safe-area-inset-bottom));
+  bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + 8px);
   left: 16px;
   display: flex;
   max-width: 560px;
-  min-height: 66px;
+  height: var(--mini-player-height);
   align-items: center;
   gap: 2px;
   margin: auto;
-  padding: 8px 6px 8px 10px;
-  border: 0.5px solid var(--glass-edge);
+  padding: 0 6px 0 10px;
   border-radius: 22px;
   background: var(--glass-fill);
   backdrop-filter: var(--glass-blur);
   box-shadow:
+    inset 0 0 0 0.5px var(--glass-edge),
     inset 0 0.5px 0 var(--glass-sheen),
     var(--glass-shadow);
+  will-change: transform;
 }
 
 .mini-player__main {
@@ -3453,7 +3093,7 @@ html[data-keyboard-open] .bottom-bar {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 
 .mini-player__main > span > strong,
@@ -3467,11 +3107,13 @@ html[data-keyboard-open] .bottom-bar {
   font-family: var(--font-sans);
   font-size: var(--text-md);
   font-weight: 600;
+  line-height: 18px;
 }
 
 .mini-player__main > span > small {
   color: var(--muted);
   font-size: var(--text-sm);
+  line-height: 16px;
 }
 
 .mini-player__toggle.icon-button {
@@ -4472,8 +4114,11 @@ html[data-keyboard-open] .bottom-bar {
   margin-top: 22px;
 }
 
-.player-seek input[type="range"] {
-  --seek: 0%;
+/* 全站的滑杆（components/soft-range.tsx）：走过的那段是粉，轨道跟着字色淡下去，
+   这样放进阅读器的夜间弹层里也看得见。 */
+.soft-range {
+  --fill: 0%;
+  --range-track: color-mix(in srgb, currentColor 12%, transparent);
   display: block;
   width: 100%;
   height: 22px;
@@ -4484,31 +4129,31 @@ html[data-keyboard-open] .bottom-bar {
   touch-action: pan-y;
 }
 
-.player-seek input[type="range"]::-webkit-slider-runnable-track {
+.soft-range::-webkit-slider-runnable-track {
   height: 5px;
   border-radius: var(--radius-pill);
   background: linear-gradient(
     to right,
-    var(--accent) var(--seek),
-    var(--track) var(--seek)
+    var(--accent) var(--fill),
+    var(--range-track) var(--fill)
   );
 }
 
-.player-seek input[type="range"]::-moz-range-track {
+.soft-range::-moz-range-track {
   height: 5px;
   border-radius: var(--radius-pill);
   background: linear-gradient(
     to right,
-    var(--accent) var(--seek),
-    var(--track) var(--seek)
+    var(--accent) var(--fill),
+    var(--range-track) var(--fill)
   );
 }
 
-.player-seek input[type="range"]::-webkit-slider-thumb {
+.soft-range::-webkit-slider-thumb {
   width: 18px;
   height: 18px;
   margin-top: -6.5px;
-  border: 3px solid var(--surface);
+  border: 3px solid var(--surface-strong);
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 1px 4px rgb(31 35 64 / 25%);
@@ -4516,10 +4161,10 @@ html[data-keyboard-open] .bottom-bar {
   appearance: none;
 }
 
-.player-seek input[type="range"]::-moz-range-thumb {
+.soft-range::-moz-range-thumb {
   width: 12px;
   height: 12px;
-  border: 3px solid var(--surface);
+  border: 3px solid var(--surface-strong);
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 1px 4px rgb(31 35 64 / 25%);
@@ -5231,11 +4876,6 @@ html[data-keyboard-open] .modal-sheet {
   margin-top: 2px;
 }
 
-.settings-row--stack {
-  display: grid;
-  gap: 12px;
-}
-
 .option-list,
 .voice-list {
   padding-top: 6px;
@@ -5450,6 +5090,13 @@ html[data-keyboard-open] .modal-sheet {
 }
 
 /* 撤销按钮要够显眼、也够大：它只活 5 秒，错过就没了。 */
+/* 迷你播放条在的时候，提示条挪到它上面，别压住它。 */
+.app-shell:has(.mini-player) .toast {
+  bottom: calc(
+    var(--tabbar-bottom) + var(--tabbar-height) + var(--mini-player-height) + 20px
+  );
+}
+
 .toast__undo {
   flex-shrink: 0;
   margin: -6px -6px -6px 0;
@@ -5604,6 +5251,7 @@ html[data-keyboard-open] .modal-sheet {
   }
 
   .bottom-nav {
+    height: auto;
     flex-direction: column;
     gap: 5px;
     padding: 0;
@@ -5615,7 +5263,8 @@ html[data-keyboard-open] .modal-sheet {
   }
 
   .bottom-nav button {
-    min-height: 48px;
+    height: 48px;
+    flex: 0 0 auto;
     justify-content: flex-start;
     gap: 12px;
     flex-direction: row;

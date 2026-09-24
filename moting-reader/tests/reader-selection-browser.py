@@ -154,7 +154,7 @@ def continuous_upward_selection(page, cdp):
 def progress_pill_checks(page, cdp):
     """改动一回归：底部进度胶囊既不拦截长按，也不能被系统原生选中。"""
     info = page.evaluate("""() => {
-      const pill = document.querySelector('.reader-chrome__pos');
+      const pill = document.querySelector('.reader-chrome__pos-label');
       const btn = document.querySelector('.reader-chrome button');
       const cs = getComputedStyle(pill);
       const box = pill.getBoundingClientRect();
@@ -179,9 +179,11 @@ def progress_pill_checks(page, cdp):
     page.wait_for_timeout(80)
     assert page.evaluate("getSelection().toString()") == "", "进度文字被原生选中了"
 
-    # 清场：收起可能出现的自定义选区，别影响后续用 paragraph 0 的定位。
-    tap(cdp, center); page.wait_for_timeout(50)
-    tap(cdp, center); page.wait_for_timeout(50)
+    # 清场：胶囊不拦长按，这一下会穿透选中它底下的正文、弹出划线浮条（这是想要的）。
+    # 浮条就弹在胶囊附近，在原地点收起会点中浮条上的按钮，所以直接重开阅读器，
+    # 顺带确认长按本身没有生成任何划线。
+    open_reader(page)
+    assert snapshot_notes(page) == [], "长按进度胶囊生成了划线"
     page.evaluate("() => { window.getSelection().removeAllRanges(); window.scrollTo(0, 0); }")
     page.wait_for_timeout(200)
 

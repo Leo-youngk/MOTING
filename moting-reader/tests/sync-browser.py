@@ -197,6 +197,8 @@ def idb_state(page):
 def open_settings(page):
     page.get_by_role("button", name="主页").click()
     page.get_by_role("button", name="设置").click()
+    # 设置首页是一列入口，同步在「云端同步」那一页里。
+    page.locator(".settings-link", has_text="云端同步").click()
 
 
 def login(page):
@@ -218,7 +220,7 @@ def wait_synced(page, previous_pushed_at, timeout_s=90):
         if state["pushedAt"] > previous_pushed_at and not busy:
             return state
         page.wait_for_timeout(500)
-    raise AssertionError(f"sync did not finish; errors on page: {page.locator('.sync-error').all_inner_texts()}")
+    raise AssertionError(f"sync did not finish; errors on page: {page.locator('.settings-error').all_inner_texts()}")
 
 
 def sync_now(page):
@@ -302,8 +304,14 @@ with sync_playwright() as playwright:
         "demo_book_stays_local": b_after_delete["demoBooks"] == 1 and c_fresh["demoBooks"] == 1,
         "no_page_errors": not errors,
     }
-    page_b.goto(BASE)  # 关掉设置面板,回到书库看界面上真的有这本书。
+    # 回到书库看界面上真的有这本书。冷启动会回到上次停的设置页，先一路返回到有底栏的地方。
+    page_b.goto(BASE)
     page_b.wait_for_load_state("networkidle")
+    for _ in range(3):
+        if page_b.locator(".bottom-nav").count():
+            break
+        page_b.get_by_role("button", name="返回").first.click()
+        page_b.wait_for_timeout(300)
     page_b.get_by_role("button", name="书库", exact=True).click()
     page_b.get_by_placeholder("搜索书名或作者").fill(SEED_BOOK["title"])
     try:

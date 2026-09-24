@@ -81,6 +81,8 @@ with sync_playwright() as playwright:
 
     page.route("**/api/zlibrary/*", route_api)
     page.get_by_role("button", name="书库", exact=True).click()
+    # 书库不空时「在线找书」收在右上角「+」里。
+    page.get_by_role("button", name="添加书籍", exact=True).click()
     page.get_by_role("button", name="在线找书", exact=True).click()
     expect(page.get_by_placeholder("搜索书名或作者")).to_be_visible()
     page.get_by_role("button", name="登录", exact=True).click()
@@ -91,13 +93,15 @@ with sync_playwright() as playwright:
     expect(page.get_by_label("密码", exact=True)).to_have_value("")
     page.get_by_label("密码", exact=True).fill("fixture-password")
     page.get_by_role("button", name="登录并继续").click()
-    expect(page.get_by_role("button", name="退出账号")).to_be_visible()
+    # 登录成功后账号面板收起：右上角的钮换成「Z-Library 账号」，反馈行报已连接。
+    expect(page.get_by_role("button", name="Z-Library 账号")).to_be_visible()
+    expect(page.get_by_text("已连接 Z-Library", exact=True)).to_be_visible()
     page.get_by_label("在线搜索书名或作者").fill("测试 & 作者")
     page.get_by_role("button", name="搜索", exact=True).click()
     expect(page.get_by_role("heading", name="在线导入测试", exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="超过 50 MB")).to_be_disabled()
     page.get_by_role("button", name="更多结果").click()
-    expect(page.locator(".online-book")).to_have_count(3)
+    expect(page.locator(".online-card")).to_have_count(3)
     assert state["searches"][-1]["page"] == 2
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     page.locator(".online-results").evaluate("el => el.scrollTop = 0")
@@ -119,15 +123,17 @@ with sync_playwright() as playwright:
     expect(page.get_by_role("alert")).to_contain_text("网页而非书籍")
     state["mode"] = "normal"
     page.get_by_role("button", name="加入书库", exact=True).first.click()
-    expect(page.get_by_role("button", name="已加入 · 阅读")).to_be_visible(timeout=20000)
+    expect(page.get_by_role("button", name="打开阅读")).to_be_visible(timeout=20000)
     page.reload()
     page.wait_for_load_state("networkidle")
     page.get_by_role("button", name="书库", exact=True).click()
+    # 书库不空时「在线找书」收在右上角「+」里。
+    page.get_by_role("button", name="添加书籍", exact=True).click()
     page.get_by_role("button", name="在线找书", exact=True).click()
     page.get_by_label("在线搜索书名或作者").fill("测试")
     page.get_by_role("button", name="搜索", exact=True).click()
-    expect(page.get_by_role("button", name="已加入 · 阅读")).to_be_visible()
-    page.get_by_role("button", name="已加入 · 阅读").click()
+    expect(page.get_by_role("button", name="打开阅读")).to_be_visible()
+    page.get_by_role("button", name="打开阅读").click()
     expect(page.get_by_text("这是一段明确标注的自动化测试正文。", exact=False).first).to_be_visible()
     # Verify the EPUB was actually persisted, with exactly one online source record.
     saved = page.evaluate("""() => new Promise((resolve, reject) => {const r=indexedDB.open('moting-reader');r.onsuccess=()=>{const db=r.result;const t=db.transaction(['books','contents']);const q=t.objectStore('books').getAll();const c=t.objectStore('contents').getAll();t.oncomplete=()=>{const len=(id)=>c.result.find(x=>x.bookId===id)?.chapters?.length??0;resolve(q.result.filter(b=>b.onlineSourceId).map(b=>({title:b.title,source:b.onlineSourceId,chapters:len(b.id)})));db.close()};t.onerror=()=>reject(t.error)}})""")
@@ -136,7 +142,8 @@ with sync_playwright() as playwright:
     page.reload()
     page.wait_for_load_state("networkidle")
     page.evaluate("history.back()")
-    expect(page.get_by_role("button", name="在线找书", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="添加书籍", exact=True)).to_be_visible()
+    page.get_by_role("button", name="添加书籍", exact=True).click()
     page.get_by_role("button", name="在线找书", exact=True).click()
     page.get_by_label("在线搜索书名或作者").fill("不存在")
     state["mode"] = "empty"

@@ -12,9 +12,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Cloud,
   Copy,
-  Download,
   FileText,
   Headphones,
   Highlighter,
@@ -43,32 +41,28 @@ import {
   X,
 } from "lucide-react";
 import {
-  createContext,
   Fragment,
   lazy,
   memo,
   Suspense,
   type ChangeEvent,
   type CSSProperties,
-  type FormEvent,
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject,
   useCallback,
-  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import { useAppNavigation } from "../hooks/use-app-navigation";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
-import { AiRequestError, fetchAiModels, modelHistory, streamAiChat } from "../lib/ai";
+import { AiRequestError, modelHistory, streamAiChat } from "../lib/ai";
 import {
   BookMetadataError,
   cleanTitleText,
@@ -177,10 +171,19 @@ import {
   totalSeconds,
 } from "../lib/reading-stats";
 import { useReadingSession } from "../hooks/use-reading-session";
+import {
+  READER_FONTS,
+  READER_THEMES,
+  READER_THEME_SWATCH,
+  type ReaderFont,
+} from "../lib/reader-options";
 import { wereadCoverDisplayUrl } from "../lib/weread";
 import { useSafeInsets, type SafeInsets } from "../hooks/use-safe-insets";
 import { useTextSelection } from "../hooks/use-text-selection";
 import { SelectionLayer } from "./selection-layer";
+import { Modal, SheetCancelButton, scrollWhenUnlocked, useScrollLock } from "./sheet";
+import { SoftRange } from "./soft-range";
+import { SettingsScreen } from "./settings-screen";
 import {
   placeForSelection,
   type Placement,
@@ -288,35 +291,6 @@ function AiMarkdown({ content, streaming }: { content: string; streaming?: boole
   );
 }
 
-type ReaderFont = ReaderSettings["fontFamily"];
-
-/** 四款正文字体，全部走 iOS 自带系统字，label 用各自的字体渲染出来给用户比对。 */
-const READER_FONTS: { value: ReaderFont; label: string; cssVar: string }[] = [
-  { value: "serif", label: "宋体", cssVar: "var(--font-serif)" },
-  { value: "sans", label: "黑体", cssVar: "var(--font-sans)" },
-  { value: "kai", label: "楷体", cssVar: "var(--font-kai)" },
-  { value: "yuan", label: "圆体", cssVar: "var(--font-yuan)" },
-];
-
-const READER_THEMES: { value: ReaderTheme; label: string }[] = [
-  { value: "original", label: "原版" },
-  { value: "quiet", label: "夜间" },
-  { value: "paper", label: "纸张" },
-  { value: "bold", label: "高对比" },
-  { value: "calm", label: "暖棕" },
-  { value: "focus", label: "米黄" },
-];
-
-/** 主题瓦片与阅读页共用的 1:1 色板（取自 Apple Books 真机取样）。 */
-const READER_THEME_SWATCH: Record<ReaderTheme, { bg: string; ink: string }> = {
-  original: { bg: "#ffffff", ink: "#000000" },
-  paper: { bg: "#f5f5f5", ink: "#000000" },
-  bold: { bg: "#ffffff", ink: "#000000" },
-  calm: { bg: "#efe0c9", ink: "#3a3428" },
-  focus: { bg: "#f6f3ea", ink: "#1d1d1f" },
-  quiet: { bg: "#414045", ink: "#e8e6e1" },
-};
-
 function FontPicker({
   value,
   onChange,
@@ -388,22 +362,6 @@ function mergeNoteGroup(items: BookNote[]): BookNote {
   return { ...ordered[0], excerpt: ordered.map((n) => n.excerpt).join("") };
 }
 
-function formatStorageSize(characters: number): string {
-  const bytes = characters * 2;
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-/** 上次同步开始的本机时刻(毫秒)。 */
-function formatSyncTime(syncedAt: number): string {
-  const date = new Date(syncedAt);
-  const now = new Date();
-  const sameDay = date.toDateString() === now.toDateString();
-  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-  return sameDay ? `今天 ${clock}` : `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
-}
-
 function BookCover({
   book,
   size = "medium",
@@ -469,7 +427,7 @@ function BottomNavigation({
             aria-current={selected ? "page" : undefined}
             onClick={() => onChange(item.id)}
           >
-            <Icon size={23} strokeWidth={selected ? 2 : 1.7} />
+            <Icon size={24} strokeWidth={selected ? 2 : 1.7} />
             <span>{item.label}</span>
           </button>
         );
@@ -494,223 +452,6 @@ function useRevealActiveChapter(open: boolean) {
       list.clientHeight / 3;
   }, [open]);
   return listRef;
-}
-
-// 浮层叠着开时，只有最外层那一次负责记录和还原滚动位置。
-let scrollLockCount = 0;
-let lockedScrollY = 0;
-// 关闭浮层的同一个事件里如果发生了跳转（比如点目录），跳转后的滚动位置才是
-// 用户想要的，不能被这里的"还原到开浮层前的位置"覆盖掉。而且锁着的时候 body 是
-// position: fixed，这期间的滚动全都不算数，所以跳转的滚动得挪到解锁那一刻再做。
-let scrollAfterUnlock: (() => void) | null = null;
-
-function scrollWhenUnlocked(scroll: () => void) {
-  if (scrollLockCount > 0) scrollAfterUnlock = scroll;
-  else scroll();
-}
-
-// 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
-// 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
-// iOS standalone 下 overflow: hidden 拦不住 focus 触发的整页上推，只有 position: fixed 拦得住。
-function useScrollLock() {
-  useEffect(() => {
-    if (scrollLockCount++ === 0) {
-      lockedScrollY = window.scrollY;
-      document.body.style.top = `${-lockedScrollY}px`;
-      document.body.classList.add("is-scroll-locked");
-    }
-    return () => {
-      if (--scrollLockCount > 0) return;
-      document.body.classList.remove("is-scroll-locked");
-      document.body.style.top = "";
-      const scroll = scrollAfterUnlock;
-      scrollAfterUnlock = null;
-      if (scroll) scroll();
-      else window.scrollTo(0, lockedScrollY);
-    };
-  }, []);
-}
-
-/** 弹层里的按钮（比如「取消」）要走弹层自己的关闭：滑下去再卸掉。 */
-const ModalCloseContext = createContext<() => void>(() => {});
-
-function SheetCancelButton({ children }: { children: ReactNode }) {
-  const close = useContext(ModalCloseContext);
-  return (
-    <button type="button" className="secondary-button" onClick={close}>
-      {children}
-    </button>
-  );
-}
-
-function Modal({
-  title,
-  children,
-  onClose,
-  wide = false,
-  className = "",
-}: {
-  title: string;
-  children: ReactNode;
-  onClose: () => void;
-  wide?: boolean;
-  className?: string;
-}) {
-  // 关闭先走退场动画（面板滑下去、遮罩淡掉），放完再真正卸掉。
-  // 以前一关就啪地消失，跟滑上来的进场一对比，像是被硬拔掉的。
-  const [closing, setClosing] = useState(false);
-  const onCloseRef = useRef(onClose);
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
-  const requestClose = useCallback(() => setClosing(true), []);
-  useEffect(() => {
-    if (!closing) return;
-    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    const timer = window.setTimeout(() => onCloseRef.current(), reduced ? 0 : SHEET_EXIT_MS);
-    return () => window.clearTimeout(timer);
-  }, [closing]);
-
-  useScrollLock();
-  useEscapeToClose(requestClose);
-  const drag = useSheetDrag(requestClose);
-  // 按下就关会误伤：手指落在面板边缘想滑动、稍微移出去一点就把面板关掉了。
-  // 记住这一下是不是从遮罩上按下的，抬手仍在遮罩上才算「点空白关闭」。
-  const fromBackdrop = useRef(false);
-
-  return createPortal(
-    <div
-      className={`modal-backdrop${closing ? " is-closing" : ""}`}
-      role="presentation"
-      onPointerDown={(event) => {
-        fromBackdrop.current = event.target === event.currentTarget;
-      }}
-      onPointerUp={(event) => {
-        const outside =
-          fromBackdrop.current && event.target === event.currentTarget;
-        fromBackdrop.current = false;
-        if (outside) requestClose();
-      }}
-    >
-      <section
-        className={`modal-sheet ${wide ? "modal-sheet--wide" : ""} ${
-          drag.dragging ? "is-dragging" : ""
-        } ${closing ? "is-closing" : ""} ${className}`}
-        style={drag.offset ? { transform: `translateY(${drag.offset}px)` } : undefined}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-      >
-        {/* 把手不再是装饰：真能拖下去关掉。touch-action 写在 CSS 里，
-            必须在手指落下之前就生效，事后再改浏览器不认。 */}
-        <div
-          className="modal-grabber"
-          role="presentation"
-          onPointerDown={drag.onPointerDown}
-        />
-        <header onPointerDown={drag.onPointerDown}>
-          <h2>{title}</h2>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="关闭"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={requestClose}
-          >
-            <X size={20} />
-          </button>
-        </header>
-        <ModalCloseContext.Provider value={requestClose}>{children}</ModalCloseContext.Provider>
-      </section>
-    </div>,
-    document.body
-  );
-}
-
-/** 开着的弹层栈。Esc 只关最上面那一层，不能一键掀掉所有层。 */
-const openSheets: Array<() => void> = [];
-
-function useEscapeToClose(onClose: () => void) {
-  const closeRef = useRef(onClose);
-
-  useEffect(() => {
-    closeRef.current = onClose;
-  }, [onClose]);
-
-  useEffect(() => {
-    const close = () => closeRef.current();
-    openSheets.push(close);
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (openSheets[openSheets.length - 1] !== close) return;
-      event.stopPropagation();
-      close();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      const at = openSheets.indexOf(close);
-      if (at >= 0) openSheets.splice(at, 1);
-    };
-  }, []);
-}
-
-/** 往下拖到这么多像素就松手关闭，没到就弹回去。 */
-const SHEET_DISMISS_PX = 96;
-/** 面板退场动画的时长，和 CSS 里 .modal-sheet.is-closing 对齐。 */
-const SHEET_EXIT_MS = 300;
-
-/**
- * 底部面板的下拉关闭。
- *
- * 只有把手和标题栏能拖——面板内容经常是可滚动的列表，整片都能拖会和滚动打架。
- */
-function useSheetDrag(onClose: () => void) {
-  const startRef = useRef<{ id: number; y: number } | null>(null);
-  const [offset, setOffset] = useState(0);
-  const [dragging, setDragging] = useState(false);
-
-  const onPointerDown = useCallback((event: ReactPointerEvent) => {
-    if (!event.isPrimary || startRef.current) return;
-    startRef.current = { id: event.pointerId, y: event.clientY };
-    setDragging(true);
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // 抓不到就算了，下面 document 上的监听照样能跟。
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!dragging) return;
-    const onMove = (event: PointerEvent) => {
-      const start = startRef.current;
-      if (!start || event.pointerId !== start.id) return;
-      event.preventDefault();
-      // 只认往下拖；往上拖不该把面板拉出屏幕。
-      setOffset(Math.max(0, event.clientY - start.y));
-    };
-    const onUp = (event: PointerEvent) => {
-      const start = startRef.current;
-      if (!start || event.pointerId !== start.id) return;
-      const travelled = event.clientY - start.y;
-      startRef.current = null;
-      setDragging(false);
-      // 拖过了阈值：面板停在手指松开的位置，由退场动画从这里接着滑下去，不先弹回原位。
-      if (travelled > SHEET_DISMISS_PX) onClose();
-      else setOffset(0);
-    };
-    document.addEventListener("pointermove", onMove, { passive: false });
-    document.addEventListener("pointerup", onUp);
-    document.addEventListener("pointercancel", onUp);
-    return () => {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      document.removeEventListener("pointercancel", onUp);
-    };
-  }, [dragging, onClose]);
-
-  return { offset, dragging, onPointerDown };
 }
 
 function EmptyState({
@@ -2248,531 +1989,6 @@ function BookNotesScreen({
 }
 
 /** base URL 填完（失焦）就自动拉一次模型列表；拉不到就退回手填，不强求。内嵌在聊天面板里，不再是独立设置页。 */
-function AiModelPicker({
-  settings,
-  onChange,
-}: {
-  settings: ReaderSettings;
-  onChange: (settings: ReaderSettings) => void;
-}) {
-  const [models, setModels] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [query, setQuery] = useState("");
-  const [baseUrl, setBaseUrl] = useState(settings.aiBaseUrl);
-  const [apiKey, setApiKey] = useState(settings.aiApiKey);
-  const modelControllerRef = useRef<AbortController | null>(null);
-  const initialLoadRef = useRef(false);
-
-  const loadModels = useCallback(async (nextBaseUrl = baseUrl, nextApiKey = apiKey) => {
-    if (!nextBaseUrl.trim()) return;
-    modelControllerRef.current?.abort();
-    const controller = new AbortController();
-    modelControllerRef.current = controller;
-    setLoading(true);
-    setError("");
-    try {
-      const list = await fetchAiModels(nextBaseUrl, nextApiKey, controller.signal);
-      if (controller.signal.aborted) return;
-      setModels(list);
-      if (!settings.aiModel && list[0]) {
-        onChange({ ...settings, aiBaseUrl: nextBaseUrl, aiApiKey: nextApiKey, aiModel: list[0] });
-      }
-    } catch (err) {
-      if (!controller.signal.aborted) {
-        setError(err instanceof AiRequestError ? err.message : "获取模型列表失败");
-      }
-    } finally {
-      if (!controller.signal.aborted) setLoading(false);
-    }
-  }, [apiKey, baseUrl, onChange, settings]);
-
-  // 面板一打开、地址之前就填过的话，不该等用户点进输入框再点出来才去拉列表。
-  useEffect(() => {
-    if (initialLoadRef.current || !baseUrl.trim()) return;
-    initialLoadRef.current = true;
-    const timer = window.setTimeout(() => void loadModels(), 0);
-    return () => window.clearTimeout(timer);
-  }, [baseUrl, loadModels]);
-  useEffect(() => () => modelControllerRef.current?.abort(), []);
-
-  const visible = query.trim()
-    ? models.filter((model) =>
-        model.toLowerCase().includes(query.trim().toLowerCase())
-      )
-    : models;
-
-  // 拉不到列表就退回手填，但得让人看见是退回来的，别默默变成一个空输入框。
-  const status = !settings.aiBaseUrl.trim()
-    ? "填好接口地址后会自动拉取可用模型"
-    : loading
-      ? "正在拉取模型列表…"
-      : error
-        ? `拉不到模型列表（${error}），可以直接手填模型名`
-        : models.length
-          ? `${models.length} 个可用模型`
-          : "这个接口没返回模型列表，直接手填模型名";
-
-  return (
-    <div className="ai-setup">
-      <div className="ai-setup__group">
-        <label className="ai-setup__field">
-          <span>接口地址</span>
-          <input
-            type="text"
-            inputMode="url"
-            value={baseUrl}
-            placeholder="https://api.example.com/v1"
-            onChange={(event) => setBaseUrl(event.target.value)}
-            onBlur={() => {
-              onChange({ ...settings, aiBaseUrl: baseUrl, aiApiKey: apiKey });
-              void loadModels(baseUrl, apiKey);
-            }}
-          />
-        </label>
-        <label className="ai-setup__field">
-          <span>API Key</span>
-          <input
-            type="password"
-            value={apiKey}
-            placeholder="sk-…"
-            onChange={(event) => setApiKey(event.target.value)}
-            onBlur={() => {
-              onChange({ ...settings, aiBaseUrl: baseUrl, aiApiKey: apiKey });
-              void loadModels(baseUrl, apiKey);
-            }}
-          />
-        </label>
-        <p className="ai-setup__note">
-          OpenAI 兼容接口。请求经我们的 Worker 转发一次避开跨域，密钥只留在这台设备上。
-        </p>
-      </div>
-
-      <div className="ai-setup__group">
-        <div className="ai-setup__head">
-          <h3>模型</h3>
-          <button
-            type="button"
-            className="ai-setup__reload"
-            disabled={loading || !baseUrl.trim()}
-            onClick={() => void loadModels(baseUrl, apiKey)}
-          >
-            {loading ? (
-              <LoaderCircle size={13} className="is-spinning" />
-            ) : null}
-            重新拉取
-          </button>
-        </div>
-        <p
-          className={`ai-setup__status${error ? " ai-setup__status--error" : ""}`}
-        >
-          {status}
-        </p>
-
-        {models.length ? (
-          <>
-            {models.length > 8 ? (
-              <div className="ai-setup__search">
-                <Search size={15} />
-                <input
-                  type="text"
-                  value={query}
-                  placeholder="筛选模型"
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-              </div>
-            ) : null}
-            <div className="ai-setup__models">
-              {visible.map((model) => (
-                <button
-                  type="button"
-                  key={model}
-                  className={`ai-setup__model${settings.aiModel === model ? " is-active" : ""}`}
-                  onClick={() => onChange({ ...settings, aiModel: model })}
-                >
-                  <span>{model}</span>
-                  {settings.aiModel === model ? <Check size={16} /> : null}
-                </button>
-              ))}
-              {!visible.length ? (
-                <p className="ai-setup__empty">没有匹配「{query}」的模型</p>
-              ) : null}
-            </div>
-          </>
-        ) : (
-          <label className="ai-setup__field">
-            <span>模型名</span>
-            <input
-              type="text"
-              value={settings.aiModel}
-              placeholder="gpt-4o-mini"
-              onChange={(event) =>
-                onChange({ ...settings, aiModel: event.target.value })
-              }
-            />
-          </label>
-        )}
-      </div>
-
-      <div className="ai-setup__group">
-        <div className="ai-setup__head">
-          <h3>备用模型</h3>
-        </div>
-        <p className="ai-setup__note">
-          主模型太忙（503、限流）时自动改用它回答，用同一个接口地址和 API Key。用到它的那条回答下面会注明。
-        </p>
-        {models.length ? (
-          <label className="ai-setup__field">
-            <span>主模型忙时改用</span>
-            <select
-              value={settings.aiFallbackModel}
-              onChange={(event) =>
-                onChange({ ...settings, aiFallbackModel: event.target.value })
-              }
-            >
-              <option value="">不用备用模型</option>
-              {settings.aiFallbackModel && !models.includes(settings.aiFallbackModel) ? (
-                <option value={settings.aiFallbackModel}>
-                  {settings.aiFallbackModel}（这个接口的列表里没有）
-                </option>
-              ) : null}
-              {models.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : (
-          <label className="ai-setup__field">
-            <span>备用模型名</span>
-            <input
-              type="text"
-              value={settings.aiFallbackModel}
-              placeholder="不填就不用备用模型"
-              onChange={(event) =>
-                onChange({ ...settings, aiFallbackModel: event.target.value.trim() })
-              }
-            />
-          </label>
-        )}
-        {settings.aiFallbackModel && settings.aiFallbackModel === settings.aiModel ? (
-          <p className="ai-setup__status ai-setup__status--error">
-            备用模型和主模型是同一个，等于没设。
-          </p>
-        ) : null}
-      </div>
-
-      <label className="ai-setup__switch">
-        <span>
-          <strong>深度思考</strong>
-          <em>需模型支持，开启后回答里会带上思考过程</em>
-        </span>
-        <span className="ai-switch">
-          <input
-            type="checkbox"
-            checked={settings.aiDeepThinking}
-            onChange={(event) =>
-              onChange({ ...settings, aiDeepThinking: event.target.checked })
-            }
-          />
-          <span className="ai-switch__track">
-            <span className="ai-switch__thumb" />
-          </span>
-        </span>
-      </label>
-    </div>
-  );
-}
-
-function SettingsPanel({
-  settings,
-  voices,
-  books,
-  onChange,
-  onClear,
-  sync,
-  onSyncLogin,
-  onSyncLogout,
-  onSyncNow,
-}: {
-  settings: ReaderSettings;
-  voices: PlayerVoice[];
-  books: BookMeta[];
-  onChange: (settings: ReaderSettings) => void;
-  onClear: () => void;
-  sync: {
-    enabled: boolean;
-    connected: boolean;
-    syncing: boolean;
-    message: string;
-    error: string;
-    lastSyncAt: number;
-  };
-  onSyncLogin: (username: string, password: string) => Promise<void>;
-  onSyncLogout: () => void;
-  onSyncNow: () => void;
-}) {
-  const totalCharacters = books.reduce(
-    (sum, book) => sum + book.characterCount,
-    0
-  );
-  const [syncUser, setSyncUser] = useState("");
-  const [syncPass, setSyncPass] = useState("");
-  const [syncBusy, setSyncBusy] = useState(false);
-
-  const submitSyncLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (syncBusy || !syncUser.trim() || !syncPass) return;
-    setSyncBusy(true);
-    try {
-      await onSyncLogin(syncUser.trim(), syncPass);
-      setSyncPass("");
-    } catch {
-      // 错误已由 onSyncLogin 写进 sync.error,这里只面展示。
-    } finally {
-      setSyncBusy(false);
-    }
-  };
-
-  return (
-    <div className="settings-panel">
-      <section className="settings-group">
-        <div className="settings-group__title">
-          <Home size={18} />
-          <h2>书架外观</h2>
-        </div>
-        <p className="settings-hint">
-          只影响主页和书库的底色，跟阅读器内的主题相互独立。
-        </p>
-        <div className="segmented-control">
-          {(
-            [
-              ["white", "软白"],
-              ["cream", "宣纸"],
-              ["black", "墨夜"],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              type="button"
-              key={value}
-              className={settings.shellTheme === value ? "is-active" : ""}
-              onClick={() => onChange({ ...settings, shellTheme: value })}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <section className="settings-group">
-        <div className="settings-group__title">
-          <Volume2 size={18} />
-          <h2>默认朗读</h2>
-        </div>
-        <label className="settings-row settings-row--stack">
-          <span>
-            <strong>朗读音色</strong>
-            <small>云端音色更自然，系统语音可离线使用</small>
-          </span>
-          <select
-            value={settings.voiceURI}
-            onChange={(event) =>
-              onChange({ ...settings, voiceURI: event.target.value })
-            }
-          >
-            <option value="">自动选择（云端晓晓）</option>
-            {voices.map((voice) => (
-              <option key={voice.voiceURI} value={voice.voiceURI}>
-                {voice.name} · {voice.lang}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="settings-row settings-row--stack">
-          <span>
-            <strong>默认倍速</strong>
-            <small>{settings.speechRate.toFixed(1)}×</small>
-          </span>
-          <input
-            type="range"
-            min="0.6"
-            max="2"
-            step="0.1"
-            value={settings.speechRate}
-            onChange={(event) =>
-              onChange({
-                ...settings,
-                speechRate: Number(event.target.value),
-              })
-            }
-          />
-        </label>
-      </section>
-
-      <section className="settings-group">
-        <div className="settings-group__title">
-          <Type size={18} />
-          <h2>默认排版</h2>
-        </div>
-        <div className="segmented-control">
-          {READER_THEMES.map((opt) => (
-            <button
-              type="button"
-              key={opt.value}
-              className={settings.theme === opt.value ? "is-active" : ""}
-              onClick={() => onChange({ ...settings, theme: opt.value })}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-        <div className="settings-row settings-row--stack">
-          <span>
-            <strong>正文字体</strong>
-            <small>四款 iOS 系统字体，阅读页里可随时切换</small>
-          </span>
-          <FontPicker
-            value={settings.fontFamily}
-            onChange={(fontFamily) => onChange({ ...settings, fontFamily })}
-          />
-        </div>
-      </section>
-
-      <section className="settings-group">
-        <div className="settings-group__title">
-          <Sparkles size={18} />
-          <h2>AI 助手</h2>
-        </div>
-        <p className="settings-hint">
-          划词问 AI 和整本书的对话都用这里配的模型。
-        </p>
-        <AiModelPicker settings={settings} onChange={onChange} />
-      </section>
-
-      <section className="settings-group">
-        <div className="settings-group__title">
-          <Cloud size={18} />
-          <h2>云端同步</h2>
-        </div>
-        {!sync.enabled ? (
-          <p className="privacy-note">此部署未启用同步,请在设置里登录或联系部署者。</p>
-        ) : sync.connected ? (
-          <>
-            <p className="privacy-note">
-              已连接。书籍、进度、划线与统计在设备间自动合并——每条记录单独比时间,
-              新者胜,任何一台设备的数据都不会被整库覆盖。
-            </p>
-            <div className="sync-status" aria-live="polite">
-              {sync.syncing ? (
-                <p>
-                  <LoaderCircle size={14} className="spin" aria-hidden="true" />
-                  {sync.message || "正在同步…"}
-                </p>
-              ) : (
-                <p>
-                  {sync.lastSyncAt
-                    ? `上次同步 ${formatSyncTime(sync.lastSyncAt)}`
-                    : "尚未同步"}
-                </p>
-              )}
-              {sync.error ? <p role="alert" className="sync-error">{sync.error}</p> : null}
-            </div>
-            <div className="sync-actions">
-              <button
-                type="button"
-                className="secondary-button"
-                disabled={sync.syncing}
-                onClick={onSyncNow}
-              >
-                <RefreshCw size={15} />
-                {sync.syncing ? "同步中…" : "立即同步"}
-              </button>
-              <button
-                type="button"
-                className="text-button"
-                disabled={sync.syncing || syncBusy}
-                onClick={onSyncLogout}
-              >
-                退出同步
-              </button>
-            </div>
-          </>
-        ) : (
-          <form className="sync-login" onSubmit={submitSyncLogin}>
-            <p className="privacy-note">
-              登录后,这台设备上的书籍、进度和划线会与其他设备自动合并。
-              不登录也照常用,只是数据只存在本机。
-            </p>
-            <label className="settings-row settings-row--stack">
-              <span>
-                <strong>用户名</strong>
-              </span>
-              <input
-                type="text"
-                autoComplete="username"
-                value={syncUser}
-                maxLength={256}
-                disabled={syncBusy}
-                onChange={(event) => setSyncUser(event.target.value)}
-              />
-            </label>
-            <label className="settings-row settings-row--stack">
-              <span>
-                <strong>密码</strong>
-              </span>
-              <input
-                type="password"
-                autoComplete="current-password"
-                value={syncPass}
-                maxLength={256}
-                disabled={syncBusy}
-                onChange={(event) => setSyncPass(event.target.value)}
-              />
-            </label>
-            {sync.error ? <p role="alert" className="sync-error">{sync.error}</p> : null}
-            <button
-              type="submit"
-              className="primary-button"
-              disabled={syncBusy || !syncUser.trim() || !syncPass}
-            >
-              {syncBusy ? "正在登录…" : "登录并同步"}
-            </button>
-          </form>
-        )}
-      </section>
-
-      <section className="settings-group">
-        <div className="settings-group__title">
-          <Download size={18} />
-          <h2>本地书库</h2>
-        </div>
-        <div className="storage-summary">
-          <div>
-            <strong>{books.length}</strong>
-            <span>本书</span>
-          </div>
-          <div>
-            <strong>{formatStorageSize(totalCharacters)}</strong>
-            <span>约占文本空间</span>
-          </div>
-        </div>
-        <p className="privacy-note">
-          {sync.connected
-            ? "已开启云端同步:下面的清空只影响这台设备,云端数据保留,下次同步会恢复回来。"
-            : "书籍、进度和标记保存在当前浏览器中，不会由本项目上传。"}
-        </p>
-        <button type="button" className="danger-button" onClick={onClear}>
-          <Trash2 size={17} />
-          清空本地书库
-        </button>
-      </section>
-
-      <p className="app-version">墨听阅读器 · 本地版 1.0</p>
-    </div>
-  );
-}
-
 const HEADING_TAGS = ["h2", "h2", "h3", "h4", "h5", "h6"] as const;
 
 /** 连续滚动时最多同时挂在 DOM 里的章节数。整本全渲染的话上百章会有几万个句子 span。 */
@@ -5577,19 +4793,13 @@ function ReaderScreen({
 
             <label className="rset-row">
               <span className="rset-row__label">行距</span>
-              <input
+              <SoftRange
                 className="rset-slider"
-                type="range"
-                min="1.4"
-                max="2.4"
-                step="0.1"
+                min={1.4}
+                max={2.4}
+                step={0.1}
                 value={settings.lineHeight}
-                onChange={(event) =>
-                  applySettings({
-                    ...settings,
-                    lineHeight: Number(event.target.value),
-                  })
-                }
+                onValue={(lineHeight) => applySettings({ ...settings, lineHeight })}
               />
             </label>
 
@@ -5822,16 +5032,13 @@ function PlayerScreen({
         </p>
 
         <div className="player-seek">
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="0.1"
+          <SoftRange
+            min={0}
+            max={100}
+            step={0.1}
             aria-label="播放进度"
             value={seekValue}
-            style={{ "--seek": `${seekValue}%` } as CSSProperties}
-            onChange={(event) => {
-              const value = Number(event.target.value);
+            onValue={(value) => {
               seekRef.current = value;
               setSeeking(value);
             }}
@@ -6024,18 +5231,12 @@ function PlayerScreen({
                 <strong>朗读速度</strong>
                 <em>{settings.speechRate.toFixed(1)}×</em>
               </span>
-              <input
-                type="range"
-                min="0.6"
-                max="2"
-                step="0.1"
+              <SoftRange
+                min={0.6}
+                max={2}
+                step={0.1}
                 value={settings.speechRate}
-                onChange={(event) =>
-                  onSettingsChange({
-                    ...settings,
-                    speechRate: Number(event.target.value),
-                  })
-                }
+                onValue={(speechRate) => onSettingsChange({ ...settings, speechRate })}
               />
             </label>
 
@@ -6188,7 +5389,6 @@ export default function MotingApp() {
   // 系统返回手势也能用。切板块是平级移动，下钻才进历史栈。
   const { view, navigate, selectTab, replace: replaceView, goBack } =
     useAppNavigation();
-  const [showSettings, setShowSettings] = useState(false);
   const [ready, setReady] = useState(false);
   // 老用户第一次打开新版时，本地库要把正文从书目里搬出去，这一次会多等几秒。
   const [upgrading, setUpgrading] = useState(false);
@@ -7508,7 +6708,6 @@ export default function MotingApp() {
     setStats(DEFAULT_STATS);
     setSessions([]);
     setConfirmClear(false);
-    setShowSettings(false);
     selectTab("home");
     showToast(
       syncConnected
@@ -7524,7 +6723,7 @@ export default function MotingApp() {
         ? "listen"
         : view.name === "book-notes"
           ? "notes"
-          : view.name === "history" || view.name === "store"
+          : view.name === "history" || view.name === "store" || view.name === "settings"
             ? "home"
             : view.name;
 
@@ -7577,6 +6776,28 @@ export default function MotingApp() {
           onToast={showToast}
         />
         ) : null
+      ) : view.name === "settings" ? (
+        <SettingsScreen
+          section={view.section}
+          settings={settings}
+          voices={player.voices}
+          books={books}
+          sync={{
+            enabled: syncEnabled,
+            connected: syncConnected,
+            syncing,
+            message: syncMessage,
+            error: syncError,
+            lastSyncAt,
+          }}
+          onChange={changeSettings}
+          onClear={() => setConfirmClear(true)}
+          onSyncLogin={handleSyncLogin}
+          onSyncLogout={() => void handleSyncLogout()}
+          onSyncNow={() => void triggerSync(true)}
+          onOpen={(section) => navigate({ name: "settings", section })}
+          onBack={() => goBack(view.section ? { name: "settings" } : { name: "home" })}
+        />
       ) : view.name === "player" ? (
         selectedBook ? (
         <PlayerScreen
@@ -7619,7 +6840,7 @@ export default function MotingApp() {
                 onOpenPlayer={(book) => openPlayer(book, false)}
                 onImport={() => fileInputRef.current?.click()}
                 onOpenHistory={() => navigate({ name: "history" })}
-                onOpenSettings={() => setShowSettings(true)}
+                onOpenSettings={() => navigate({ name: "settings" })}
                 onOpenLibrary={() => selectTab("library")}
                 onOpenStore={(bookId) =>
                   navigate(bookId ? { name: "store", bookId } : { name: "store" })
@@ -7821,28 +7042,6 @@ export default function MotingApp() {
         </Modal>
       ) : null}
 
-      {showSettings ? (
-        <Modal title="设置" wide onClose={() => setShowSettings(false)}>
-          <SettingsPanel
-            settings={settings}
-            voices={player.voices}
-            books={books}
-            onChange={changeSettings}
-            onClear={() => setConfirmClear(true)}
-            sync={{
-              enabled: syncEnabled,
-              connected: syncConnected,
-              syncing,
-              message: syncMessage,
-              error: syncError,
-              lastSyncAt,
-            }}
-            onSyncLogin={handleSyncLogin}
-            onSyncLogout={() => void handleSyncLogout()}
-            onSyncNow={() => void triggerSync(true)}
-          />
-        </Modal>
-      ) : null}
 
       {thoughtTarget ? (
         <Modal title="写想法" onClose={() => setThoughtTarget(null)}>

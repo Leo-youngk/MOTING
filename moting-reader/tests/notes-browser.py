@@ -118,7 +118,7 @@ with sync_playwright() as playwright:
     metas = page.locator(".notes-book-row .ios-row__main > span > em").all_inner_texts()
     checks["list_only_books_with_notes_latest_first"] = titles == ["短歌", "长河"]
     checks["cross_sentence_counted_once"] = metas[1] == "3 条笔记 · 1 条想法" if len(metas) > 1 else False
-    checks["summary"] = page.locator(".ink-summary").inner_text() == "2 本书 · 4 条笔记"
+    checks["summary"] = page.locator(".ios-header__subtitle").inner_text() == "2 本书 · 4 条笔记"
     page.screenshot(path=str(OUTPUT / "notes-list-white.png"))
 
     page.get_by_placeholder("搜索书名或作者").fill("甲作者")
