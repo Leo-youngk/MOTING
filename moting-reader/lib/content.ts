@@ -718,16 +718,24 @@ export interface BookPagination {
   total: number;
 }
 
+/** 按当前排版，一行大约能放几个汉字。正文栏宽跟 .reader-article 的宽度规则一致。 */
+export function charsPerLine(
+  layout: { fontSize: number; contentWidth: number },
+  viewportWidth: number
+): number {
+  const columnWidth = Math.max(
+    120,
+    Math.min(viewportWidth - 42, layout.contentWidth)
+  );
+  return Math.max(8, Math.floor(columnWidth / layout.fontSize));
+}
+
 export function estimatePagination(
   book: Pick<BookMeta, "chapterOutline">,
   layout: { fontSize: number; lineHeight: number; contentWidth: number },
   viewport: { width: number; height: number }
 ): BookPagination {
-  const columnWidth = Math.max(
-    120,
-    Math.min(viewport.width - 42, layout.contentWidth)
-  );
-  const perLine = Math.max(8, Math.floor(columnWidth / layout.fontSize));
+  const perLine = charsPerLine(layout, viewport.width);
   const usableHeight = Math.max(200, viewport.height - 132);
   const lines = Math.max(
     6,

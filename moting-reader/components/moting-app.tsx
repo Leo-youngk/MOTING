@@ -83,6 +83,7 @@ import {
   type BookMetadataPatch,
 } from "../lib/book-metadata-types";
 import {
+  charsPerLine,
   findSentence,
   flattenChapter,
   formatReadingTime,
@@ -2205,6 +2206,15 @@ const ArticleBody = memo(function ArticleBody({
                 );
               }
 
+              // 段落在视口外时只按估算高度占位（content-visibility），估算用字数算，
+              // 进视口撑开时差得越少，上方正文被推动得越少。
+              const blockStyle = {
+                "--chars": paragraph.sentences.reduce(
+                  (sum, sentence) => sum + sentence.text.length,
+                  0
+                ),
+              } as CSSProperties;
+
               const sentenceSpans = paragraph.sentences.map((sentence) => (
                 <span
                   key={sentence.id}
@@ -2259,6 +2269,7 @@ const ArticleBody = memo(function ArticleBody({
                   <Heading
                     key={paragraph.id}
                     className="reader-block is-heading"
+                    style={blockStyle}
                   >
                     {sentenceSpans}
                   </Heading>
@@ -2269,6 +2280,7 @@ const ArticleBody = memo(function ArticleBody({
                   <blockquote
                     key={paragraph.id}
                     className="reader-block is-quote"
+                    style={blockStyle}
                   >
                     {sentenceSpans}
                   </blockquote>
@@ -2280,6 +2292,7 @@ const ArticleBody = memo(function ArticleBody({
                   className={`reader-block ${
                     paragraph.kind === "list" ? "is-list" : ""
                   }`}
+                  style={blockStyle}
                 >
                   {sentenceSpans}
                 </p>
@@ -3255,6 +3268,72 @@ function AiInlineAsk({
   );
 }
 
+/** 跳转落地后最多盯这么久。 */
+const HOLD_MS = 1500;
+/** 连续这么久没再被推动，就算落稳了，提前收手。 */
+const HOLD_QUIET_MS = 300;
+
+/**
+ * 跳转（目录跳章、回到朗读处）落地后，把目标按在刚落下的高度，直到版面稳下来。
+ *
+ * 目标上方的段落大多还是 content-visibility 的估算占位，滚过去之后才按真实高度排版。
+ * Chrome 有 scroll anchoring，自己会把位移补回来；iOS Safari 没有，占位一撑开，
+ * 目标就被整个往下推——实测关掉 anchoring 跳章偏 900～1900px，
+ * 「回到朗读处」要连点几下才对得准，也是这个原因。
+ *
+ * ResizeObserver 在排版之后、绘制之前回调，这时补回去用户看不到那一下跳；
+ * rAF 兜住没有改变正文尺寸的位移（比如上方图片换了高度又被抵消）。
+ * 手一碰屏幕就松手，不跟用户抢滚动。
+ */
+function holdInPlace(element: HTMLElement, container: HTMLElement): () => void {
+  const targetTop = element.getBoundingClientRect().top;
+  const deadline = performance.now() + HOLD_MS;
+  let quietSince = performance.now();
+  let frame = 0;
+  let stopped = false;
+
+  const correct = () => {
+    if (stopped) return;
+    if (!element.isConnected) {
+      stop();
+      return;
+    }
+    const drift = element.getBoundingClientRect().top - targetTop;
+    if (Math.abs(drift) > 1) {
+      window.scrollBy(0, drift);
+      quietSince = performance.now();
+    }
+  };
+
+  const tick = () => {
+    correct();
+    const now = performance.now();
+    if (now > deadline || now - quietSince > HOLD_QUIET_MS) {
+      stop();
+      return;
+    }
+    frame = requestAnimationFrame(tick);
+  };
+
+  const resize = new ResizeObserver(correct);
+  const inputs = ["touchstart", "wheel", "keydown", "pointerdown"] as const;
+
+  function stop() {
+    if (stopped) return;
+    stopped = true;
+    cancelAnimationFrame(frame);
+    resize.disconnect();
+    for (const type of inputs) window.removeEventListener(type, stop);
+  }
+
+  resize.observe(container);
+  for (const type of inputs) {
+    window.addEventListener(type, stop, { passive: true });
+  }
+  frame = requestAnimationFrame(tick);
+  return stop;
+}
+
 /**
  * 阅读进度的锚点高度：距视口顶多少像素的那一句算「你正读到这里」。
  *
@@ -3792,6 +3871,8 @@ function ReaderScreen({
 
   // 接章／摘章都会改变正文上方的高度，不补偿的话页面会当场跳一下。
   // 先记住视口里第一章的位置，重排后按它的位移把滚动条推回去。
+  // top 记的是文档坐标（视口位置 + scrollY）：从量锚点到新窗口提交之间隔着一次渲染，
+  // 手指这时还在滑，按视口位置补偿会把这段滑动也一起抹掉。
   const anchorRef = useRef<{ index: number; top: number } | null>(null);
   const captureAnchor = () => {
     const sections = articleRef.current?.querySelectorAll<HTMLElement>(
@@ -3803,7 +3884,7 @@ function ReaderScreen({
       if (rect.bottom > 0) {
         anchorRef.current = {
           index: Number(section.dataset.chapterSection),
-          top: rect.top,
+          top: rect.top + window.scrollY,
         };
         return;
       }
@@ -3819,7 +3900,8 @@ function ReaderScreen({
       `[data-chapter-section="${anchor.index}"]`
     );
     if (!section) return;
-    const delta = section.getBoundingClientRect().top - anchor.top;
+    const delta =
+      section.getBoundingClientRect().top + window.scrollY - anchor.top;
     if (delta) window.scrollBy(0, delta);
   }, [range]);
 
@@ -3830,17 +3912,52 @@ function ReaderScreen({
     selector: string;
     block: ScrollLogicalPosition;
   } | null>(null);
+
+  // 滚到目标，再盯住它直到上方的占位都撑开完。只滚一下的话 iOS 上会被撑开的段落推走。
+  const releaseHoldRef = useRef<(() => void) | null>(null);
+  const revealTarget = useCallback(
+    (selector: string, block: ScrollLogicalPosition) => {
+      releaseHoldRef.current?.();
+      releaseHoldRef.current = null;
+      const article = articleRef.current;
+      const element = article?.querySelector<HTMLElement>(selector);
+      if (!article || !element) return;
+      element.scrollIntoView({ block });
+      releaseHoldRef.current = holdInPlace(element, article);
+    },
+    []
+  );
+  useEffect(() => () => releaseHoldRef.current?.(), []);
+
+  /**
+   * 跳到某一章里的某个位置：以这一章为中心重新开窗，落地后再滚过去。
+   *
+   * 前后两章一起挂上：落地时两端的哨兵往往已经在缓冲区里，observer 不会再为它们
+   * 报第二次，只挂目标章的话就再也接不上邻章，只能在这一章里上下滑。
+   * 跳转是重新开窗，不是接章，所以不做锚点补偿。
+   */
+  const jumpWithin = useCallback(
+    (index: number, selector: string, block: ScrollLogicalPosition) => {
+      const last = bookRef.current.chapters.length - 1;
+      anchorRef.current = null;
+      pendingScrollRef.current = { selector, block };
+      const next = {
+        start: Math.max(0, index - 1),
+        end: Math.min(last, index + 1),
+      };
+      rangeRef.current = next;
+      setRange(next);
+    },
+    []
+  );
+
   useLayoutEffect(() => {
     const pending = pendingScrollRef.current;
     if (!pending) return;
     pendingScrollRef.current = null;
     // 目录之类的浮层通常是"点了就关"，跳转落地时它可能还在收起、body 还锁着。
-    scrollWhenUnlocked(() =>
-      articleRef.current
-        ?.querySelector<HTMLElement>(pending.selector)
-        ?.scrollIntoView({ block: pending.block })
-    );
-  }, [range]);
+    scrollWhenUnlocked(() => revealTarget(pending.selector, pending.block));
+  }, [range, revealTarget]);
 
   // 改排版会让正文整体重排。分页模式在 measure() 里按句子重新对页，连续滚动这边得自己来：
   // 先记下锚点句在视口里的位置，重排后按位移把滚动条推回去，否则调一次字号就找不到读到哪了。
@@ -3895,17 +4012,12 @@ function ReaderScreen({
 
   const scrollToSpeaking = () => {
     const selector = `[data-sentence-id="${currentSentenceId}"]`;
-    const element = articleRef.current?.querySelector<HTMLElement>(selector);
-    if (element) {
-      element.scrollIntoView({ block: "center" });
+    if (articleRef.current?.querySelector(selector)) {
+      revealTarget(selector, "center");
       return;
     }
     // 朗读已经走到窗口之外的章去了，先按那一章重新开窗，落地后再滚过去。
-    anchorRef.current = null;
-    pendingScrollRef.current = { selector, block: "center" };
-    const next = { start: speakingChapterIndex, end: speakingChapterIndex };
-    rangeRef.current = next;
-    setRange(next);
+    jumpWithin(speakingChapterIndex, selector, "center");
   };
 
   // 正文两端各放一个哨兵，进到缓冲区就接下一章。用 observer 而不是 scroll 事件，
@@ -4132,26 +4244,16 @@ function ReaderScreen({
     restoreRef.current = landing === "last" ? "last" : null;
     setPopup(null);
     goToPage(0);
-    // 跳章是重新开窗，不是接章，所以这里不做锚点补偿，直接回到章首。
-    // 前后两章一起挂上：落地时两端的哨兵往往已经在缓冲区里，observer 不会再为它们
-    // 报第二次，只挂目标章的话就再也接不上邻章，只能在这一章里上下滑。
-    anchorRef.current = null;
-    const jumped = paged
-      ? { start: safe, end: safe }
-      : {
-          start: Math.max(0, safe - 1),
-          end: Math.min(currentBook.chapters.length - 1, safe + 1),
-        };
-    rangeRef.current = jumped;
-    setRange(jumped);
-    // 分页模式靠平移正文切页，不动滚动条。
-    if (!paged) {
-      pendingScrollRef.current = {
-        selector: `[data-chapter-section="${safe}"]`,
-        block: "start",
-      };
+    // 分页模式一次只排一章、靠平移正文切页，不动滚动条。
+    if (paged) {
+      anchorRef.current = null;
+      const jumped = { start: safe, end: safe };
+      rangeRef.current = jumped;
+      setRange(jumped);
+      return;
     }
-  }, [clearTextSelection, goToPage, onProgress, paged]);
+    jumpWithin(safe, `[data-chapter-section="${safe}"]`, "start");
+  }, [clearTextSelection, goToPage, jumpWithin, onProgress, paged]);
 
   const turnPage = useCallback((delta: number) => {
     const next = pageIndexRef.current + delta;
@@ -4378,6 +4480,11 @@ function ReaderScreen({
     "--reader-font-size": `${settings.fontSize}px`,
     "--reader-line-height": String(settings.lineHeight),
     "--reader-width": `${settings.contentWidth}px`,
+    // 段落占位高度的估算要用：一行几个字。
+    "--reader-cpl": charsPerLine(
+      settings,
+      typeof window === "undefined" ? 390 : window.innerWidth
+    ),
   } as CSSProperties;
 
   const remainingPages = Math.max(0, pageCount - pageIndex - 1);

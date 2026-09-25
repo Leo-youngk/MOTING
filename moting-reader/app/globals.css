@@ -3693,10 +3693,24 @@ html[data-keyboard-open] .bottom-bar {
    撑开永远发生在视口下方，抖的是滚动条长度，不是阅读位置。
    删掉它的代价倒是实测出来了：接章那一帧要为新挂上来的一整章做完整布局，
    41.5ms 均 / 61ms 最差（线上生产构建），滑到下一章时肉眼可见地顿一下；加回来是 6.7ms。
-   锚点命中率两种情况都是 98%，没有副作用。 */
+   锚点命中率两种情况都是 98%，没有副作用。
+   「撑开永远发生在视口下方」只对往下读成立。跳章、回到朗读处是直接落进一片没排过的
+   占位里，往上翻也是从上方把占位撑开——iOS Safari 没有 scroll anchoring，
+   固定 120px 的占位一撑开就把正文往下推（实测跳章偏 900～1900px）。
+   所以占位高度按字数估：(字数 / 一行几个字 + 半行) × 行高，差得少推得就少；
+   跳转落地后的残差由 holdInPlace() 按回去。 */
 .reader-shell.is-scroll .reader-article .reader-block {
   content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
+  contain-intrinsic-size: auto
+    calc(
+      (var(--chars, 60) / var(--reader-cpl, 18) + 0.5) *
+        var(--reader-font-size) * var(--reader-line-height)
+    );
+}
+
+/* 插图有宽高属性，排版很便宜，按估算字数占位反而差得远。 */
+.reader-shell.is-scroll .reader-article .reader-block.is-image {
+  content-visibility: visible;
 }
 
 .reader-article .reader-block.is-heading {

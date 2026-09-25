@@ -5,6 +5,7 @@ import {
   buildEdgeSpeechBatches,
   buildSpeechBlocks,
   chaptersFromPlainText,
+  charsPerLine,
   createBook,
   createChapter,
   formatRemaining,
@@ -439,4 +440,13 @@ test("切章：段落短但极多的文件也会被切开", () => {
       `单段 ${section.blocks.length} 段，超了`
     );
   }
+});
+
+test("一行字数按正文栏宽算：窄屏扣掉左右留白，宽屏被阅读宽度封顶", () => {
+  // 390 宽的手机：栏宽 348，18px 字号一行 19 个字。
+  assert.equal(charsPerLine({ fontSize: 18, contentWidth: 680 }, 390), 19);
+  // 桌面宽屏：栏宽取阅读宽度 680。
+  assert.equal(charsPerLine({ fontSize: 20, contentWidth: 680 }, 1440), 34);
+  // 极端大字号也至少按 8 个字估，占位高度不会被放大到离谱。
+  assert.equal(charsPerLine({ fontSize: 60, contentWidth: 680 }, 320), 8);
 });
