@@ -422,14 +422,30 @@ button:disabled {
   min-height: 100dvh;
 }
 
-/* 阅读和听书时保留列表节点，退出详情页时直接露出原来的页面。 */
+/* Covered surfaces retain geometry and native scroll offsets. */
 .app-frame.is-suspended {
-  display: none;
+  position: fixed;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
-/* 主 Tab 在详情页下面保留原节点，退出时无需重建列表和封面。 */
-.app-tab-content.is-suspended {
-  display: none;
+.app-tab-content {
+  position: fixed;
+  inset: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: none;
+  padding-bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + 28px);
+}
+
+.app-tab-content[data-active="false"] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.app-frame:has(.mini-player) .app-tab-content {
+  padding-bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + var(--mini-player-height) + 36px);
 }
 
 .app-content {
@@ -5302,6 +5318,11 @@ html[data-keyboard-open] .modal-sheet {
 }
 
 @media (min-width: 960px) {
+  .app-tab-content {
+    left: 230px;
+    padding-bottom: 35px;
+  }
+
   .app-frame {
     display: grid;
     grid-template-columns: 230px minmax(0, 1fr);

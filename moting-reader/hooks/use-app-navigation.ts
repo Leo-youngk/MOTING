@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AppView, MainView } from "../lib/types";
-import { pageScrollY, scrollWhenUnlocked } from "../components/sheet";
 
 /** 冷启动要回到上次待的地方，位置存这里。 */
 const VIEW_KEY = "moting:last-view";
@@ -97,7 +96,7 @@ export function useAppNavigation(): AppNavigation {
   const remember = useCallback(() => {
     const current = viewRef.current;
     if (keepsScroll(current)) {
-      scrollsRef.current.set(viewKey(current), pageScrollY());
+      scrollsRef.current.set(viewKey(current), window.scrollY);
     }
   }, []);
 
@@ -201,8 +200,8 @@ export function useAppNavigation(): AppNavigation {
   // 回到列表页时把上次滚到哪儿放回去；没记过就是新进来，从头开始。
   useLayoutEffect(() => {
     if (!keepsScroll(view)) return;
-    const top = scrollsRef.current.get(viewKey(view)) ?? 0;
-    scrollWhenUnlocked(() => window.scrollTo({ top, behavior: "instant" }));
+    // Tabs keep their own scroll surface; only document-scrolling detail pages restore here.
+    window.scrollTo({ top: isTab(view) ? 0 : scrollsRef.current.get(viewKey(view)) ?? 0, behavior: "instant" });
   }, [view]);
 
   return { view, backgroundView, navigate, selectTab, replace, goBack };
