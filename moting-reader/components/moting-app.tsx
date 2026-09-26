@@ -108,6 +108,7 @@ import {
   tocIndexFor,
 } from "../lib/display-title";
 import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "../lib/file-limits";
+import { mergeChatTurns } from "../lib/sync-merge";
 import { springTo } from "../lib/motion";
 import {
   getSyncSession,
@@ -2161,6 +2162,23 @@ const ReaderImage = memo(function ReaderImage({
 }) {
   const figureRef = useRef<HTMLElement>(null);
   const [url, setUrl] = useState(() => imageUrlCache.get(imageId) ?? "");
+  const [revision, setRevision] = useState(0);
+
+  useEffect(() => {
+    const onImageUpdated = (event: Event) => {
+      if ((event as CustomEvent<{ imageId?: string }>).detail?.imageId !== imageId) return;
+      const cached = imageUrlCache.get(imageId);
+      if (cached) {
+        imageUrlCache.delete(imageId);
+        URL.revokeObjectURL(cached);
+      }
+      setUrl("");
+      // A missing image may already have disconnected its observer after the first attempt.
+      setRevision((value) => value + 1);
+    };
+    window.addEventListener("moting:image-updated", onImageUpdated);
+    return () => window.removeEventListener("moting:image-updated", onImageUpdated);
+  }, [imageId]);
 
   useEffect(() => {
     if (url) return;
@@ -2204,7 +2222,7 @@ const ReaderImage = memo(function ReaderImage({
       cancelled = true;
       observer.disconnect();
     };
-  }, [imageId, url]);
+  }, [imageId, url, revision]);
 
   // 宽高提前写在 img 上，浏览器就按这个比例先把版面占住，
   // 图到了只是填进已经量好的位置，下方正文一个像素都不动。
@@ -2832,7 +2850,11 @@ function AiAskPanel({
   onClose: () => void;
 }) {
   const configured = Boolean(settings.aiBaseUrl && settings.aiModel);
-  const [turns, setTurns] = useState<AiChatTurn[]>(initialTurns);
+  const [localTurns, setTurns] = useState<AiChatTurn[]>(initialTurns);
+  const turns = useMemo(
+    () => mergeChatTurns(localTurns, initialTurns),
+    [localTurns, initialTurns]
+  );
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -2851,6 +2873,8 @@ function AiAskPanel({
   const atBottomRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const streamTextRef = useRef({ content: "", reasoning: "" });
+  const streamingTurnRef = useRef<{ id: string; replyTo?: string }>({ id: "" });
+  const [activeAnswerId, setActiveAnswerId] = useState("");
   const streamFrameRef = useRef<number | null>(null);
 
   useScrollLock();
@@ -2949,10 +2973,11 @@ function AiAskPanel({
     streamFrameRef.current = window.requestAnimationFrame(() => {
       streamFrameRef.current = null;
       const { content, reasoning } = streamTextRef.current;
+      const { id, replyTo } = streamingTurnRef.current;
       setTurns((prev) => {
         if (!prev.length) return prev;
         const next = [...prev];
-        next[next.length - 1] = { role: "assistant", content, reasoning };
+        next[next.length - 1] = { id, replyTo, role: "assistant", content, reasoning };
         return next;
       });
     });
@@ -2971,6 +2996,7 @@ function AiAskPanel({
       (preset ?? question).trim() || (isFreshQuote ? "帮我讲讲这段话" : "");
     if (!userText) return;
     const userTurn: AiChatTurn = {
+      id: makeId("turn"),
       role: "user",
       content: userText,
       ...(isFreshQuote ? { quote: text } : {}),
@@ -2990,7 +3016,11 @@ function AiAskPanel({
   };
 
   const run = async (history: AiChatTurn[]) => {
-    setTurns([...history, { role: "assistant", content: "", reasoning: "" }]);
+    const assistantId = makeId("turn");
+    const replyTo = history.at(-1)?.id;
+    streamingTurnRef.current = { id: assistantId, replyTo };
+    setActiveAnswerId(assistantId);
+    setTurns([...history, { id: assistantId, replyTo, role: "assistant", content: "", reasoning: "" }]);
     setBusy(true);
     setError("");
     const controller = new AbortController();
@@ -3027,7 +3057,7 @@ function AiAskPanel({
       streamTextRef.current = { content, reasoning };
       const next: AiChatTurn[] = [
         ...history,
-        { role: "assistant", content, reasoning, ...fallbackMark(answeredBy, settings) },
+        { id: assistantId, replyTo, role: "assistant", content, reasoning, ...fallbackMark(answeredBy, settings) },
       ];
       setTurns(next);
       setBusy(false);
@@ -3036,11 +3066,10 @@ function AiAskPanel({
     }
   };
 
-  const lastIndex = turns.length - 1;
   const renderTurn = (turn: AiChatTurn, index: number) => {
     if (turn.role === "user") {
       return (
-        <div className="ai-ask__turn-user" key={index}>
+        <div className="ai-ask__turn-user" key={turn.id ?? index}>
           <div className="ai-ask__bubble">
             {turn.quote ? <blockquote className="ai-ask__quote-sent">{turn.quote}</blockquote> : null}
             <p className="ai-ask__question">{turn.content}</p>
@@ -3048,10 +3077,10 @@ function AiAskPanel({
         </div>
       );
     }
-    const streaming = busy && index === lastIndex;
+    const streaming = busy && turn.id === activeAnswerId;
     const reasoningOpen = openReasoning.has(index);
     return (
-      <div className="ai-ask__turn-assistant" key={index}>
+      <div className="ai-ask__turn-assistant" key={turn.id ?? index}>
         {turn.reasoning ? (
           <div className={`ai-ask__reasoning${reasoningOpen ? " is-open" : ""}`}>
             <button
@@ -3094,7 +3123,7 @@ function AiAskPanel({
             {turn.model ? <span className="ai-ask__via">主模型太忙，由备用模型 {turn.model} 回答</span> : null}
           </div>
         ) : null}
-        {index === lastIndex && error && !busy ? (
+        {turn.id === activeAnswerId && error && !busy ? (
           <div className="ai-ask__failed">
             <p className="ai-ask__error">{error}</p>
             {turn.content ? null : (
@@ -3286,7 +3315,7 @@ function AiInlineAsk({
     const userText = (preset ?? question).trim() || "帮我讲讲这段话";
     const history: AiChatTurn[] = [
       ...turns,
-      { role: "user", content: userText, quote: text },
+      { id: makeId("turn"), role: "user", content: userText, quote: text },
     ];
     setAsked(userText);
     setQuestion("");
@@ -3298,6 +3327,8 @@ function AiInlineAsk({
     let content = "";
     let reasoning = "";
     let answeredBy = "";
+    const assistantId = makeId("turn");
+    const replyTo = history.at(-1)?.id;
     setVia(undefined);
     try {
       await askAi({
@@ -3326,7 +3357,7 @@ function AiInlineAsk({
       onTurnsChange(
         [
           ...history,
-          { role: "assistant" as const, content, reasoning, ...fallbackMark(answeredBy, settings) },
+          { id: assistantId, replyTo, role: "assistant" as const, content, reasoning, ...fallbackMark(answeredBy, settings) },
         ].filter(isAnsweredTurn)
       );
     }
@@ -3755,6 +3786,17 @@ function ReaderScreen({
   const restoreRef = useRef<string | "last" | null>(
     book.readingPosition?.sentenceId ?? null
   );
+  const previousPagedRef = useRef(paged);
+
+  useLayoutEffect(() => {
+    if (paged && !previousPagedRef.current) {
+      // 连续阅读中保存点一直在更新；切入分页时应使用当前屏幕的锚点，而非进书时的旧位置。
+      restoreRef.current = savedSentenceRef.current;
+    } else if (!paged) {
+      restoreRef.current = null;
+    }
+    previousPagedRef.current = paged;
+  }, [paged]);
 
   useLayoutEffect(() => {
     const article = articleRef.current;
@@ -4634,7 +4676,15 @@ function ReaderScreen({
   useEffect(() => {
     if (!paged) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']"))
+      ) return;
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return;
       if (event.key === "ArrowRight" || event.key === "PageDown") turnPageRef.current(1);
       else if (event.key === "ArrowLeft" || event.key === "PageUp") turnPageRef.current(-1);
       else return;
@@ -5846,6 +5896,10 @@ export default function MotingApp() {
   const [books, setBooks] = useState<BookMeta[]>([]);
   const [notes, setNotes] = useState<BookNote[]>([]);
   const [chats, setChats] = useState<BookAiChat[]>([]);
+  const chatsRef = useRef(chats);
+  useEffect(() => {
+    chatsRef.current = chats;
+  }, [chats]);
   // 线上补全的书籍资料。不并进 books，这样「还原」永远能拿回导入时的原始值。
   const [bookMetadata, setBookMetadata] = useState<BookMetadataPatch[]>([]);
   const [metadataBook, setMetadataBook] = useState<BookMeta | null>(null);
@@ -5853,6 +5907,7 @@ export default function MotingApp() {
   const [chatBook, setChatBook] = useState<BookMeta | null>(null);
   const [settings, setSettings] =
     useState<ReaderSettings>(DEFAULT_SETTINGS);
+  const pendingSyncedSettingsRef = useRef<ReaderSettings | null>(null);
   const [stats, setStats] = useState<ReadingStats>(DEFAULT_STATS);
   const [sessions, setSessions] = useState<ReadingSession[]>([]);
   // 导航接在 History API 上：返回回到来处、刷新/被系统回收后还在原地、
@@ -5990,6 +6045,8 @@ export default function MotingApp() {
   const [syncError, setSyncError] = useState("");
   const [lastSyncAt, setLastSyncAt] = useState(0);
   const syncControllerRef = useRef<AbortController | null>(null);
+  const syncSettledRef = useRef<Promise<void> | null>(null);
+  const settleSyncRef = useRef<(() => void) | null>(null);
   const syncReloadTimerRef = useRef<number | null>(null);
   /** 这一轮同步真正写进本地的数据类别；只重读这几类。 */
   const syncChangedRef = useRef(new Set<SyncAppliedKind>());
@@ -6022,15 +6079,29 @@ export default function MotingApp() {
         dropContent((id) => alive.has(id));
       }
       if (storedNotes) setNotes(storedNotes);
-      if (storedChats) setChats(storedChats);
-      if (storedSettings) setSettings(storedSettings);
+      if (storedChats) {
+        chatsRef.current = storedChats;
+        setChats(storedChats);
+      }
+      if (storedSettings) {
+        if (view.name === "reader") pendingSyncedSettingsRef.current = storedSettings;
+        else setSettings(storedSettings);
+      }
       if (storedStats) setStats(storedStats);
       if (storedSessions) setSessions(storedSessions);
       if (storedMetadata) setBookMetadata(storedMetadata);
     } catch {
       // 重读失败不打断应用;下一轮同步或刷新还能拉回。
     }
-  }, [dropContent]);
+  }, [dropContent, view.name]);
+
+  useEffect(() => {
+    if (view.name === "reader") return;
+    const pending = pendingSyncedSettingsRef.current;
+    if (!pending) return;
+    pendingSyncedSettingsRef.current = null;
+    setSettings(pending);
+  }, [view.name]);
 
   const scheduleSyncReload = useCallback(
     (kind: SyncAppliedKind) => {
@@ -6054,15 +6125,26 @@ export default function MotingApp() {
       }
       const controller = new AbortController();
       syncControllerRef.current = controller;
+      syncSettledRef.current = new Promise<void>((resolve) => {
+        settleSyncRef.current = resolve;
+      });
       setSyncing(true);
       setSyncMessage("");
       setSyncError("");
       try {
-        const result = await runSync({
+        const run = () => runSync({
           signal: controller.signal,
           onProgress: setSyncMessage,
           onApplied: scheduleSyncReload,
         });
+        const result =
+          typeof navigator !== "undefined" && navigator.locks
+            ? await navigator.locks.request(
+                "moting-reader-sync",
+                { mode: "exclusive", signal: controller.signal },
+                run
+              )
+            : await run();
         setLastSyncAt(result.syncedAt);
         if (result.failedContent.length) {
           showToast(`${result.failedContent.length} 本书超出云端大小上限,未能同步`);
@@ -6082,7 +6164,11 @@ export default function MotingApp() {
         }
       } finally {
         if (syncControllerRef.current === controller) syncControllerRef.current = null;
-        if (!controller.signal.aborted) setSyncing(false);
+        const settle = settleSyncRef.current;
+        settle?.();
+        settleSyncRef.current = null;
+        syncSettledRef.current = null;
+        setSyncing(false);
       }
     },
     [scheduleSyncReload, showToast]
@@ -6167,6 +6253,7 @@ export default function MotingApp() {
         if (cancelled) return;
         setBooks(metas);
         setNotes(storedNotes);
+        chatsRef.current = storedChats;
         setChats(storedChats);
         setSettings(storedSettings);
         setStats(storedStats);
@@ -6756,18 +6843,23 @@ export default function MotingApp() {
   );
 
   const updateChat = useCallback((bookId: string, turns: AiChatTurn[]) => {
-    const chat: BookAiChat = { bookId, turns, updatedAt: Date.now() };
-    setChats((current) => {
-      const idx = current.findIndex((c) => c.bookId === bookId);
-      if (idx === -1) return [...current, chat];
-      const next = [...current];
-      next[idx] = chat;
-      return next;
-    });
+    const existing = chatsRef.current.find((item) => item.bookId === bookId);
+    const chat: BookAiChat = {
+      bookId,
+      turns: mergeChatTurns(existing?.turns ?? [], turns),
+      updatedAt: Math.max(Date.now(), (existing?.updatedAt ?? 0) + 1),
+    };
+    const idx = chatsRef.current.findIndex((item) => item.bookId === bookId);
+    const next = [...chatsRef.current];
+    if (idx === -1) next.push(chat);
+    else next[idx] = chat;
+    chatsRef.current = next;
+    setChats(next);
     void saveChat(chat).catch((error) => reportStorageError("chat", error));
   }, [reportStorageError]);
 
   const changeSettings = (next: ReaderSettings) => {
+    pendingSyncedSettingsRef.current = null;
     setSettings(next);
     void saveSettings(next).catch((error) => reportStorageError("settings", error));
   };
@@ -7112,9 +7204,9 @@ export default function MotingApp() {
     setNotes((current) =>
       current.filter((note) => note.bookId !== deleteTarget.id)
     );
-    setChats((current) =>
-      current.filter((chat) => chat.bookId !== deleteTarget.id)
-    );
+    const remainingChats = chatsRef.current.filter((chat) => chat.bookId !== deleteTarget.id);
+    chatsRef.current = remainingChats;
+    setChats(remainingChats);
     setDeleteTarget(null);
     showToast("书籍及相关标记已删除");
   };
@@ -7169,6 +7261,10 @@ export default function MotingApp() {
   };
 
   const clearEverything = async () => {
+    if (syncControllerRef.current) {
+      syncControllerRef.current.abort();
+      await syncSettledRef.current;
+    }
     player.stop();
     try {
       await clearLibrary();
@@ -7196,7 +7292,12 @@ export default function MotingApp() {
     commitContents(new Map());
     setBooks([metaOf(demo)]);
     setNotes([]);
+    chatsRef.current = [];
+    setChats([]);
+    setBookMetadata([]);
+    setMetadataBook(null);
     setSettings(DEFAULT_SETTINGS);
+    pendingSyncedSettingsRef.current = null;
     setStats(DEFAULT_STATS);
     setSessions([]);
     setConfirmClear(false);

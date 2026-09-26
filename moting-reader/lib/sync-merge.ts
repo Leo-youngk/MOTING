@@ -98,7 +98,9 @@ export function mergeBookMeta<B extends { updatedAt: number; syncReadyAt?: numbe
   local: B | undefined,
   remote: SyncRecord
 ): MergeAction<B> {
-  if (remote.deletedAt) return local ? { op: "delete" } : { op: "keep" };
+  if (remote.deletedAt) {
+    return local && remote.updatedAt > bookPushTime(local) ? { op: "delete" } : { op: "keep" };
+  }
   if (!remote.data || typeof remote.data !== "object") return { op: "keep" };
   const remoteMeta = remote.data as B;
   if (!local) return remoteMeta.syncReadyAt ? { op: "write", value: remoteMeta } : { op: "keep" };
@@ -115,12 +117,108 @@ export function mergeNote<N extends { createdAt: number; updatedAt?: number }>(
   local: N | undefined,
   remote: SyncRecord
 ): MergeAction<N> {
-  if (remote.deletedAt) return local ? { op: "delete" } : { op: "keep" };
+  const localUpdatedAt = local ? local.updatedAt ?? local.createdAt : 0;
+  if (remote.deletedAt) {
+    return local && remote.updatedAt > localUpdatedAt ? { op: "delete" } : { op: "keep" };
+  }
   if (!remote.data || typeof remote.data !== "object") return { op: "keep" };
   const remoteNote = remote.data as N;
-  const localUpdatedAt = local ? local.updatedAt ?? local.createdAt : 0;
   if (local && (remoteNote.updatedAt ?? remoteNote.createdAt) <= localUpdatedAt) return { op: "keep" };
   return { op: "write", value: remoteNote };
+}
+
+export interface MergeableChatTurn {
+  id?: string;
+  replyTo?: string;
+  role: "user" | "assistant";
+  content: string;
+  reasoning?: string;
+  quote?: string;
+  model?: string;
+}
+
+function chatTurnKey(turn: MergeableChatTurn, index: number): string {
+  // 新记录带随机 id；确定性回退让升级前已经同步的聊天仍能对齐共同历史。
+  return turn.id ?? `legacy:${index}:${JSON.stringify(turn)}`;
+}
+
+/** 合并追加式聊天的两个分支，避免整条聊天按 LWW 丢掉另一台设备的新问题。 */
+export function mergeChatTurns<T extends MergeableChatTurn>(local: T[], remote: T[]): T[] {
+  const localKeys = local.map(chatTurnKey);
+  const remoteKeys = remote.map(chatTurnKey);
+  const turns = new Map<string, T>();
+  for (const items of [local, remote]) {
+    items.forEach((turn, index) => {
+      const key = chatTurnKey(turn, index);
+      const previous = turns.get(key);
+      const size = (item: T) => item.content.length + (item.reasoning?.length ?? 0);
+      if (!previous || size(turn) > size(previous) ||
+          (size(turn) === size(previous) && JSON.stringify(turn) > JSON.stringify(previous))) {
+        turns.set(key, turn);
+      }
+    });
+  }
+
+  // 排序单位是问答组。逐条排序会把并行设备的问题插到另一问的回答之前。
+  const parent = new Map<string, string>();
+  const inferParents = (items: T[], keys: string[]) => {
+    let question: string | undefined;
+    items.forEach((turn, index) => {
+      const key = keys[index];
+      if (turn.role === "user") question = key;
+      else {
+        const explicit = turn.replyTo && turns.get(turn.replyTo)?.role === "user" ? turn.replyTo : undefined;
+        const candidate = explicit ?? question;
+        const previous = parent.get(key);
+        if (candidate && (!previous || candidate < previous)) parent.set(key, candidate);
+      }
+    });
+  };
+  inferParents(local, localKeys);
+  inferParents(remote, remoteKeys);
+  // 显式关联优先于旧客户端顺序推断。
+  for (const [key, turn] of turns) {
+    if (turn.role === "assistant" && turn.replyTo && turns.get(turn.replyTo)?.role === "user") {
+      parent.set(key, turn.replyTo);
+    }
+  }
+  const groups = new Map<string, string[]>();
+  for (const key of turns.keys()) {
+    const group = parent.get(key) ?? key;
+    const members = groups.get(group) ?? [];
+    members.push(key);
+    groups.set(group, members);
+  }
+  const outgoing = new Map<string, Set<string>>();
+  const incoming = new Map([...groups.keys()].map((key) => [key, 0]));
+  for (const keys of [localKeys, remoteKeys]) {
+    // 已经被旧算法交错过的问答也只贡献一次组顺序，避免 A,B,B,A 形成环。
+    const sequence = [...new Set(keys.map((key) => parent.get(key) ?? key))];
+    sequence.forEach((key, index) => {
+      if (!index) return;
+      const before = sequence[index - 1];
+      const next = outgoing.get(before) ?? new Set<string>();
+      if (!next.has(key)) {
+        next.add(key);
+        outgoing.set(before, next);
+        incoming.set(key, (incoming.get(key) ?? 0) + 1);
+      }
+    });
+  }
+  const remaining = new Set(groups.keys());
+  const ordered: T[] = [];
+  while (remaining.size) {
+    const available = [...remaining].filter((key) => incoming.get(key) === 0).sort();
+    const key = available[0] ?? [...remaining].sort()[0];
+    remaining.delete(key);
+    const members = groups.get(key)!;
+    members.sort((a, b) => a === b ? 0 : a === key ? -1 : b === key ? 1 : a < b ? -1 : 1);
+    ordered.push(...members.map((member) => turns.get(member)!));
+    for (const next of outgoing.get(key) ?? []) {
+      if (remaining.has(next)) incoming.set(next, Math.max(0, (incoming.get(next) ?? 0) - 1));
+    }
+  }
+  return ordered;
 }
 
 /** 位置:纯 LWW,谁后保存听谁的。 */

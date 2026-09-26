@@ -52,6 +52,11 @@ export function useAppUpdate() {
     loadedRef.current = pageAssets();
     const onMessage = (event: MessageEvent) => {
       const data = event.data as { type?: string; assets?: string[]; offline?: boolean } | null;
+      if (data?.type === "shell-expired") {
+        // 旧页面引用的哈希分片已被源站回收时，重新导航到缓存中的完整新版外壳。
+        location.reload();
+        return;
+      }
       if (data?.type !== "shell" || !Array.isArray(data.assets)) return;
       const loaded = loadedRef.current ?? pageAssets();
       const fresh = data.assets.some((path) => !loaded.has(path));

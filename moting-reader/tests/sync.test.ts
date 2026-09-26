@@ -6,6 +6,7 @@ import {
   bookPushTime,
   COVER_IMAGE_ID,
   forEachLimit,
+  mergeChatTurns,
   mergeBookMeta,
   mergeNote,
   mergePosition,
@@ -46,6 +47,9 @@ function createMemoryStore(): SyncStore & { rows: Map<SyncTable, Map<string, Syn
     async renewSession(hash, expiresAt) {
       if (this.sessions.has(hash)) this.sessions.set(hash, expiresAt);
     },
+    async latestServerAt() {
+      return clockValue;
+    },
     async applyPush(batch) {
       if (!batch.length) return;
       clockValue = Math.max(clockValue, Date.now() * 1000) + batch.length;
@@ -57,9 +61,9 @@ function createMemoryStore(): SyncStore & { rows: Map<SyncTable, Map<string, Syn
         store.set(row.key, { ...row, bookId: row.bookId ?? existing?.bookId ?? null, serverAt: base + index });
       });
     },
-    async since(name, watermark, limit) {
+    async since(name, watermark, through, limit) {
       return [...table(name).values()]
-        .filter((row) => row.serverAt >= watermark)
+        .filter((row) => row.serverAt >= watermark && row.serverAt <= through)
         .sort((a, b) => a.serverAt - b.serverAt)
         .slice(0, limit);
     },
@@ -360,6 +364,39 @@ test("content download 404s for a book the cloud never received", async () => {
   assert.equal(response.status, 404);
 });
 
+test("pull fixes one server_at snapshot before scanning tables", async () => {
+  const { e, store } = env();
+  const cookie = await loginCookie(e);
+  await store.applyPush([{ table: "books", row: { key: "before", data: JSON.stringify({ id: "before" }), updatedAt: 1, deletedAt: null, bookId: null } }]);
+
+  const originalSince = store.since.bind(store);
+  let inserted = false;
+  store.since = async (name, watermark, through, limit) => {
+    const rows = await originalSince(name, watermark, through, limit);
+    if (name === "books" && !inserted) {
+      inserted = true;
+      // 这两条写入发生在 books 表查完、notes 表开始查询之后。
+      await store.applyPush([
+        { table: "books", row: { key: "during", data: JSON.stringify({ id: "during" }), updatedAt: 2, deletedAt: null, bookId: null } },
+        { table: "notes", row: { key: "n-during", data: JSON.stringify({ id: "n-during" }), updatedAt: 2, deletedAt: null, bookId: "during" } },
+      ]);
+    }
+    return rows;
+  };
+
+  const first = await handleSync(syncRequest("pull", { since: 0 }, { cookie }), e);
+  const firstPage = await jsonOf<{ cursor: number; books: SyncRow[]; notes: SyncRow[] }>(first);
+  assert.equal(firstPage.books.length, 1);
+  assert.equal(firstPage.books[0].key, "before");
+  assert.equal(firstPage.notes.length, 0);
+
+  store.since = originalSince;
+  const second = await handleSync(syncRequest("pull", { since: firstPage.cursor }, { cookie }), e);
+  const secondPage = await jsonOf<{ books: SyncRow[]; notes: SyncRow[] }>(second);
+  assert.ok(secondPage.books.some((row) => row.key === "during"));
+  assert.ok(secondPage.notes.some((row) => row.key === "n-during"));
+});
+
 // ---------------------------------------------------------------------------
 // 客户端合并纯函数。
 
@@ -384,7 +421,9 @@ test("mergeBookMeta: a remote book without syncReadyAt is ignored (peer still up
 test("mergeBookMeta: remote delete only removes a locally-present book", () => {
   type BookRec = { id: string; updatedAt: number; syncReadyAt?: number };
   const local: BookRec = { id: "b1", updatedAt: 1 };
-  assert.equal(mergeBookMeta(local, { key: "b1", updatedAt: 1, deletedAt: 5 }).op, "delete");
+  assert.equal(mergeBookMeta(local, { key: "b1", updatedAt: 5, deletedAt: 5 }).op, "delete");
+  assert.equal(mergeBookMeta({ ...local, updatedAt: 5 }, { key: "b1", updatedAt: 5, deletedAt: 5 }).op, "keep");
+  assert.equal(mergeBookMeta({ ...local, updatedAt: 10 }, { key: "b1", updatedAt: 5, deletedAt: 5 }).op, "keep");
   assert.equal(mergeBookMeta<BookRec>(undefined, { key: "b2", updatedAt: 1, deletedAt: 5 }).op, "keep");
 });
 
@@ -394,6 +433,29 @@ test("mergeNote: newer thought wins, older is dropped, tombstone deletes", () =>
   assert.equal(mergeNote(local, { key: "n1", updatedAt: 20, data: { id: "n1", createdAt: 10, updatedAt: 20, thought: "新想法" } }).op, "write");
   assert.equal(mergeNote(local, { key: "n1", updatedAt: 5, data: { id: "n1", createdAt: 1, updatedAt: 5, thought: "更旧" } }).op, "keep");
   assert.equal(mergeNote(local, { key: "n1", updatedAt: 30, deletedAt: 30 }).op, "delete");
+  assert.equal(mergeNote({ ...local, updatedAt: 30 }, { key: "n1", updatedAt: 30, deletedAt: 30 }).op, "keep");
+  assert.equal(mergeNote({ ...local, updatedAt: 40 }, { key: "n1", updatedAt: 30, deletedAt: 30 }).op, "keep");
+});
+
+test("mergeChatTurns preserves parallel questions and converges in either merge order", () => {
+  const base = [
+    { id: "u1", role: "user" as const, content: "第一问" },
+    { id: "a1", replyTo: "u1", role: "assistant" as const, content: "第一答" },
+  ];
+  const left = [
+    ...base,
+    { id: "u2", role: "user" as const, content: "左边新问题" },
+    { id: "a2", replyTo: "u2", role: "assistant" as const, content: "左边回答" },
+  ];
+  const right = [
+    ...base,
+    { id: "u3", role: "user" as const, content: "右边新问题" },
+    { id: "a3", replyTo: "u3", role: "assistant" as const, content: "右边回答" },
+  ];
+  const merged = mergeChatTurns(left, right);
+  assert.deepEqual(merged.map((turn) => turn.id), ["u1", "a1", "u2", "a2", "u3", "a3"]);
+  assert.deepEqual(mergeChatTurns(merged, right).map((turn) => turn.id), merged.map((turn) => turn.id));
+  assert.deepEqual(mergeChatTurns(right, left).map((turn) => turn.id), merged.map((turn) => turn.id));
 });
 
 test("mergePosition: pure last-writer-wins on savedAt", () => {
@@ -491,4 +553,29 @@ test("a session within its last 29 days is renewed on sync, so an active device 
   // 已经过期的不续,老老实实 401。
   store.sessions.set(hash, Date.now() - 1);
   assert.equal((await handleSync(syncRequest("pull", { since: 0 }, { cookie }), e)).status, 401);
+});
+
+test("parallel answers stay next to their questions regardless of random ID order", () => {
+  const left = [
+    { id: "turn-10", role: "user" as const, content: "问题A" },
+    { id: "turn-40", replyTo: "turn-10", role: "assistant" as const, content: "回答A" },
+  ];
+  const right = [
+    { id: "turn-20", role: "user" as const, content: "问题B" },
+    { id: "turn-30", replyTo: "turn-20", role: "assistant" as const, content: "回答B" },
+  ];
+  const expected = [...left, ...right];
+  assert.deepEqual(mergeChatTurns(left, right), expected);
+  assert.deepEqual(mergeChatTurns(right, left), expected);
+  assert.deepEqual(mergeChatTurns(expected, right), expected);
+  assert.deepEqual(mergeChatTurns([left[0], ...right, left[1]], expected), expected);
+});
+
+test("legacy conversations preserve question and answer adjacency", () => {
+  const base = [{ role: "user" as const, content: "旧问题" }, { role: "assistant" as const, content: "旧回答" }];
+  const left = [...base, { id: "10", role: "user" as const, content: "A" }, { id: "40", role: "assistant" as const, content: "答A" }];
+  const right = [...base, { id: "20", role: "user" as const, content: "B" }, { id: "30", role: "assistant" as const, content: "答B" }];
+  const merged = mergeChatTurns(left, right);
+  assert.deepEqual(merged.map(t => t.content), ["旧问题", "旧回答", "A", "答A", "B", "答B"]);
+  assert.deepEqual(mergeChatTurns(right, left), merged);
 });

@@ -5,7 +5,7 @@
 // Workers 每次发版只留新版文件，缓存里的旧页面要是缺了自己那一版的脚本，就再也跑不起来。
 //
 // 图标、manifest 这些文件名不带内容哈希，改了它们要顺手把版本号加一，否则已装的 PWA 永远拿旧的。
-const CACHE_NAME = "moting-shell-v14";
+const CACHE_NAME = "moting-shell-v15";
 const SHELL_FILES = [
   "/manifest.webmanifest",
   "/icon-192.png",
@@ -14,7 +14,7 @@ const SHELL_FILES = [
   "/apple-touch-icon.png",
   "/bear-mark.png",
 ];
-/** 记着缓存里那份页面用到了哪些 /assets/ 文件，换版时据此清掉上一版的。 */
+/** 记着缓存里那份页面用到了哪些 /assets/ 文件，用来提示当前页面有可用更新。 */
 const ASSET_LIST_KEY = "/__shell-assets.json";
 
 /** 缓存里那份页面用到的 /assets/ 文件。页面拿它跟自己开机时加载的比，多出来的就说明有新版。 */
@@ -31,7 +31,13 @@ async function announceShell(target, offline = false) {
   clients.forEach((client) => client.postMessage(message));
 }
 
-async function refreshShell() {
+let refreshing = null;
+function refreshShell() {
+  if (!refreshing) refreshing = refreshShellOnce().finally(() => { refreshing = null; });
+  return refreshing;
+}
+
+async function refreshShellOnce() {
   const response = await fetch("/", { cache: "no-store" });
   const type = response.headers.get("content-type") || "";
   if (!response.ok || !type.includes("text/html")) throw new Error(`shell ${response.status}`);
@@ -39,9 +45,23 @@ async function refreshShell() {
   const assets = [...new Set(html.match(/\/assets\/[^"'\s)<>]+\.(?:js|mjs|css)/g) || [])];
   const cache = await caches.open(CACHE_NAME);
 
+  const manifestResponse = await fetch("/asset-manifest.json", { cache: "no-store" });
+  if (!manifestResponse.ok) throw new Error("asset manifest unavailable");
+  const manifest = await manifestResponse.json();
+  if (!Array.isArray(manifest.assets) || !manifest.assets.length ||
+      manifest.assets.some((path) => typeof path !== "string" || !path.startsWith("/assets/") || path.includes("..")) ||
+      assets.some((path) => !manifest.assets.includes(path))) {
+    throw new Error("shell and asset manifest do not match");
+  }
+  const completeAssets = [...new Set(manifest.assets)];
+  const storedGeneration = await cache.match("/__complete-assets.json");
+  // 首次升级时旧版没有完整清单，保留已缓存分片一代。
+  const before = storedGeneration ? await storedGeneration.json() :
+    (await cache.keys()).map((request) => new URL(request.url).pathname).filter((path) => path.startsWith("/assets/"));
+
   // 这一版要用的文件先存齐。任何一个取不到就整次作罢，缓存里还是完整的上一版。
   await Promise.all(
-    assets.map(async (path) => {
+    completeAssets.map(async (path) => {
       if (await cache.match(path)) return;
       const asset = await fetch(path);
       if (!asset.ok) throw new Error(`${path} ${asset.status}`);
@@ -50,23 +70,24 @@ async function refreshShell() {
   );
   await cache.put("/", response);
 
-  // 换了版才清：上一版的脚本（包括按需加载的分片）都不再需要。
-  // 这一刻还开着的旧页面，按需分片开机时已经预取进内存；真漏了，页面会自己刷新到新版。
-  const previous = await cache.match(ASSET_LIST_KEY);
-  const before = previous ? await previous.json().catch(() => []) : [];
-  const changed = before.length !== assets.length || before.some((path) => !assets.includes(path));
+  // 保存新清单但保留旧哈希资源。仍打开的旧页面可能稍后才触发动态 import，
+  // 此时删掉旧分片会把阅读器留在半失效状态。
+  const changed = before.length !== completeAssets.length || before.some((path) => !completeAssets.includes(path));
+  await cache.put(
+    ASSET_LIST_KEY,
+    new Response(JSON.stringify(assets), { headers: { "content-type": "application/json" } })
+  );
   if (changed) {
-    const keep = new Set(assets);
+    // Keep one previous asset generation for open tabs, then drop older hashed bundles
+    // so repeated deployments cannot grow this cache without a bound.
+    await cache.put("/__complete-assets.json", new Response(JSON.stringify(completeAssets)));
+    const keep = new Set([...before, ...completeAssets]);
     const keys = await cache.keys();
     await Promise.all(
       keys
         .map((request) => new URL(request.url).pathname)
         .filter((path) => path.startsWith("/assets/") && !keep.has(path))
         .map((path) => cache.delete(path))
-    );
-    await cache.put(
-      ASSET_LIST_KEY,
-      new Response(JSON.stringify(assets), { headers: { "content-type": "application/json" } })
     );
   }
 }
@@ -85,13 +106,16 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) =>
-        Promise.all(
-          keys
-            .filter((key) => key !== CACHE_NAME)
-            .map((key) => caches.delete(key))
-        )
-      )
+      .then((keys) => {
+        const oldShells = keys
+          .filter((key) => key.startsWith("moting-shell-") && key !== CACHE_NAME)
+          .sort((left, right) => {
+            const version = (key) => Number(/-v(\d+)$/.exec(key)?.[1] ?? 0);
+            return version(right) - version(left);
+          });
+        const keep = new Set([CACHE_NAME, ...oldShells.slice(0, 1)]);
+        return Promise.all(keys.filter((key) => key.startsWith("moting-shell-") && !keep.has(key)).map((key) => caches.delete(key)));
+      })
       .then(() => self.clients.claim())
   );
 });
@@ -151,20 +175,26 @@ self.addEventListener("fetch", (event) => {
   }
 
   event.respondWith(
-    caches.match(request).then(
-      (cached) =>
-        cached ||
-        fetch(request).then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            event.waitUntil(
-              caches.open(CACHE_NAME)
-                .then((cache) => cache.put(request, copy))
-                .catch(() => undefined)
-            );
-          }
-          return response;
-        })
-    )
+    caches
+      .open(CACHE_NAME)
+      .then((currentCache) => currentCache.match(request))
+      .then(async (currentCached) => {
+        const cached = currentCached || (await caches.match(request));
+        if (cached) return cached;
+        const response = await fetch(request);
+        if (response.status === 404 && url.pathname.startsWith("/assets/")) {
+          const client = event.clientId ? await self.clients.get(event.clientId) : null;
+          client?.postMessage({ type: "shell-expired" });
+        }
+        if (response.ok) {
+          const copy = response.clone();
+          event.waitUntil(
+            caches.open(CACHE_NAME)
+              .then((cache) => cache.put(request, copy))
+              .catch(() => undefined)
+          );
+        }
+        return response;
+      })
   );
 });
