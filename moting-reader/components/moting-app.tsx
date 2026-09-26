@@ -6064,7 +6064,16 @@ export default function MotingApp() {
         ]);
       syncQuietRef.current = true;
       if (storedBooks) {
-        setBooks(storedBooks);
+        // 同步更新内容，不按最新阅读时间重排正在使用的书架。
+        setBooks((current) => {
+          const incoming = new Map(storedBooks.map((book) => [book.id, book]));
+          const retained = current.flatMap((book) => {
+            const updated = incoming.get(book.id);
+            incoming.delete(book.id);
+            return updated ? [updated] : [];
+          });
+          return [...retained, ...incoming.values()];
+        });
         // 远端删掉的书，内存里那份正文也别留着。
         const alive = new Set(storedBooks.map((book) => book.id));
         dropContent((id) => alive.has(id));
@@ -6362,7 +6371,7 @@ export default function MotingApp() {
   // 配色只在读到真实设置之后才动。之前挂载那一刻就按默认设置把书架刷成「霜白」，
   // 设置读出来再翻成用户的颜色——每次打开都闪一次。首帧的颜色由 layout 里的
   // 开机脚本按上次记下的配色提前套好，这里记下这次的，供下次开机用。
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!ready) return;
     const root = document.documentElement;
     root.dataset.readerTheme = settings.theme;
@@ -6370,13 +6379,12 @@ export default function MotingApp() {
     rememberTheme(settings.shellTheme, settings.theme);
   }, [ready, settings.theme, settings.shellTheme]);
 
-  /** 改书目里的几个字段：内存立刻改，库里只写这几个字段（见 updateBookMeta）。 */
+  /** 更新书目但保留列表顺序；最近阅读区自行排序，书库不能随着进度保存跳位。 */
   const patchBookMeta = useCallback(
     (bookId: string, changes: Partial<Omit<BookMeta, "id">>) => {
       setBooks((current) =>
         current
           .map((book) => (book.id === bookId ? { ...book, ...changes } : book))
-          .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
       );
       void updateBookMeta(bookId, changes).catch((error) => reportStorageError("book", error));
     },
@@ -6424,7 +6432,6 @@ export default function MotingApp() {
                 }
               : book;
           })
-          .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
       );
     } catch (error) {
       for (const entry of entries) {
@@ -6889,7 +6896,7 @@ export default function MotingApp() {
 
   // PWA 全屏时 iOS 用 theme-color 给状态栏那条填色。写死一个值的话，
   // 换书架或翻开书后状态栏和页面就裂成两块颜色，看着像没做全屏。
-  useEffect(() => {
+  useLayoutEffect(() => {
     // 设置读出来之前别动：首帧的底色和状态栏颜色由开机脚本按上次的配色套好了。
     if (!ready) return;
     const root = document.documentElement;
