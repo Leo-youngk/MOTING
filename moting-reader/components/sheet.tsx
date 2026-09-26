@@ -28,6 +28,10 @@ let lockedScrollY = 0;
 // position: fixed，这期间的滚动全都不算数，所以跳转的滚动得挪到解锁那一刻再做。
 let scrollAfterUnlock: (() => void) | null = null;
 
+export function pageScrollY() {
+  return scrollLockCount > 0 ? lockedScrollY : window.scrollY;
+}
+
 export function scrollWhenUnlocked(scroll: () => void) {
   if (scrollLockCount > 0) scrollAfterUnlock = scroll;
   else scroll();
