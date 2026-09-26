@@ -59,6 +59,8 @@ test("service worker keeps one prior lazy bundle generation, then prunes it and 
     },
   };
   let html = '<script src="/assets/old.abc.js"></script>';
+  let fullAssets = ["/assets/current.def.js", "/assets/current-lazy.js"];
+  const failures = new Set();
   const context = {
     URL,
     Request,
@@ -76,6 +78,8 @@ test("service worker keeps one prior lazy bundle generation, then prunes it and 
     },
     async fetch(input) {
       const path = new URL(typeof input === "string" ? input : input.url, ORIGIN).pathname;
+      if (failures.has(path)) return new Response("failed", { status: 503 });
+      if (path === "/asset-manifest.json") return Response.json({ assets: fullAssets });
       if (path === "/") return new Response(html, { headers: { "content-type": "text/html" } });
       if (path.startsWith("/assets/")) return new Response(path);
       return new Response("missing", { status: 404 });
@@ -83,10 +87,12 @@ test("service worker keeps one prior lazy bundle generation, then prunes it and 
   };
   vm.runInNewContext(source, context);
 
-  const active = await caches.open("moting-shell-v14");
+  const active = await caches.open("moting-shell-v15");
   await active.put("/__shell-assets.json", new Response(JSON.stringify(["/assets/old.abc.js"])));
   await active.put("/assets/old.abc.js", new Response("old bundle"));
   await active.put("/", new Response('<script src="/assets/old.abc.js"></script>'));
+
+  await active.put("/assets/old-lazy.js", new Response("old lazy bundle"));
 
   const checkUpdate = async () => {
     let pending;
@@ -99,21 +105,35 @@ test("service worker keeps one prior lazy bundle generation, then prunes it and 
   };
 
   html = '<script src="/assets/current.def.js"></script>';
+  failures.add("/assets/current-lazy.js");
   await checkUpdate();
+  assert.match(await (await active.match("/")).text(), /old.abc.js/, "failed precache must keep old shell");
+  assert.ok(await active.match("/assets/old-lazy.js"));
+  failures.clear();
+  await Promise.all([checkUpdate(), checkUpdate()]);
+  assert.ok(await active.match("/assets/old-lazy.js"), "old lazy chunks absent from HTML survive migration");
+  assert.ok(await active.match("/assets/current-lazy.js"), "new lazy chunks are precached for offline use");
   assert.ok(await active.match("/assets/old.abc.js"), "open old tabs can still load a lazy chunk");
   assert.ok(await active.match("/assets/current.def.js"));
 
   html = '<script src="/assets/next.ghi.js"></script>';
+  fullAssets = ["/assets/next.ghi.js", "/assets/next-lazy.js"];
   await checkUpdate();
   assert.equal(await active.match("/assets/old.abc.js"), undefined, "only one old generation is retained");
+  assert.equal(await active.match("/assets/old-lazy.js"), undefined);
+  assert.ok(await active.match("/assets/current-lazy.js"));
   assert.ok(await active.match("/assets/current.def.js"));
   assert.ok(await active.match("/assets/next.ghi.js"));
+  assert.ok(await active.match("/assets/next-lazy.js"));
+  fullAssets = ["/assets/mismatched.js"];
+  await checkUpdate();
+  assert.ok(await active.match("/assets/current-lazy.js"), "mismatched manifests cannot prune working assets");
 
-  await caches.open("moting-shell-v12");
   await caches.open("moting-shell-v13");
+  await caches.open("moting-shell-v14");
   await caches.open("unrelated-cache");
   let activation;
   handlers.get("activate")({ waitUntil(promise) { activation = promise; } });
   await activation;
-  assert.deepEqual(await caches.keys(), ["moting-shell-v14", "moting-shell-v13"]);
+  assert.deepEqual(await caches.keys(), ["moting-shell-v15", "moting-shell-v14", "unrelated-cache"]);
 });

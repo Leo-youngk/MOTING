@@ -765,6 +765,37 @@ export async function saveReadingPositions(
 }
 
 /** 图片可先于正文重试落库；一张失败的插图不应阻塞整本书的同步。 */
+/** 下载完成时重新检查书籍与封面，避免覆盖用户刚换的封面或复活已删除的书。 */
+export async function saveRecoveredCover(bookId: string, coverDataUrl: string): Promise<boolean> {
+  const db = await openDatabase();
+  const transaction = db.transaction(BOOK_STORE, "readwrite");
+  const store = transaction.objectStore(BOOK_STORE);
+  let saved = false;
+  const request = store.get(bookId);
+  request.onsuccess = () => {
+    const current = request.result as BookMeta | undefined;
+    if (!current || current.coverDataUrl) return;
+    store.put({ ...current, coverDataUrl });
+    saved = true;
+  };
+  await transactionDone(transaction);
+  return saved;
+}
+
+export async function saveRecoveredImage(image: BookImage): Promise<boolean> {
+  const db = await openDatabase();
+  const transaction = db.transaction([BOOK_STORE, IMAGE_STORE], "readwrite");
+  let saved = false;
+  const request = transaction.objectStore(BOOK_STORE).get(image.bookId);
+  request.onsuccess = () => {
+    if (!request.result) return;
+    transaction.objectStore(IMAGE_STORE).put(image);
+    saved = true;
+  };
+  await transactionDone(transaction);
+  return saved;
+}
+
 export async function saveBookImages(images: BookImage[]): Promise<void> {
   if (!images.length) return;
   const db = await openDatabase();

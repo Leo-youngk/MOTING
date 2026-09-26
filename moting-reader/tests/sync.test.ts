@@ -554,3 +554,28 @@ test("a session within its last 29 days is renewed on sync, so an active device 
   store.sessions.set(hash, Date.now() - 1);
   assert.equal((await handleSync(syncRequest("pull", { since: 0 }, { cookie }), e)).status, 401);
 });
+
+test("parallel answers stay next to their questions regardless of random ID order", () => {
+  const left = [
+    { id: "turn-10", role: "user" as const, content: "问题A" },
+    { id: "turn-40", replyTo: "turn-10", role: "assistant" as const, content: "回答A" },
+  ];
+  const right = [
+    { id: "turn-20", role: "user" as const, content: "问题B" },
+    { id: "turn-30", replyTo: "turn-20", role: "assistant" as const, content: "回答B" },
+  ];
+  const expected = [...left, ...right];
+  assert.deepEqual(mergeChatTurns(left, right), expected);
+  assert.deepEqual(mergeChatTurns(right, left), expected);
+  assert.deepEqual(mergeChatTurns(expected, right), expected);
+  assert.deepEqual(mergeChatTurns([left[0], ...right, left[1]], expected), expected);
+});
+
+test("legacy conversations preserve question and answer adjacency", () => {
+  const base = [{ role: "user" as const, content: "旧问题" }, { role: "assistant" as const, content: "旧回答" }];
+  const left = [...base, { id: "10", role: "user" as const, content: "A" }, { id: "40", role: "assistant" as const, content: "答A" }];
+  const right = [...base, { id: "20", role: "user" as const, content: "B" }, { id: "30", role: "assistant" as const, content: "答B" }];
+  const merged = mergeChatTurns(left, right);
+  assert.deepEqual(merged.map(t => t.content), ["旧问题", "旧回答", "A", "答A", "B", "答B"]);
+  assert.deepEqual(mergeChatTurns(right, left), merged);
+});

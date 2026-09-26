@@ -5,7 +5,7 @@
 // Workers 每次发版只留新版文件，缓存里的旧页面要是缺了自己那一版的脚本，就再也跑不起来。
 //
 // 图标、manifest 这些文件名不带内容哈希，改了它们要顺手把版本号加一，否则已装的 PWA 永远拿旧的。
-const CACHE_NAME = "moting-shell-v14";
+const CACHE_NAME = "moting-shell-v15";
 const SHELL_FILES = [
   "/manifest.webmanifest",
   "/icon-192.png",
@@ -31,7 +31,13 @@ async function announceShell(target, offline = false) {
   clients.forEach((client) => client.postMessage(message));
 }
 
-async function refreshShell() {
+let refreshing = null;
+function refreshShell() {
+  if (!refreshing) refreshing = refreshShellOnce().finally(() => { refreshing = null; });
+  return refreshing;
+}
+
+async function refreshShellOnce() {
   const response = await fetch("/", { cache: "no-store" });
   const type = response.headers.get("content-type") || "";
   if (!response.ok || !type.includes("text/html")) throw new Error(`shell ${response.status}`);
@@ -39,9 +45,23 @@ async function refreshShell() {
   const assets = [...new Set(html.match(/\/assets\/[^"'\s)<>]+\.(?:js|mjs|css)/g) || [])];
   const cache = await caches.open(CACHE_NAME);
 
+  const manifestResponse = await fetch("/asset-manifest.json", { cache: "no-store" });
+  if (!manifestResponse.ok) throw new Error("asset manifest unavailable");
+  const manifest = await manifestResponse.json();
+  if (!Array.isArray(manifest.assets) || !manifest.assets.length ||
+      manifest.assets.some((path) => typeof path !== "string" || !path.startsWith("/assets/") || path.includes("..")) ||
+      assets.some((path) => !manifest.assets.includes(path))) {
+    throw new Error("shell and asset manifest do not match");
+  }
+  const completeAssets = [...new Set(manifest.assets)];
+  const storedGeneration = await cache.match("/__complete-assets.json");
+  // 首次升级时旧版没有完整清单，保留已缓存分片一代。
+  const before = storedGeneration ? await storedGeneration.json() :
+    (await cache.keys()).map((request) => new URL(request.url).pathname).filter((path) => path.startsWith("/assets/"));
+
   // 这一版要用的文件先存齐。任何一个取不到就整次作罢，缓存里还是完整的上一版。
   await Promise.all(
-    assets.map(async (path) => {
+    completeAssets.map(async (path) => {
       if (await cache.match(path)) return;
       const asset = await fetch(path);
       if (!asset.ok) throw new Error(`${path} ${asset.status}`);
@@ -52,17 +72,16 @@ async function refreshShell() {
 
   // 保存新清单但保留旧哈希资源。仍打开的旧页面可能稍后才触发动态 import，
   // 此时删掉旧分片会把阅读器留在半失效状态。
-  const previous = await cache.match(ASSET_LIST_KEY);
-  const before = previous ? await previous.json().catch(() => []) : [];
-  const changed = before.length !== assets.length || before.some((path) => !assets.includes(path));
+  const changed = before.length !== completeAssets.length || before.some((path) => !completeAssets.includes(path));
+  await cache.put(
+    ASSET_LIST_KEY,
+    new Response(JSON.stringify(assets), { headers: { "content-type": "application/json" } })
+  );
   if (changed) {
-    await cache.put(
-      ASSET_LIST_KEY,
-      new Response(JSON.stringify(assets), { headers: { "content-type": "application/json" } })
-    );
     // Keep one previous asset generation for open tabs, then drop older hashed bundles
     // so repeated deployments cannot grow this cache without a bound.
-    const keep = new Set([...before, ...assets]);
+    await cache.put("/__complete-assets.json", new Response(JSON.stringify(completeAssets)));
+    const keep = new Set([...before, ...completeAssets]);
     const keys = await cache.keys();
     await Promise.all(
       keys
@@ -95,7 +114,7 @@ self.addEventListener("activate", (event) => {
             return version(right) - version(left);
           });
         const keep = new Set([CACHE_NAME, ...oldShells.slice(0, 1)]);
-        return Promise.all(keys.filter((key) => !keep.has(key)).map((key) => caches.delete(key)));
+        return Promise.all(keys.filter((key) => key.startsWith("moting-shell-") && !keep.has(key)).map((key) => caches.delete(key)));
       })
       .then(() => self.clients.claim())
   );
