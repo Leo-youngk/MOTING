@@ -426,23 +426,16 @@ button:disabled {
 .app-frame.is-suspended {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  visibility: hidden;
   pointer-events: none;
 }
 
 .app-tab-content {
   position: fixed;
-  top: 0;
-  right: 0;
-  /* iOS standalone can shorten the layout viewport by a status-bar height.
-     The bottom bar already extends into that gap; the tab's scroll surface
-     must cover the same physical area, including its background. */
-  bottom: calc(-1 * var(--viewport-fill-bottom, 0px));
-  left: 0;
+  inset: 0;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior-y: none;
-  background: radial-gradient(130% 52% at 50% 0%, var(--paper-wash), transparent 68%), var(--paper);
   padding-bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + 28px);
 }
 
@@ -3217,9 +3210,7 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .reader-shell {
-  position: relative;
-  z-index: 1;
-  min-height: calc(100dvh + var(--viewport-fill-bottom, 0px));
+  min-height: 100dvh;
   background: var(--reader-background);
   color: var(--reader-ink);
   /* 书里的浮层玻璃跟着阅读主题走，不跟书架走：夜间读时浮条必须是暗玻璃。 */
@@ -4085,9 +4076,7 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .player-screen {
-  position: relative;
-  z-index: 1;
-  min-height: calc(100dvh + var(--viewport-fill-bottom, 0px));
+  min-height: 100dvh;
   background: var(--paper);
 }
 
