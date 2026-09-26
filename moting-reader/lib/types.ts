@@ -196,6 +196,10 @@ export interface ReaderSettings {
 }
 
 export interface AiChatTurn {
+  /** 稳定轮次 ID；多设备并发聊天合并时用它保留两边的新问题。旧记录可缺省。 */
+  id?: string;
+  /** 回答所对应的问题 ID。 */
+  replyTo?: string;
   role: "user" | "assistant";
   content: string;
   reasoning?: string;
