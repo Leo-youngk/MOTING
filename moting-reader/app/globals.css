@@ -422,8 +422,8 @@ button:disabled {
   min-height: 100dvh;
 }
 
-/* 阅读期间保留书库的 DOM 和组件状态，退出阅读器时直接露出原来的书架。 */
-.app-frame.is-reader-background {
+/* 阅读和听书时保留列表节点，退出详情页时直接露出原来的页面。 */
+.app-frame.is-suspended {
   display: none;
 }
 
