@@ -3204,7 +3204,7 @@ function AiAskPanel({
         >
           <ArrowDown size={18} />
         </button>
-        <div className="ai-chat__input">
+        <div className={`ai-chat__input${turns.length ? " has-history" : ""}`}>
           {/* 从正文划词带进来的原文挂在输入框里，发出去之前一直看得见。 */}
           {isFreshQuote ? <p className="ai-chat__quote">{text}</p> : null}
           <textarea
@@ -3238,9 +3238,7 @@ function AiAskPanel({
                   </button>
                 ))}
               </div>
-            ) : (
-              <span className="ai-chat__context">关于这本书</span>
-            )}
+            ) : null}
             {/* 发送键常驻，没东西可发时置灰：时有时无的话输入框宽度跟着变，字会重新折行。 */}
             <button
               type="button"

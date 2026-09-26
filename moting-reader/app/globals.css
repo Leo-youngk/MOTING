@@ -2259,13 +2259,10 @@ button:disabled {
   position: fixed;
   z-index: 120;
   inset: 0;
-  /* 键盘收起时底边往下探 --viewport-fill-bottom：standalone + black-translucent 下
-     布局视口比物理屏矮一截，不探就会在浮层底下露出一条 body 背景。
-     但那条带子只用来铺背景：它在布局视口之外，能不能完整显示不由我们说了算，
-     内容探进去就会被物理屏齐刷刷切掉（输入卡长高一点就露馅）。用等高的
-     padding 把内容整体挡回可视区内。 */
+  /* iOS standalone 的布局视口有时比物理屏矮一个状态栏。底色填满差值，
+     输入卡只借用其中 16px，让它更贴底，剩余空间仍保护 Home Indicator。 */
   bottom: calc(-1 * var(--viewport-fill-bottom, 0px));
-  padding-bottom: var(--viewport-fill-bottom, 0px);
+  padding-bottom: max(0px, calc(var(--viewport-fill-bottom, 0px) - 16px));
   display: flex;
   flex-direction: column;
   background: var(--paper);
@@ -2438,8 +2435,8 @@ button:disabled {
   width: min(100%, 720px);
   flex-direction: column;
   margin: 0 auto;
-  /* 不给 Home Indicator 留安全区，8px 只是让输入卡的圆角浮起来、不被屏幕圆角切。 */
-  padding: 10px 16px max(12px, env(safe-area-inset-bottom));
+  /* 安全区只留必要的底边距离；外层已补过 iOS 全屏缺口。 */
+  padding: 6px 16px max(8px, calc(env(safe-area-inset-bottom) - 20px));
 }
 
 /* 键盘弹起时底边停在键盘上沿（不再往下探物理屏底，那块已被键盘盖住）。 */
@@ -2456,8 +2453,8 @@ html[data-keyboard-open] .ai-chat__composer {
 .ai-chat__input {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 14px 14px 12px;
+  gap: 8px;
+  padding: 10px 12px 9px;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-xl);
   background: var(--surface);
@@ -2485,6 +2482,27 @@ html[data-keyboard-open] .ai-chat__composer {
   gap: 8px;
 }
 
+/* 已有对话时，只需一行输入和发送；建议提问只出现在空对话。 */
+.ai-chat__input.has-history {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  align-items: end;
+  gap: 8px;
+}
+
+.ai-chat__input.has-history .ai-chat__quote {
+  grid-column: 1 / -1;
+}
+
+.ai-chat__input.has-history textarea {
+  grid-column: 1;
+  align-self: center;
+}
+
+.ai-chat__input.has-history .ai-chat__row {
+  grid-column: 2;
+}
+
 .ai-chat__input textarea {
   width: 100%;
   min-width: 0;
@@ -2501,13 +2519,6 @@ html[data-keyboard-open] .ai-chat__composer {
   resize: none;
 }
 
-.ai-chat__context {
-  min-width: 0;
-  flex: 1;
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
-
 .ai-chat__input textarea::placeholder {
   color: color-mix(in srgb, var(--muted) 85%, transparent);
 }
@@ -2517,6 +2528,7 @@ html[data-keyboard-open] .ai-chat__composer {
   width: 38px;
   height: 38px;
   flex-shrink: 0;
+  margin-left: auto;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-pill);
