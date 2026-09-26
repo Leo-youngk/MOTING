@@ -432,10 +432,17 @@ button:disabled {
 
 .app-tab-content {
   position: fixed;
-  inset: 0;
+  top: 0;
+  right: 0;
+  /* iOS standalone can shorten the layout viewport by a status-bar height.
+     The bottom bar already extends into that gap; the tab's scroll surface
+     must cover the same physical area, including its background. */
+  bottom: calc(-1 * var(--viewport-fill-bottom, 0px));
+  left: 0;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior-y: none;
+  background: radial-gradient(130% 52% at 50% 0%, var(--paper-wash), transparent 68%), var(--paper);
   padding-bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + 28px);
 }
 
