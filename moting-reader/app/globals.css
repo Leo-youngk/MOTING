@@ -426,7 +426,7 @@ button:disabled {
 .app-frame.is-suspended {
   position: fixed;
   inset: 0;
-  visibility: hidden;
+  z-index: 0;
   pointer-events: none;
 }
 
@@ -3217,7 +3217,9 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .reader-shell {
-  min-height: 100dvh;
+  position: relative;
+  z-index: 1;
+  min-height: calc(100dvh + var(--viewport-fill-bottom, 0px));
   background: var(--reader-background);
   color: var(--reader-ink);
   /* 书里的浮层玻璃跟着阅读主题走，不跟书架走：夜间读时浮条必须是暗玻璃。 */
@@ -4083,7 +4085,9 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .player-screen {
-  min-height: 100dvh;
+  position: relative;
+  z-index: 1;
+  min-height: calc(100dvh + var(--viewport-fill-bottom, 0px));
   background: var(--paper);
 }
 

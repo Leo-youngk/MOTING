@@ -199,9 +199,10 @@ export function useAppNavigation(): AppNavigation {
 
   // 回到列表页时把上次滚到哪儿放回去；没记过就是新进来，从头开始。
   useLayoutEffect(() => {
-    if (!keepsScroll(view)) return;
-    // Tabs keep their own scroll surface; only document-scrolling detail pages restore here.
-    window.scrollTo({ top: isTab(view) ? 0 : scrollsRef.current.get(viewKey(view)) ?? 0, behavior: "instant" });
+    // Tab scroll is native to its retained element. Forcing window.scrollTo(0)
+    // during a reader exit makes WebKit resize/repaint the visual viewport again.
+    if (!keepsScroll(view) || isTab(view)) return;
+    window.scrollTo({ top: scrollsRef.current.get(viewKey(view)) ?? 0, behavior: "instant" });
   }, [view]);
 
   return { view, backgroundView, navigate, selectTab, replace, goBack };
