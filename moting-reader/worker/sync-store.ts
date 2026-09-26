@@ -30,14 +30,16 @@ export interface SyncStore {
   dropSession(tokenHash: string): Promise<void>;
   /** 把会话的过期时刻推到 expiresAt(滑动续期)。 */
   renewSession(tokenHash: string, expiresAt: number): Promise<void>;
+  /** 当前已提交的全局 server_at 上界；一次 pull 的所有表都使用同一个快照。 */
+  latestServerAt(): Promise<number>;
   /**
    * 原子写入一批记录:预占 server_at 号段与全部 upsert 在同一事务里完成,
    * 并发的 pull 要么看到整批、要么一条都看不到,游标永远不会跳过还没落库的号。
    * 每条按 LWW 只在 updatedAt 更新时生效。
    */
   applyPush(rows: Array<{ table: SyncTable; row: PushRow }>): Promise<void>;
-  /** server_at >= watermark 的记录,按 server_at 升序,最多 limit 条。 */
-  since(table: SyncTable, watermark: number, limit: number): Promise<SyncRow[]>;
+  /** watermark <= server_at <= through 的记录,按 server_at 升序,最多 limit 条。 */
+  since(table: SyncTable, watermark: number, through: number, limit: number): Promise<SyncRow[]>;
 }
 
 // 各表的真实列名映射:books 的内容列叫 meta,其余叫 data。
@@ -174,6 +176,10 @@ export function createD1Store(db: D1Database): SyncStore {
     async renewSession(tokenHash, expiresAt) {
       await db.prepare("UPDATE auth_tokens SET expires_at = ? WHERE token_hash = ?").bind(expiresAt, tokenHash).run();
     },
+    async latestServerAt() {
+      const row = await db.prepare("SELECT value FROM sync_meta WHERE key = 'server_clock'").first<{ value: number }>();
+      return row ? Number(row.value) : 0;
+    },
     async applyPush(rows) {
       if (!rows.length) return;
       const count = rows.length;
@@ -201,16 +207,16 @@ export function createD1Store(db: D1Database): SyncStore {
       }
       await db.batch(statements);
     },
-    async since(table, watermark, limit) {
+    async since(table, watermark, through, limit) {
       const valueColumn = VALUE_COLUMN[table];
       const keyColumn = KEY_COLUMN[table];
       const { results } = await db
         .prepare(
           `SELECT ${keyColumn} AS key, ${valueColumn} AS data, updated_at, server_at` +
             `${HAS_TOMBSTONE[table] ? ", deleted_at" : ""}${HAS_BOOK_ID[table] ? ", book_id" : ""} ` +
-            `FROM ${table} WHERE server_at >= ? ORDER BY server_at LIMIT ${limit}`
+            `FROM ${table} WHERE server_at >= ? AND server_at <= ? ORDER BY server_at LIMIT ${limit}`
         )
-        .bind(watermark)
+        .bind(watermark, through)
         .all<Record<string, unknown>>();
       return (results ?? []).map((raw) => ({
         key: String(raw.key),

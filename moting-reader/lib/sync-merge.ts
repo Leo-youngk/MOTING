@@ -98,7 +98,9 @@ export function mergeBookMeta<B extends { updatedAt: number; syncReadyAt?: numbe
   local: B | undefined,
   remote: SyncRecord
 ): MergeAction<B> {
-  if (remote.deletedAt) return local ? { op: "delete" } : { op: "keep" };
+  if (remote.deletedAt) {
+    return local && remote.updatedAt > bookPushTime(local) ? { op: "delete" } : { op: "keep" };
+  }
   if (!remote.data || typeof remote.data !== "object") return { op: "keep" };
   const remoteMeta = remote.data as B;
   if (!local) return remoteMeta.syncReadyAt ? { op: "write", value: remoteMeta } : { op: "keep" };
@@ -115,12 +117,74 @@ export function mergeNote<N extends { createdAt: number; updatedAt?: number }>(
   local: N | undefined,
   remote: SyncRecord
 ): MergeAction<N> {
-  if (remote.deletedAt) return local ? { op: "delete" } : { op: "keep" };
+  const localUpdatedAt = local ? local.updatedAt ?? local.createdAt : 0;
+  if (remote.deletedAt) {
+    return local && remote.updatedAt > localUpdatedAt ? { op: "delete" } : { op: "keep" };
+  }
   if (!remote.data || typeof remote.data !== "object") return { op: "keep" };
   const remoteNote = remote.data as N;
-  const localUpdatedAt = local ? local.updatedAt ?? local.createdAt : 0;
   if (local && (remoteNote.updatedAt ?? remoteNote.createdAt) <= localUpdatedAt) return { op: "keep" };
   return { op: "write", value: remoteNote };
+}
+
+export interface MergeableChatTurn {
+  id?: string;
+  role: "user" | "assistant";
+  content: string;
+  reasoning?: string;
+  quote?: string;
+  model?: string;
+}
+
+function chatTurnKey(turn: MergeableChatTurn, index: number): string {
+  // 新记录带随机 id；确定性回退让升级前已经同步的聊天仍能对齐共同历史。
+  return turn.id ?? `legacy:${index}:${JSON.stringify(turn)}`;
+}
+
+/** 合并追加式聊天的两个分支，避免整条聊天按 LWW 丢掉另一台设备的新问题。 */
+export function mergeChatTurns<T extends MergeableChatTurn>(local: T[], remote: T[]): T[] {
+  const localKeys = local.map(chatTurnKey);
+  const remoteKeys = remote.map(chatTurnKey);
+  const turns = new Map<string, T>();
+  const outgoing = new Map<string, Set<string>>();
+  const incoming = new Map<string, number>();
+  const addSequence = (items: T[], keys: string[]) => {
+    items.forEach((turn, index) => {
+      const key = keys[index];
+      const previous = turns.get(key);
+      if (!previous || turn.content.length + (turn.reasoning?.length ?? 0) > previous.content.length + (previous.reasoning?.length ?? 0)) {
+        turns.set(key, turn);
+      }
+      if (!incoming.has(key)) incoming.set(key, 0);
+      if (index === 0) return;
+      const before = keys[index - 1];
+      if (before === key) return;
+      const next = outgoing.get(before) ?? new Set<string>();
+      if (!next.has(key)) {
+        next.add(key);
+        outgoing.set(before, next);
+        incoming.set(key, (incoming.get(key) ?? 0) + 1);
+      }
+    });
+  };
+  addSequence(local, localKeys);
+  addSequence(remote, remoteKeys);
+
+  // 两边的新增轮次组成一个顺序图；拓扑排序保留各自聊天顺序，分支间按 ID 稳定排序。
+  // 已存在的历史序列即使先前合并过，也能与单侧分支再次合并并收敛。
+  const remaining = new Set(turns.keys());
+  const ordered: T[] = [];
+  while (remaining.size) {
+    const available = [...remaining].filter((key) => (incoming.get(key) ?? 0) === 0).sort();
+    // 旧客户端可能写入彼此矛盾的顺序；打破环时按固定 ID 选点，保证双方得出同一顺序。
+    const key = available[0] ?? [...remaining].sort()[0];
+    remaining.delete(key);
+    ordered.push(turns.get(key)!);
+    for (const next of outgoing.get(key) ?? []) {
+      if (remaining.has(next)) incoming.set(next, Math.max(0, (incoming.get(next) ?? 0) - 1));
+    }
+  }
+  return ordered;
 }
 
 /** 位置:纯 LWW,谁后保存听谁的。 */

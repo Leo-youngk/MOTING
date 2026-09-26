@@ -14,7 +14,7 @@ const SHELL_FILES = [
   "/apple-touch-icon.png",
   "/bear-mark.png",
 ];
-/** 记着缓存里那份页面用到了哪些 /assets/ 文件，换版时据此清掉上一版的。 */
+/** 记着缓存里那份页面用到了哪些 /assets/ 文件，用来提示当前页面有可用更新。 */
 const ASSET_LIST_KEY = "/__shell-assets.json";
 
 /** 缓存里那份页面用到的 /assets/ 文件。页面拿它跟自己开机时加载的比，多出来的就说明有新版。 */
@@ -50,23 +50,25 @@ async function refreshShell() {
   );
   await cache.put("/", response);
 
-  // 换了版才清：上一版的脚本（包括按需加载的分片）都不再需要。
-  // 这一刻还开着的旧页面，按需分片开机时已经预取进内存；真漏了，页面会自己刷新到新版。
+  // 保存新清单但保留旧哈希资源。仍打开的旧页面可能稍后才触发动态 import，
+  // 此时删掉旧分片会把阅读器留在半失效状态。
   const previous = await cache.match(ASSET_LIST_KEY);
   const before = previous ? await previous.json().catch(() => []) : [];
   const changed = before.length !== assets.length || before.some((path) => !assets.includes(path));
   if (changed) {
-    const keep = new Set(assets);
+    await cache.put(
+      ASSET_LIST_KEY,
+      new Response(JSON.stringify(assets), { headers: { "content-type": "application/json" } })
+    );
+    // Keep one previous asset generation for open tabs, then drop older hashed bundles
+    // so repeated deployments cannot grow this cache without a bound.
+    const keep = new Set([...before, ...assets]);
     const keys = await cache.keys();
     await Promise.all(
       keys
         .map((request) => new URL(request.url).pathname)
         .filter((path) => path.startsWith("/assets/") && !keep.has(path))
         .map((path) => cache.delete(path))
-    );
-    await cache.put(
-      ASSET_LIST_KEY,
-      new Response(JSON.stringify(assets), { headers: { "content-type": "application/json" } })
     );
   }
 }
@@ -85,13 +87,16 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) =>
-        Promise.all(
-          keys
-            .filter((key) => key !== CACHE_NAME)
-            .map((key) => caches.delete(key))
-        )
-      )
+      .then((keys) => {
+        const oldShells = keys
+          .filter((key) => key.startsWith("moting-shell-") && key !== CACHE_NAME)
+          .sort((left, right) => {
+            const version = (key) => Number(/-v(\d+)$/.exec(key)?.[1] ?? 0);
+            return version(right) - version(left);
+          });
+        const keep = new Set([CACHE_NAME, ...oldShells.slice(0, 1)]);
+        return Promise.all(keys.filter((key) => !keep.has(key)).map((key) => caches.delete(key)));
+      })
       .then(() => self.clients.claim())
   );
 });
@@ -151,20 +156,26 @@ self.addEventListener("fetch", (event) => {
   }
 
   event.respondWith(
-    caches.match(request).then(
-      (cached) =>
-        cached ||
-        fetch(request).then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            event.waitUntil(
-              caches.open(CACHE_NAME)
-                .then((cache) => cache.put(request, copy))
-                .catch(() => undefined)
-            );
-          }
-          return response;
-        })
-    )
+    caches
+      .open(CACHE_NAME)
+      .then((currentCache) => currentCache.match(request))
+      .then(async (currentCached) => {
+        const cached = currentCached || (await caches.match(request));
+        if (cached) return cached;
+        const response = await fetch(request);
+        if (response.status === 404 && url.pathname.startsWith("/assets/")) {
+          const client = event.clientId ? await self.clients.get(event.clientId) : null;
+          client?.postMessage({ type: "shell-expired" });
+        }
+        if (response.ok) {
+          const copy = response.clone();
+          event.waitUntil(
+            caches.open(CACHE_NAME)
+              .then((cache) => cache.put(request, copy))
+              .catch(() => undefined)
+          );
+        }
+        return response;
+      })
   );
 });

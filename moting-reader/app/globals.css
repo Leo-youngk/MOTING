@@ -3685,19 +3685,8 @@ html[data-keyboard-open] .bottom-bar {
   text-wrap: pretty;
 }
 
-/* 连续阅读只让视口附近的段落参与布局，分页模式保留完整多栏测量。
-   这条一度被删过，理由是「120px 占位失真会让文档高度抖动、iOS 没有 scroll anchoring
-   会把抖动变成正文往下掉」——那个结论是拿 scrollY 当判据得出来的，错的。
-   改用「观察点句子在视口里的位移」重测：overflow-anchor:none 下滚 300 帧、跨章 5 次，
-   正文跳动 0px。content-visibility 有 relevancy margin，段落在进入视口之前就渲染好了，
-   撑开永远发生在视口下方，抖的是滚动条长度，不是阅读位置。
-   删掉它的代价倒是实测出来了：接章那一帧要为新挂上来的一整章做完整布局，
-   41.5ms 均 / 61ms 最差（线上生产构建），滑到下一章时肉眼可见地顿一下；加回来是 6.7ms。
-   锚点命中率两种情况都是 98%，没有副作用。 */
-.reader-shell.is-scroll .reader-article .reader-block {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
-}
+/* 连续阅读保持当前挂载章节的正文完整可见，避免浏览器把段落延迟绘制成「滑到哪才出现」。
+   分页模式和滚动模式共用 DOM；长书通过按章挂载控制总量，不用行高占位猜段落高度。 */
 
 .reader-article .reader-block.is-heading {
   margin: 2em 0 0.9em;

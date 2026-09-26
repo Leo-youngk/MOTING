@@ -225,9 +225,8 @@ async function handlePush(request: Request, { store }: Resolved): Promise<Respon
 }
 
 /**
- * 增量拉取,跨表按 server_at 统一分页。server_at 全库单调唯一,
- * 所以「各表各取前 N+1 条 → 合并排序 → 取前 N 条」得到的正是全局前 N 条;
- * 下一页从最后一条的 server_at + 1 开始,不重不漏。
+ * 增量拉取,跨表按 server_at 统一分页。先固定一个已提交上界，再查询每张表；
+ * 并发写入会落在这个上界之后，不能在某张表已查完后插进本页并被游标越过。
  */
 async function handlePull(request: Request, { store }: Resolved): Promise<Response> {
   const session = await checkSession(request, store);
@@ -235,10 +234,11 @@ async function handlePull(request: Request, { store }: Resolved): Promise<Respon
   const body = await readBody(request, 4096);
   const since = Number(body.since ?? 0);
   if (!Number.isSafeInteger(since) || since < 0) throw new SyncError("同步水位无效");
+  const through = await store.latestServerAt();
 
   const candidates: Array<{ name: string; row: SyncRow }> = [];
   for (const [name, config] of Object.entries(TABLES)) {
-    for (const row of await store.since(config.table, since, PULL_PAGE_ROWS + 1)) candidates.push({ name, row });
+    for (const row of await store.since(config.table, since, through, PULL_PAGE_ROWS + 1)) candidates.push({ name, row });
   }
   candidates.sort((a, b) => a.row.serverAt - b.row.serverAt);
 
