@@ -427,6 +427,11 @@ button:disabled {
   display: none;
 }
 
+/* 主 Tab 在详情页下面保留原节点，退出时无需重建列表和封面。 */
+.app-tab-content.is-suspended {
+  display: none;
+}
+
 .app-content {
   min-height: 100dvh;
   padding-bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + 28px);
@@ -2250,7 +2255,7 @@ button:disabled {
 
 .ai-chat {
   /* 顶栏的高度（含刘海区）。消息区的上内边距、最新一问的最小高度都按它算。 */
-  --chat-top: calc(env(safe-area-inset-top) + 50px);
+  --chat-top: calc(env(safe-area-inset-top) + 68px);
   position: fixed;
   z-index: 120;
   inset: 0;
@@ -2264,65 +2269,45 @@ button:disabled {
   display: flex;
   flex-direction: column;
   background: var(--paper);
-  animation: fade-in var(--dur-fast) ease both;
 }
 
-/* 顶栏一直都在，不随滚动出没。消息从它底下滚过去，所以是毛玻璃——跟底栏、
-   迷你播放条一样是浮在内容上面的那一层。 */
+/* 轻量顶栏：左边收起，右边只标记当前书籍。 */
 .ai-chat__bar {
   position: absolute;
   z-index: 2;
   top: 0;
   right: 0;
   left: 0;
-  display: grid;
+  display: flex;
   height: var(--chat-top);
-  grid-template-columns: 52px minmax(0, 1fr) 52px;
   align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-inline: 18px;
   padding-top: env(safe-area-inset-top);
-  border-bottom: 0.5px solid var(--line-soft);
-  background: var(--glass-fill);
-  backdrop-filter: var(--glass-blur);
+  background: var(--paper);
 }
 
 .ai-chat__title {
-  display: flex;
-  min-width: 0;
-  grid-column: 2;
-  flex-direction: column;
-  align-items: center;
-  gap: 1px;
-}
-
-.ai-chat__title strong {
   overflow: hidden;
-  max-width: 100%;
-  color: var(--ink);
-  font-size: var(--text-lg);
-  font-weight: 600;
-  line-height: 1.3;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ai-chat__title span {
-  color: var(--muted);
-  font-size: var(--text-xs);
-  line-height: 1.3;
-}
-
 .ai-chat__close {
   display: inline-flex;
-  width: 36px;
-  height: 36px;
-  grid-column: 3;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  justify-self: center;
   padding: 0;
+  border: 1px solid var(--line-soft);
   border-radius: var(--radius-pill);
   background: var(--surface-strong);
-  box-shadow: var(--shadow-control);
   color: var(--ink);
 }
 
@@ -2362,46 +2347,65 @@ button:disabled {
   margin-top: 20px;
 }
 
-/* 还没聊过：标题和起手提问放在消息区正中。 */
+/* 空对话留一整块安静的空间，起手提问留在输入卡里。 */
 .ai-chat__intro {
   display: flex;
+  align-items: center;
   flex-direction: column;
-  gap: 12px;
+  gap: 22px;
   margin: auto 0;
-  padding-bottom: 24px;
+  padding: 24px 0 48px;
+  text-align: center;
+}
+
+.ai-chat__mark {
+  display: block;
+  width: 60px;
+  height: 60px;
+}
+
+.ai-chat__mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .ai-chat__intro strong {
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: var(--text-3xl);
-  font-weight: 500;
+  font-size: var(--text-2xl);
+  font-weight: 600;
   letter-spacing: -0.03em;
 }
 
-.ai-chat__intro p {
-  margin: -4px 0 6px;
-  color: var(--muted);
-  font-size: var(--text-base);
-  line-height: 1.65;
-}
-
-/* 起手提问：拿真实的书名章节拼出来的三行，顺手就能点。 */
+/* 建议提问横排收进输入卡，不额外占用空白区。 */
 .ai-chat__starters {
   display: flex;
-  flex-direction: column;
+  min-width: 0;
+  flex: 1;
   gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ai-chat__starters::-webkit-scrollbar {
+  display: none;
 }
 
 .ai-chat__starter {
-  padding: 15px 17px;
+  flex: 0 0 auto;
+  max-width: 60%;
+  padding: 7px 12px;
   border: 1px solid var(--line-soft);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  color: var(--ink);
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-deep);
   font-family: var(--font-sans);
-  font-size: var(--text-base);
-  text-align: left;
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ai-chat__starter:active {
@@ -2412,6 +2416,7 @@ button:disabled {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+  max-width: 430px;
   margin: 0;
   padding: 14px 16px;
   border: 1px solid var(--line-soft);
@@ -2434,7 +2439,7 @@ button:disabled {
   flex-direction: column;
   margin: 0 auto;
   /* 不给 Home Indicator 留安全区，8px 只是让输入卡的圆角浮起来、不被屏幕圆角切。 */
-  padding: 8px 16px;
+  padding: 10px 16px max(12px, env(safe-area-inset-bottom));
 }
 
 /* 键盘弹起时底边停在键盘上沿（不再往下探物理屏底，那块已被键盘盖住）。 */
@@ -2451,10 +2456,11 @@ html[data-keyboard-open] .ai-chat__composer {
 .ai-chat__input {
   display: flex;
   flex-direction: column;
-  padding: 6px 6px 6px 18px;
-  border-radius: 26px;
+  gap: 14px;
+  padding: 14px 14px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-xl);
   background: var(--surface);
-  box-shadow: var(--shadow-card);
 }
 
 /* 从正文划词带进来的原文：挂在输入框里，最多两行。 */
@@ -2474,18 +2480,17 @@ html[data-keyboard-open] .ai-chat__composer {
 
 .ai-chat__row {
   display: flex;
-  align-items: flex-end;
+  min-width: 0;
+  align-items: center;
   gap: 8px;
 }
 
-/* flex 行里必须走 flex+min-width:0。用 width:100% 的话它按整个容器宽度算，
-   发送键那一格被算进去，自动增高读到的 scrollHeight 直接虚高两行。 */
 .ai-chat__input textarea {
+  width: 100%;
   min-width: 0;
-  flex: 1;
   min-height: 26px;
   max-height: 140px;
-  padding: 8px 0;
+  padding: 2px 0;
   border: 0;
   outline: 0;
   background: transparent;
@@ -2494,6 +2499,13 @@ html[data-keyboard-open] .ai-chat__composer {
   font-size: var(--text-lg);
   line-height: 1.5;
   resize: none;
+}
+
+.ai-chat__context {
+  min-width: 0;
+  flex: 1;
+  color: var(--muted);
+  font-size: var(--text-xs);
 }
 
 .ai-chat__input textarea::placeholder {

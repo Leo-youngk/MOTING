@@ -3146,20 +3146,17 @@ function AiAskPanel({
       aria-modal="true"
       aria-label="问 AI"
     >
-      {/* 顶栏一直都在：书名居中、关闭在右。它浮在消息上面，消息从它底下滚过去。 */}
+      {/* 顶栏只留返回和书名，聊天时把空间交给正文。 */}
       <header className="ai-chat__bar">
-        <div className="ai-chat__title">
-          <strong>{displayTitle(book.title)}</strong>
-          <span>AI 对话</span>
-        </div>
         <button
           type="button"
           className="ai-chat__close"
           aria-label="关闭"
           onClick={onClose}
         >
-          <X size={20} />
+          <ChevronDown size={23} />
         </button>
+        <span className="ai-chat__title">{displayTitle(book.title)}</span>
       </header>
 
       <div
@@ -3175,30 +3172,14 @@ function AiAskPanel({
         <div className="ai-chat__thread" ref={threadRef}>
           {!turns.length ? (
             <div className="ai-chat__intro">
-              <strong>{isFreshQuote ? "聊聊这段话" : "聊聊这本书"}</strong>
-              {/* 没配模型时下面那张提示卡已经把话说完了，别再来一句同义的。 */}
-              {configured && !isFreshQuote ? (
-                <p>《{displayTitle(book.title)}》里的观点、人物、细节，想到哪问到哪。</p>
-              ) : null}
-              {configured ? (
-                <div className="ai-chat__starters">
-                  {starterPrompts(book, chapter, isFreshQuote).map((preset) => (
-                    <button
-                      type="button"
-                      key={preset}
-                      className="ai-chat__starter"
-                      onClick={() => void ask(preset)}
-                    >
-                      {preset}
-                    </button>
-                  ))}
-                </div>
-              ) : (
+              <BearMark className="ai-chat__mark" />
+              <strong>{isFreshQuote ? "这段话，想聊些什么？" : "你好，想聊聊这本书吗？"}</strong>
+              {!configured ? (
                 <p className="ai-chat__unset">
                   <Layers size={15} />
                   还没配模型。去主页右上角的设置里，「AI 助手」那一栏填一次就好。
                 </p>
-              )}
+              ) : null}
             </div>
           ) : null}
 
@@ -3226,28 +3207,40 @@ function AiAskPanel({
         <div className="ai-chat__input">
           {/* 从正文划词带进来的原文挂在输入框里，发出去之前一直看得见。 */}
           {isFreshQuote ? <p className="ai-chat__quote">{text}</p> : null}
+          <textarea
+            ref={inputRef}
+            rows={1}
+            placeholder={isFreshQuote ? "留空就是让 AI 讲讲这段话" : "发消息…"}
+            value={question}
+            onChange={(event) => {
+              setQuestion(event.target.value);
+              event.currentTarget.style.height = "auto";
+              event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 180)}px`;
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                void ask();
+              }
+            }}
+          />
           <div className="ai-chat__row">
-            <textarea
-              ref={inputRef}
-              rows={1}
-              placeholder={isFreshQuote ? "留空就是让 AI 讲讲这段话" : "问问这本书…"}
-              value={question}
-              onChange={(event) => {
-                setQuestion(event.target.value);
-                event.currentTarget.style.height = "auto";
-                event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 180)}px`;
-              }}
-              onKeyDown={(event) => {
-                if (
-                  event.key === "Enter" &&
-                  !event.shiftKey &&
-                  !event.nativeEvent.isComposing
-                ) {
-                  event.preventDefault();
-                  void ask();
-                }
-              }}
-            />
+            {configured && !turns.length ? (
+              <div className="ai-chat__starters" aria-label="建议提问">
+                {starterPrompts(book, chapter, isFreshQuote).map((preset) => (
+                  <button
+                    type="button"
+                    key={preset}
+                    className="ai-chat__starter"
+                    onClick={() => void ask(preset)}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span className="ai-chat__context">关于这本书</span>
+            )}
             {/* 发送键常驻，没东西可发时置灰：时有时无的话输入框宽度跟着变，字会重新折行。 */}
             <button
               type="button"
@@ -5912,7 +5905,7 @@ export default function MotingApp() {
   const [sessions, setSessions] = useState<ReadingSession[]>([]);
   // 导航接在 History API 上：返回回到来处、刷新/被系统回收后还在原地、
   // 系统返回手势也能用。切板块是平级移动，下钻才进历史栈。
-  const { view, navigate, selectTab, replace: replaceView, goBack } =
+  const { view, backgroundView, navigate, selectTab, replace: replaceView, goBack } =
     useAppNavigation();
   const [ready, setReady] = useState(false);
   // 老用户第一次打开新版时，本地库要把正文从书目里搬出去，这一次会多等几秒。
@@ -7309,26 +7302,12 @@ export default function MotingApp() {
     );
   };
 
-  const activeMainView: MainView =
-    view.name === "reader" || view.name === "find"
-      ? "library"
-      : view.name === "player"
-        ? "listen"
-        : view.name === "book-notes"
-          ? "notes"
-          : view.name === "history" || view.name === "store" || view.name === "settings"
-            ? "home"
-            : view.name;
+  const activeMainView: MainView = backgroundView;
 
-  // 阅读器和播放器打开时保留各自的列表。返回后搜索、封面和滚动位置
-  // 都沿用原来的节点，避免列表重新挂载造成一次明显的闪动。
-  const frameView =
-    view.name === "reader"
-      ? ({ name: "library" } as const)
-      : view.name === "player"
-        ? ({ name: "listen" } as const)
-        : view;
-  const frameSuspended = view.name === "reader" || view.name === "player";
+  // 详情页打开时保留真正的来处；可能从任意 Tab 进入同一本书。
+  const frameView = backgroundView;
+  const frameSuspended = view.name === "reader" || view.name === "player" || view.name === "settings";
+  const tabSuspended = view.name === "book-notes" || view.name === "history" || view.name === "store" || view.name === "find";
 
   if (!ready) {
     // 书目读出来之前只有底色，颜色由 layout 里的开机脚本按上次的配色提前套好。
@@ -7437,7 +7416,8 @@ export default function MotingApp() {
           </div>
 
           <section className="app-content">
-            {frameView.name === "home" ? (
+            <div className={`app-tab-content${tabSuspended ? " is-suspended" : ""}`} aria-hidden={tabSuspended} inert={tabSuspended}>
+            {frameView === "home" ? (
               <HomeScreen
                 books={books}
                 stats={stats}
@@ -7454,12 +7434,7 @@ export default function MotingApp() {
                 }
                 onSearchStore={(query) => navigate({ name: "store", query })}
               />
-            ) : frameView.name === "history" ? (
-              <HistoryScreen
-                sessions={sessions}
-                onBack={() => goBack({ name: "home" })}
-              />
-            ) : frameView.name === "library" ? (
+            ) : frameView === "library" ? (
               <LibraryScreen
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
@@ -7470,49 +7445,12 @@ export default function MotingApp() {
                 onOpenMetadata={setMetadataBook}
                 onDelete={setDeleteTarget}
               />
-            ) : frameView.name === "store" ? (
-              <div className="screen">
-                <Bookstore
-                  key={frameView.query ?? ""}
-                  books={books}
-                  initialBookId={frameView.bookId ?? ""}
-                  initialQuery={frameView.query ?? ""}
-                  onBack={() => goBack({ name: "home" })}
-                  onFindBook={(title, author) =>
-                    navigate({ name: "find", query: bookSearchQuery(title, author) })
-                  }
-                />
-              </div>
-            ) : frameView.name === "find" ? (
-              <OnlineLibrary
-                key={frameView.query}
-                initialQuery={frameView.query}
-                books={books}
-                onImport={handleOnlineImport}
-                onOpen={(book) => openReader(book)}
-                onBack={() => goBack({ name: "library" })}
-                onToast={showToast}
-              />
-            ) : frameView.name === "listen" ? (
+            ) : frameView === "listen" ? (
               <ListenScreen
                 books={books}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}
               />
-            ) : frameView.name === "book-notes" ? (
-              selectedBook ? (
-                <BookNotesScreen
-                  book={selectedBook}
-                  notes={selectedBookNotes}
-                  onBack={() => goBack({ name: "library" })}
-                  onOpen={(note) => void openNote(note)}
-                  onDelete={deleteBookNote}
-                  onEditThought={(note) => {
-                    setThoughtTarget(note);
-                    setThoughtDraft(note.thought ?? "");
-                  }}
-                />
-              ) : null
             ) : (
               <NotesScreen
                 notes={notes}
@@ -7522,6 +7460,45 @@ export default function MotingApp() {
                 onOpenChat={setChatBook}
               />
             )}
+            </div>
+            {view.name === "history" ? (
+              <HistoryScreen sessions={sessions} onBack={() => goBack({ name: "home" })} />
+            ) : view.name === "store" ? (
+              <div className="screen">
+                <Bookstore
+                  key={view.query ?? ""}
+                  books={books}
+                  initialBookId={view.bookId ?? ""}
+                  initialQuery={view.query ?? ""}
+                  onBack={() => goBack({ name: "home" })}
+                  onFindBook={(title, author) =>
+                    navigate({ name: "find", query: bookSearchQuery(title, author) })
+                  }
+                />
+              </div>
+            ) : view.name === "find" ? (
+              <OnlineLibrary
+                key={view.query}
+                initialQuery={view.query}
+                books={books}
+                onImport={handleOnlineImport}
+                onOpen={(book) => openReader(book)}
+                onBack={() => goBack({ name: "library" })}
+                onToast={showToast}
+              />
+            ) : view.name === "book-notes" && selectedBook ? (
+              <BookNotesScreen
+                book={selectedBook}
+                notes={selectedBookNotes}
+                onBack={() => goBack({ name: "notes" })}
+                onOpen={(note) => void openNote(note)}
+                onDelete={deleteBookNote}
+                onEditThought={(note) => {
+                  setThoughtTarget(note);
+                  setThoughtDraft(note.thought ?? "");
+                }}
+              />
+            ) : null}
           </section>
 
           {activeBook ? (

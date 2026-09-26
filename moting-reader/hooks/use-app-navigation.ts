@@ -64,6 +64,8 @@ function readSaved(): AppView | null {
 
 export interface AppNavigation {
   view: AppView;
+  /** 当前详情页下方仍保留的主 Tab。 */
+  backgroundView: MainView;
   /** 下钻：进历史栈，返回时能回到来处。 */
   navigate: (next: AppView) => void;
   /** 切板块：平级移动，不进历史栈。 */
@@ -85,6 +87,7 @@ export function useAppNavigation(): AppNavigation {
   // SSR 阶段没有 localStorage，初值只能是主页；真正的恢复放到挂载后做，
   // 否则服务端和客户端首帧对不上会触发 hydration 报错。
   const [view, setView] = useState<AppView>({ name: "home" });
+  const [backgroundView, setBackgroundView] = useState<MainView>("home");
   const viewRef = useRef<AppView>(view);
   const scrollsRef = useRef(new Map<string, number>());
   /** 本会话自己压进 history 的层数。为 0 时再 back 就退出应用了，得自己兜住。 */
@@ -100,6 +103,7 @@ export function useAppNavigation(): AppNavigation {
   const apply = useCallback((next: AppView) => {
     viewRef.current = next;
     setView(next);
+    if (isTab(next)) setBackgroundView(next.name as MainView);
     try {
       window.localStorage.setItem(VIEW_KEY, JSON.stringify(next));
     } catch {
@@ -185,6 +189,7 @@ export function useAppNavigation(): AppNavigation {
       return;
     }
     const parent = parentOf(saved);
+    setBackgroundView(isTab(parent) ? (parent.name as MainView) : "home");
     window.history.replaceState({ view: parent, depth: 0 }, "");
     depthRef.current = 1;
     window.history.pushState({ view: saved, depth: 1 }, "");
@@ -198,5 +203,5 @@ export function useAppNavigation(): AppNavigation {
     window.scrollTo(0, scrollsRef.current.get(viewKey(view)) ?? 0);
   }, [view]);
 
-  return { view, navigate, selectTab, replace, goBack };
+  return { view, backgroundView, navigate, selectTab, replace, goBack };
 }

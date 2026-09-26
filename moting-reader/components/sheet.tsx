@@ -5,6 +5,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -36,7 +37,7 @@ export function scrollWhenUnlocked(scroll: () => void) {
 // 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
 // iOS standalone 下 overflow: hidden 拦不住 focus 触发的整页上推，只有 position: fixed 拦得住。
 export function useScrollLock() {
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (scrollLockCount++ === 0) {
       lockedScrollY = window.scrollY;
       document.body.style.top = `${-lockedScrollY}px`;
