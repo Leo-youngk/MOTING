@@ -53,8 +53,10 @@ export function useAppUpdate() {
     const onMessage = (event: MessageEvent) => {
       const data = event.data as { type?: string; assets?: string[]; offline?: boolean } | null;
       if (data?.type === "shell-expired") {
-        // 旧页面引用的哈希分片已被源站回收时，重新导航到缓存中的完整新版外壳。
-        location.reload();
+        // Missing old chunks must not reload underneath a reader, draft or modal.
+        // Fetch a complete shell and let the existing update action activate it.
+        setStatus("available");
+        request();
         return;
       }
       if (data?.type !== "shell" || !Array.isArray(data.assets)) return;
