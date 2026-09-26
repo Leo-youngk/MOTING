@@ -3701,6 +3701,9 @@ html[data-keyboard-open] .bottom-bar {
    跳转落地后的残差由 holdInPlace() 按回去。 */
 .reader-shell.is-scroll .reader-article .reader-block {
   content-visibility: auto;
+  /* 下一条要是浏览器解析不了，至少还有个固定占位，不会塌成 0 高——
+     塌成 0 的话一整章都挤在视口上方一点点，往上一滑就连着接好几章。 */
+  contain-intrinsic-size: auto 120px;
   contain-intrinsic-size: auto
     calc(
       (var(--chars, 60) / var(--reader-cpl, 18) + 0.5) *

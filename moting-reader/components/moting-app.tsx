@@ -3438,6 +3438,41 @@ function AiInlineAsk({
   );
 }
 
+function readPageViewport() {
+  if (typeof window === "undefined") return { width: 390, height: 844 };
+  const width = window.innerWidth;
+  // 手机上按物理屏算：Safari 的地址栏、工具栏随滑动伸缩，打开目录时又会展开，
+  // innerHeight 一直在变。拿它估页码，同一本书一会儿 645 页、一会儿 703 页。
+  if (window.matchMedia?.("(pointer: coarse)").matches && window.screen) {
+    const long = Math.max(window.screen.width, window.screen.height);
+    const short = Math.min(window.screen.width, window.screen.height);
+    return { width, height: width > window.innerHeight ? short : long };
+  }
+  return { width, height: window.innerHeight };
+}
+
+/**
+ * 估页码用的视口尺寸。只在宽度变了（转屏、分屏、拖窗口）时才换，
+ * 高度的伸缩不算——那只是工具栏收起展开，排版并没有变。
+ */
+function usePageViewport() {
+  const [viewport, setViewport] = useState(readPageViewport);
+  useEffect(() => {
+    const onResize = () =>
+      setViewport((current) => {
+        const next = readPageViewport();
+        return Math.abs(next.width - current.width) > 1 ? next : current;
+      });
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+    };
+  }, []);
+  return viewport;
+}
+
 /** 跳转落地后最多盯这么久。 */
 const HOLD_MS = 1500;
 /** 连续这么久没再被推动，就算落稳了，提前收手。 */
@@ -4799,6 +4834,8 @@ function ReaderScreen({
   }, []);
   const handleInlineClose = useCallback(() => setInlineAsk(null), []);
 
+  const pageViewport = usePageViewport();
+
   const readerStyle = {
     "--reader-font-size": `${settings.fontSize}px`,
     "--reader-line-height": String(settings.lineHeight),
@@ -4818,14 +4855,10 @@ function ReaderScreen({
     [book, livePosition]
   );
 
-  // 目录与页脚用的全书绝对页码：按当前排版估算，改字号／转窗会跟着重算。
+  // 目录与页脚用的全书绝对页码：按当前排版估算，改字号／转屏会跟着重算。
   const pagination = useMemo(
-    () =>
-      estimatePagination(book, settings, {
-        width: typeof window === "undefined" ? 390 : window.innerWidth,
-        height: typeof window === "undefined" ? 844 : window.innerHeight,
-      }),
-    [book, settings]
+    () => estimatePagination(book, settings, pageViewport),
+    [book, settings, pageViewport]
   );
   const currentPage = pageAt(
     pagination,
