@@ -594,52 +594,71 @@ export interface ChapterRange {
   end: number;
 }
 
+/** 连续阅读窗口的一步调整。一次只做一件事，做完重新量一遍再决定下一步。 */
+export type ChapterWindowAction =
+  | { kind: "prime"; index: number }
+  | { kind: "prepend" }
+  | { kind: "append" }
+  | { kind: "trim-start" }
+  | { kind: "trim-end" };
+
 /**
- * 正文两端的哨兵进入缓冲区后，算出下一次该挂哪几章。
+ * 滚动停下来之后，决定连续阅读窗口下一步该做什么。
  *
- * 摘章有个不显然的前提：被摘掉的那一章必须整个退到缓冲区之外。否则补偿完滚动位置，
- * 另一头的哨兵会立刻进区，于是接一章、摘一章来回抖。所以这里要拿两端章节的实际
- * 位置来判断，光看挂了几章是不够的。
+ * 只在停稳时调用：接上一章、摘掉远处的章、把某一章整章排版（prime），都会改变视口上方
+ * 的高度，得靠 scrollBy 补偿。iOS 惯性滚动期间脚本发的滚动会被丢掉，补偿丢了正文就整章
+ * 地跳（实测 6000～18000px）。停稳时补偿在同一帧里完成，读者看不到。
+ *
+ * 优先级：先把视口附近没排版的章排好（往上翻时它们不会再被撑开），再补够上下的缓冲，
+ * 再排远处的章，最后摘掉远到用不上的章。摘章的距离要比缓冲大一截，
+ * 否则摘完另一头又不够了，会接一章、摘一章来回抖。
  */
-export function nextChapterRange(
-  current: ChapterRange,
-  input: {
-    lastChapter: number;
-    hitStart: boolean;
-    hitEnd: boolean;
-    /** 窗口首章相对视口的下边缘，取不到时给 null，表示不确定、别摘。 */
-    firstBottom: number | null;
-    /** 窗口末章相对视口的上边缘。 */
-    lastTop: number | null;
-    viewportHeight: number;
-    margin: number;
-    windowSize: number;
-  }
-): ChapterRange {
-  const mounted = current.end - current.start + 1;
-  const full = mounted >= input.windowSize;
+export function planChapterWindow(input: {
+  range: ChapterRange;
+  lastChapter: number;
+  primed: ReadonlySet<number>;
+  /** 挂着的每一章相对视口的上下边缘，按章序。 */
+  sections: { index: number; top: number; bottom: number }[];
+  viewportHeight: number;
+  /** 视口上方、下方各要备好多高的正文。 */
+  buffer: number;
+  /** 整章离视口超过这么远就摘掉。 */
+  trimDistance: number;
+}): ChapterWindowAction | null {
+  const { range, lastChapter, primed, sections, viewportHeight, buffer } = input;
+  if (!sections.length) return null;
 
-  if (input.hitEnd && current.end < input.lastChapter) {
-    const trim =
-      full && input.firstBottom !== null && input.firstBottom < -input.margin;
-    return {
-      start: trim ? current.start + 1 : current.start,
-      end: current.end + 1,
-    };
-  }
+  const distance = (section: { top: number; bottom: number }) =>
+    section.bottom < 0
+      ? -section.bottom
+      : section.top > viewportHeight
+        ? section.top - viewportHeight
+        : 0;
+  const unprimed = sections
+    .filter((section) => !primed.has(section.index))
+    .sort((a, b) => distance(a) - distance(b));
 
-  if (input.hitStart && current.start > 0) {
-    const trim =
-      full &&
-      input.lastTop !== null &&
-      input.lastTop > input.viewportHeight + input.margin;
-    return {
-      start: current.start - 1,
-      end: trim ? current.end - 1 : current.end,
-    };
+  const nearest = unprimed[0];
+  if (nearest && distance(nearest) <= buffer) {
+    return { kind: "prime", index: nearest.index };
   }
 
-  return current;
+  const first = sections[0];
+  const last = sections[sections.length - 1];
+  if (-first.top < buffer && range.start > 0) return { kind: "prepend" };
+  if (last.bottom - viewportHeight < buffer && range.end < lastChapter) {
+    return { kind: "append" };
+  }
+
+  if (nearest) return { kind: "prime", index: nearest.index };
+
+  if (sections.length > 1 && first.bottom < -input.trimDistance) {
+    return { kind: "trim-start" };
+  }
+  if (sections.length > 1 && last.top > viewportHeight + input.trimDistance) {
+    return { kind: "trim-end" };
+  }
+  return null;
 }
 
 export function movePosition(
@@ -718,16 +737,24 @@ export interface BookPagination {
   total: number;
 }
 
+/** 按当前排版，一行大约能放几个汉字。正文栏宽跟 .reader-article 的宽度规则一致。 */
+export function charsPerLine(
+  layout: { fontSize: number; contentWidth: number },
+  viewportWidth: number
+): number {
+  const columnWidth = Math.max(
+    120,
+    Math.min(viewportWidth - 42, layout.contentWidth)
+  );
+  return Math.max(8, Math.floor(columnWidth / layout.fontSize));
+}
+
 export function estimatePagination(
   book: Pick<BookMeta, "chapterOutline">,
   layout: { fontSize: number; lineHeight: number; contentWidth: number },
   viewport: { width: number; height: number }
 ): BookPagination {
-  const columnWidth = Math.max(
-    120,
-    Math.min(viewport.width - 42, layout.contentWidth)
-  );
-  const perLine = Math.max(8, Math.floor(columnWidth / layout.fontSize));
+  const perLine = charsPerLine(layout, viewport.width);
   const usableHeight = Math.max(200, viewport.height - 132);
   const lines = Math.max(
     6,

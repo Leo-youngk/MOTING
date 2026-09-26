@@ -58,6 +58,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { useAppNavigation } from "../hooks/use-app-navigation";
 import { useAppUpdate } from "../hooks/use-app-update";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
@@ -83,6 +84,7 @@ import {
   type BookMetadataPatch,
 } from "../lib/book-metadata-types";
 import {
+  charsPerLine,
   findSentence,
   flattenChapter,
   formatReadingTime,
@@ -90,8 +92,8 @@ import {
   initialPosition,
   makeId,
   estimatePagination,
-  nextChapterRange,
   pageAt,
+  planChapterWindow,
   positionAtPercent,
   positionFor,
   remainingCharacters,
@@ -1993,10 +1995,72 @@ function BookNotesScreen({
 /** base URL 填完（失焦）就自动拉一次模型列表；拉不到就退回手填，不强求。内嵌在聊天面板里，不再是独立设置页。 */
 const HEADING_TAGS = ["h2", "h2", "h3", "h4", "h5", "h6"] as const;
 
-/** 连续滚动时最多同时挂在 DOM 里的章节数。整本全渲染的话上百章会有几万个句子 span。 */
-const CHAPTER_WINDOW = 5;
-/** 离顶／底还有这么多像素就把相邻章接上，留够缓冲才不会滑到白屏。 */
+/** 滑动中离底还有这么多像素就先往下接一章。往下接只动视口下方，滑动中做也不会跳。 */
 const CHAPTER_LOAD_MARGIN = 1200;
+/**
+ * 停稳后，视口上方、下方各备好几屏已经排好版的正文。
+ * iPhone 上用力一甩能滑出十来屏；缓冲不够就会在半路撞上「假的书顶」停住。
+ * 纯文字一屏大约四百字，十几屏也就上千个句子 span，挂得起。
+ */
+const WINDOW_BUFFER_SCREENS = 12;
+/** 整章离视口超过这么多屏就摘掉。比缓冲大一截，免得摘了又接、来回抖。 */
+const WINDOW_TRIM_SCREENS = 24;
+/** 最后一次滚动（含惯性）之后这么久没动、手也不在屏上，才算停稳。 */
+const WINDOW_IDLE_MS = 200;
+/** 停稳后调整窗口是一步一步做的，步与步之间让出主线程，手指随时能落下来。 */
+const WINDOW_STEP_GAP_MS = 32;
+
+/** 停稳后每一步最多排这么多字的段落。一步的排版控制在十几毫秒，手指落下来不用等。 */
+const PRIME_CHUNK_CHARS = 2400;
+
+/**
+ * 把一章里还按估算高度占位的段落，挑离视口最近的一批改成真实排版。
+ * 整章都排完了就在章上打 data-primed，之后这章新挂上来的段落（比如批注卡把段落
+ * 重新包了一层）也跟着按真实排版走。
+ */
+function primeChunk(section: HTMLElement, budget: number) {
+  const pending = Array.from(
+    section.querySelectorAll<HTMLElement>(".reader-block:not([data-primed])")
+  );
+  const viewportHeight = window.innerHeight;
+  const distance = (element: HTMLElement) => {
+    const rect = element.getBoundingClientRect();
+    return rect.bottom < 0
+      ? -rect.bottom
+      : rect.top > viewportHeight
+        ? rect.top - viewportHeight
+        : 0;
+  };
+  const ordered = pending
+    .map((element) => ({ element, distance: distance(element) }))
+    .sort((a, b) => a.distance - b.distance);
+  let used = 0;
+  let done = 0;
+  for (const { element } of ordered) {
+    if (used >= budget) break;
+    element.dataset.primed = "";
+    used += Number(element.style.getPropertyValue("--chars")) || 60;
+    done += 1;
+  }
+  if (done === pending.length) section.dataset.primed = "";
+}
+
+/** 整章一次排好。只在跳转、进书这种本来就要等一下的时候用。 */
+function primeSection(section: HTMLElement | null | undefined) {
+  if (section) section.dataset.primed = "";
+}
+
+/** 每章「句子 id → 章内序号」。按章对象缓存，章不变就是同一个 Map，按章 memo 才管用。 */
+const sentenceIndexCache = new WeakMap<Chapter, Map<string, number>>();
+function sentenceIndexOf(chapter: Chapter): Map<string, number> {
+  let map = sentenceIndexCache.get(chapter);
+  if (!map) {
+    map = new Map();
+    flattenChapter(chapter).forEach((sentence, i) => map!.set(sentence.id, i));
+    sentenceIndexCache.set(chapter, map);
+  }
+  return map;
+}
 
 /** 一条划线落在某一句上的片段。跨句选中会拆成多条。 */
 export interface HighlightPart {
@@ -2069,6 +2133,22 @@ function renderSentence(text: string, marks: BookNote[]): ReactNode {
   return parts;
 }
 
+/**
+ * 插图的 blob URL 按图片 id 缓存，整个阅读器共用一份。
+ *
+ * 连续阅读里章节会随滑动摘掉又挂回来，每挂一次都重新读库、重新建 URL、重新解码，
+ * 表现就是图片先空一下再「闪」出来。离开这本书时统一释放。
+ */
+const imageUrlCache = new Map<string, string>();
+
+function releaseImageUrls() {
+  for (const url of imageUrlCache.values()) URL.revokeObjectURL(url);
+  imageUrlCache.clear();
+}
+
+/** 图片离视口还有这么远就开始取、开始解码，滑到时已经是解好的位图。 */
+const IMAGE_PRELOAD_MARGIN = "1600px";
+
 const ReaderImage = memo(function ReaderImage({
   imageId,
   alt,
@@ -2080,40 +2160,75 @@ const ReaderImage = memo(function ReaderImage({
   width?: number;
   height?: number;
 }) {
-  const [url, setUrl] = useState("");
+  const figureRef = useRef<HTMLElement>(null);
+  const [url, setUrl] = useState(() => imageUrlCache.get(imageId) ?? "");
+  const [revision, setRevision] = useState(0);
 
   useEffect(() => {
-    let objectUrl = "";
-    let active = true;
-    const load = () => {
-      void getBookImage(imageId)
-        .then((image) => {
-          if (!active || !image) return;
-          const nextUrl = URL.createObjectURL(image.blob);
-          if (objectUrl) URL.revokeObjectURL(objectUrl);
-          objectUrl = nextUrl;
-          setUrl(nextUrl);
-        })
-        .catch(() => undefined);
-    };
     const onImageUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{ imageId?: string }>).detail;
-      if (detail?.imageId === imageId) load();
+      if ((event as CustomEvent<{ imageId?: string }>).detail?.imageId !== imageId) return;
+      const cached = imageUrlCache.get(imageId);
+      if (cached) {
+        imageUrlCache.delete(imageId);
+        URL.revokeObjectURL(cached);
+      }
+      setUrl("");
+      // A missing image may already have disconnected its observer after the first attempt.
+      setRevision((value) => value + 1);
     };
     window.addEventListener("moting:image-updated", onImageUpdated);
-    load();
-    return () => {
-      active = false;
-      window.removeEventListener("moting:image-updated", onImageUpdated);
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
+    return () => window.removeEventListener("moting:image-updated", onImageUpdated);
   }, [imageId]);
 
-  // 图片是异步从本地库里取的。宽高提前写在 img 上，浏览器就按这个比例先把版面占住，
+  useEffect(() => {
+    if (url) return;
+    const figure = figureRef.current;
+    if (!figure) return;
+    let cancelled = false;
+
+    const load = async () => {
+      let objectUrl = imageUrlCache.get(imageId);
+      if (!objectUrl) {
+        const image = await getBookImage(imageId).catch(() => undefined);
+        if (!image || cancelled) return;
+        objectUrl = imageUrlCache.get(imageId) ?? URL.createObjectURL(image.blob);
+        imageUrlCache.set(imageId, objectUrl);
+      }
+      // 先在后台解码好再换上。直接给 src 的话，大图要在主线程上边解码边画：
+      // 滑到它那一下会顿，图也是一截一截出来的。
+      const decoder = new Image();
+      decoder.src = objectUrl;
+      await decoder.decode().catch(() => undefined);
+      if (!cancelled) setUrl(objectUrl);
+    };
+
+    if (!("IntersectionObserver" in window)) {
+      void load();
+      return () => {
+        cancelled = true;
+      };
+    }
+    // 分页模式的下一页在右边，所以四个方向都留余量。
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        observer.disconnect();
+        void load();
+      },
+      { rootMargin: IMAGE_PRELOAD_MARGIN }
+    );
+    observer.observe(figure);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+    };
+  }, [imageId, url, revision]);
+
+  // 宽高提前写在 img 上，浏览器就按这个比例先把版面占住，
   // 图到了只是填进已经量好的位置，下方正文一个像素都不动。
   // alt 要等图片到位再给，否则空 img 会把 alt 文案当占位内容画出来。
   return (
-    <figure className="reader-block is-image">
+    <figure ref={figureRef} className="reader-block is-image">
       {/* IndexedDB 返回的是 blob URL，不能交给 next/image 的远程优化器。 */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
@@ -2121,21 +2236,174 @@ const ReaderImage = memo(function ReaderImage({
         alt={url ? alt : ""}
         width={width}
         height={height}
-        loading="lazy"
+        decoding="async"
       />
     </figure>
+  );
+});
+
+/** 划词问 AI 的批注卡：只交给锚点句所在的那一章，其余章拿到 null，不跟着对话流式重渲染。 */
+interface InlineAskProps {
+  ask: { text: string; sentenceIds: string[]; anchorId: string };
+  book: Book;
+  settings: ReaderSettings;
+  turns: AiChatTurn[];
+  onTurnsChange: (turns: AiChatTurn[]) => void;
+  onExpand: () => void;
+  onClose: () => void;
+}
+
+const NO_IDS: ReadonlySet<string> = new Set();
+
+interface ChapterSectionProps {
+  item: Chapter;
+  index: number;
+  indexById: Map<string, number> | undefined;
+  marksBySentence: Map<string, BookNote[]>;
+  /** 只有朗读句在这一章时才有值，别的章不跟着每一句重渲染。 */
+  speakingId: string;
+  askingIds: ReadonlySet<string>;
+  inline: InlineAskProps | null;
+}
+
+/**
+ * 一章正文。按章 memo：朗读换句、划线、批注对话流式输出、跨章时 chapterIndex 变化，
+ * 都只重渲染相关的那一章，而不是把窗口里几章、上千个句子 span 全部重建一遍——
+ * 那一下在手机上就是滑动中的小卡顿。
+ */
+const ChapterSection = memo(function ChapterSection({
+  item,
+  index,
+  indexById,
+  marksBySentence,
+  speakingId,
+  askingIds,
+  inline,
+}: ChapterSectionProps) {
+  return (
+    // data-primed 由 primeChunk() 直接写在 DOM 上，React 不管它：排版进度不走 state，
+    // 排一段就不必重渲染一章。
+    <section className="reader-chapter" data-chapter-section={index}>
+      {/* 没名字的章是上一章的续页（章名页和正文拆成了两个文件），接着排，不另起章首。 */}
+      {isPlaceholderTitle(item.title) ? null : (
+        <div className="reader-title">
+          <h1>{item.title}</h1>
+          <span className="reader-title__ornament" aria-hidden />
+        </div>
+      )}
+
+      {item.paragraphs.map((paragraph) => {
+        if (paragraph.kind === "image") {
+          return (
+            <ReaderImage
+              key={paragraph.id}
+              imageId={paragraph.imageId ?? ""}
+              alt={paragraph.alt ?? ""}
+              width={paragraph.imageWidth}
+              height={paragraph.imageHeight}
+            />
+          );
+        }
+
+        // 还没整章排版时，段落在视口外只按估算高度占位（content-visibility），
+        // 估算用字数算，撑开时差得越少越好。
+        const blockStyle = {
+          "--chars": paragraph.sentences.reduce(
+            (sum, sentence) => sum + sentence.text.length,
+            0
+          ),
+        } as CSSProperties;
+
+        const sentenceSpans = paragraph.sentences.map((sentence) => (
+          <span
+            key={sentence.id}
+            data-sentence-id={sentence.id}
+            data-sentence-index={indexById?.get(sentence.id)}
+            data-chapter-index={index}
+            className={[
+              sentence.id === speakingId ? "is-speaking" : "",
+              askingIds.has(sentence.id) ? "is-asking" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+          >
+            {renderSentence(sentence.text, marksBySentence.get(sentence.id) ?? [])}
+          </span>
+        ));
+
+        // 批注挂在选区最后一句所在的段落后面：往下长不会推动正在读的这段。
+        const inlineCard =
+          inline &&
+          paragraph.sentences.some((s) => s.id === inline.ask.anchorId) ? (
+            <AiInlineAsk
+              text={inline.ask.text}
+              book={inline.book}
+              chapter={item}
+              settings={inline.settings}
+              turns={inline.turns}
+              onTurnsChange={inline.onTurnsChange}
+              onExpand={inline.onExpand}
+              onClose={inline.onClose}
+            />
+          ) : null;
+
+        const withCard = (block: ReactNode) =>
+          inlineCard ? (
+            <Fragment key={paragraph.id}>
+              {block}
+              {inlineCard}
+            </Fragment>
+          ) : (
+            block
+          );
+
+        if (paragraph.kind === "heading") {
+          // 章节名已经占了 h1，章内小标题从 h2 起排。
+          const Heading = HEADING_TAGS[(paragraph.level ?? 3) - 1] ?? "h3";
+          return withCard(
+            <Heading
+              key={paragraph.id}
+              className="reader-block is-heading"
+              style={blockStyle}
+            >
+              {sentenceSpans}
+            </Heading>
+          );
+        }
+        if (paragraph.kind === "quote") {
+          return withCard(
+            <blockquote
+              key={paragraph.id}
+              className="reader-block is-quote"
+              style={blockStyle}
+            >
+              {sentenceSpans}
+            </blockquote>
+          );
+        }
+        return withCard(
+          <p
+            key={paragraph.id}
+            className={`reader-block ${paragraph.kind === "list" ? "is-list" : ""}`}
+            style={blockStyle}
+          >
+            {sentenceSpans}
+          </p>
+        );
+      })}
+    </section>
   );
 });
 
 interface ArticleBodyProps {
   paged: boolean;
   book: Book;
-  chapter: Chapter;
   settings: ReaderSettings;
   visibleChapters: { chapter: Chapter; index: number }[];
   sentenceIndexByChapter: Map<number, Map<string, number>>;
   marksBySentence: Map<string, BookNote[]>;
   currentSentenceId: string;
+  speakingChapterIndex: number;
   askingIds: Set<string>;
   inlineAsk: { text: string; sentenceIds: string[]; anchorId: string } | null;
   chatTurns: AiChatTurn[];
@@ -2157,12 +2425,12 @@ interface ArticleBodyProps {
 const ArticleBody = memo(function ArticleBody({
   paged,
   book,
-  chapter,
   settings,
   visibleChapters,
   sentenceIndexByChapter,
   marksBySentence,
   currentSentenceId,
+  speakingChapterIndex,
   askingIds,
   inlineAsk,
   chatTurns,
@@ -2184,6 +2452,8 @@ const ArticleBody = memo(function ArticleBody({
     }
   });
 
+  const hasAsking = askingIds.size > 0;
+
   return (
     <>
       {paged ? null : (
@@ -2192,114 +2462,31 @@ const ArticleBody = memo(function ArticleBody({
 
       {visibleChapters.map(({ chapter: item, index }) => {
         const indexById = sentenceIndexByChapter.get(index);
+        const holdsAnchor =
+          inlineAsk !== null && indexById?.has(inlineAsk.anchorId) === true;
         return (
-          <section
+          <ChapterSection
             key={item.id}
-            className="reader-chapter"
-            data-chapter-section={index}
-          >
-            {/* 没名字的章是上一章的续页（章名页和正文拆成了两个文件），接着排，不另起章首。 */}
-            {isPlaceholderTitle(item.title) ? null : (
-              <div className="reader-title">
-                <h1>{item.title}</h1>
-                <span className="reader-title__ornament" aria-hidden />
-              </div>
-            )}
-
-            {item.paragraphs.map((paragraph) => {
-              if (paragraph.kind === "image") {
-                return (
-                  <ReaderImage
-                    key={paragraph.id}
-                    imageId={paragraph.imageId ?? ""}
-                    alt={paragraph.alt ?? ""}
-                    width={paragraph.imageWidth}
-                    height={paragraph.imageHeight}
-                  />
-                );
-              }
-
-              const sentenceSpans = paragraph.sentences.map((sentence) => (
-                <span
-                  key={sentence.id}
-                  data-sentence-id={sentence.id}
-                  data-sentence-index={indexById?.get(sentence.id)}
-                  data-chapter-index={index}
-                  className={[
-                    sentence.id === currentSentenceId ? "is-speaking" : "",
-                    askingIds.has(sentence.id) ? "is-asking" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                >
-                  {renderSentence(
-                    sentence.text,
-                    marksBySentence.get(sentence.id) ?? []
-                  )}
-                </span>
-              ));
-
-              // 批注挂在选区最后一句所在的段落后面：往下长不会推动正在读的这段。
-              const inlineCard =
-                inlineAsk &&
-                paragraph.sentences.some((s) => s.id === inlineAsk.anchorId) ? (
-                  <AiInlineAsk
-                    text={inlineAsk.text}
-                    book={book}
-                    chapter={chapter}
-                    settings={settings}
-                    turns={chatTurns}
-                    onTurnsChange={onChatChange}
-                    onExpand={onInlineExpand}
-                    onClose={onInlineClose}
-                  />
-                ) : null;
-
-              const withCard = (block: ReactNode) =>
-                inlineCard ? (
-                  <Fragment key={paragraph.id}>
-                    {block}
-                    {inlineCard}
-                  </Fragment>
-                ) : (
-                  block
-                );
-
-              if (paragraph.kind === "heading") {
-                // 章节名已经占了 h1，章内小标题从 h2 起排。
-                const Heading =
-                  HEADING_TAGS[(paragraph.level ?? 3) - 1] ?? "h3";
-                return withCard(
-                  <Heading
-                    key={paragraph.id}
-                    className="reader-block is-heading"
-                  >
-                    {sentenceSpans}
-                  </Heading>
-                );
-              }
-              if (paragraph.kind === "quote") {
-                return withCard(
-                  <blockquote
-                    key={paragraph.id}
-                    className="reader-block is-quote"
-                  >
-                    {sentenceSpans}
-                  </blockquote>
-                );
-              }
-              return withCard(
-                <p
-                  key={paragraph.id}
-                  className={`reader-block ${
-                    paragraph.kind === "list" ? "is-list" : ""
-                  }`}
-                >
-                  {sentenceSpans}
-                </p>
-              );
-            })}
-          </section>
+            item={item}
+            index={index}
+            indexById={indexById}
+            marksBySentence={marksBySentence}
+            speakingId={index === speakingChapterIndex ? currentSentenceId : ""}
+            askingIds={hasAsking ? askingIds : NO_IDS}
+            inline={
+              holdsAnchor && inlineAsk
+                ? {
+                    ask: inlineAsk,
+                    book,
+                    settings,
+                    turns: chatTurns,
+                    onTurnsChange: onChatChange,
+                    onExpand: onInlineExpand,
+                    onClose: onInlineClose,
+                  }
+                : null
+            }
+          />
         );
       })}
 
@@ -3282,6 +3469,107 @@ function AiInlineAsk({
   );
 }
 
+function readPageViewport() {
+  if (typeof window === "undefined") return { width: 390, height: 844 };
+  const width = window.innerWidth;
+  // 手机上按物理屏算：Safari 的地址栏、工具栏随滑动伸缩，打开目录时又会展开，
+  // innerHeight 一直在变。拿它估页码，同一本书一会儿 645 页、一会儿 703 页。
+  if (window.matchMedia?.("(pointer: coarse)").matches && window.screen) {
+    const long = Math.max(window.screen.width, window.screen.height);
+    const short = Math.min(window.screen.width, window.screen.height);
+    return { width, height: width > window.innerHeight ? short : long };
+  }
+  return { width, height: window.innerHeight };
+}
+
+/**
+ * 估页码用的视口尺寸。只在宽度变了（转屏、分屏、拖窗口）时才换，
+ * 高度的伸缩不算——那只是工具栏收起展开，排版并没有变。
+ */
+function usePageViewport() {
+  const [viewport, setViewport] = useState(readPageViewport);
+  useEffect(() => {
+    const onResize = () =>
+      setViewport((current) => {
+        const next = readPageViewport();
+        return Math.abs(next.width - current.width) > 1 ? next : current;
+      });
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+    };
+  }, []);
+  return viewport;
+}
+
+/** 跳转落地后最多盯这么久。 */
+const HOLD_MS = 1500;
+/** 连续这么久没再被推动，就算落稳了，提前收手。 */
+const HOLD_QUIET_MS = 300;
+
+/**
+ * 跳转（目录跳章、回到朗读处）落地后，把目标按在刚落下的高度，直到版面稳下来。
+ *
+ * 目标上方的段落大多还是 content-visibility 的估算占位，滚过去之后才按真实高度排版。
+ * Chrome 有 scroll anchoring，自己会把位移补回来；iOS Safari 没有，占位一撑开，
+ * 目标就被整个往下推——实测关掉 anchoring 跳章偏 900～1900px，
+ * 「回到朗读处」要连点几下才对得准，也是这个原因。
+ *
+ * ResizeObserver 在排版之后、绘制之前回调，这时补回去用户看不到那一下跳；
+ * rAF 兜住没有改变正文尺寸的位移（比如上方图片换了高度又被抵消）。
+ * 手一碰屏幕就松手，不跟用户抢滚动。
+ */
+function holdInPlace(element: HTMLElement, container: HTMLElement): () => void {
+  const targetTop = element.getBoundingClientRect().top;
+  const deadline = performance.now() + HOLD_MS;
+  let quietSince = performance.now();
+  let frame = 0;
+  let stopped = false;
+
+  const correct = () => {
+    if (stopped) return;
+    if (!element.isConnected) {
+      stop();
+      return;
+    }
+    const drift = element.getBoundingClientRect().top - targetTop;
+    if (Math.abs(drift) > 1) {
+      window.scrollBy(0, drift);
+      quietSince = performance.now();
+    }
+  };
+
+  const tick = () => {
+    correct();
+    const now = performance.now();
+    if (now > deadline || now - quietSince > HOLD_QUIET_MS) {
+      stop();
+      return;
+    }
+    frame = requestAnimationFrame(tick);
+  };
+
+  const resize = new ResizeObserver(correct);
+  const inputs = ["touchstart", "wheel", "keydown", "pointerdown"] as const;
+
+  function stop() {
+    if (stopped) return;
+    stopped = true;
+    cancelAnimationFrame(frame);
+    resize.disconnect();
+    for (const type of inputs) window.removeEventListener(type, stop);
+  }
+
+  resize.observe(container);
+  for (const type of inputs) {
+    window.addEventListener(type, stop, { passive: true });
+  }
+  frame = requestAnimationFrame(tick);
+  return stop;
+}
+
 /**
  * 阅读进度的锚点高度：距视口顶多少像素的那一句算「你正读到这里」。
  *
@@ -3432,30 +3720,57 @@ function ReaderScreen({
   const chapter = book.chapters[chapterIndex];
   const tocList = useMemo(() => tocIndexes(book.chapters), [book.chapters]);
 
-  // 滚动模式是连续阅读：range 覆盖的这几章一起挂在 DOM 里，滑到边缘再往外接一章、
-  // 从另一头摘掉一章。分页模式仍旧一次只排当前这一章。
+  // 滚动模式是连续阅读：range 覆盖的这几章一起挂在 DOM 里。滑动中只往下接章；
+  // 往上接章、摘章、整章排版都会动到视口上方，留到停稳之后做（见下面的 rebalance）。
+  // 分页模式仍旧一次只排当前这一章。
   const [range, setRange] = useState({
     start: initial.chapterIndex,
     end: initial.chapterIndex,
   });
   const rangeRef = useRef(range);
+  // 下一次提交后要当场整章排好的章。进书那一章一开始就排好，恢复阅读位置才能一次落准；
+  // 跳转时目标章和它上面那章排好，落点上方就没有会被撑开的估算占位。
+  const pendingPrimeRef = useRef<number[]>([initial.chapterIndex]);
 
-  const visibleChapters = useMemo(() => {
-    if (paged) return chapter ? [{ chapter, index: chapterIndex }] : [];
-    return book.chapters
-      .slice(range.start, range.end + 1)
-      .map((item, offset) => ({ chapter: item, index: range.start + offset }));
-  }, [paged, chapter, chapterIndex, book.chapters, range.start, range.end]);
+  const pagedChapters = useMemo(
+    () => (chapter ? [{ chapter, index: chapterIndex }] : []),
+    [chapter, chapterIndex]
+  );
+  // 滚动模式不能依赖 chapterIndex：它随滑动一直在变，一变就会把整窗正文重建一遍。
+  const scrollChapters = useMemo(
+    () =>
+      book.chapters
+        .slice(range.start, range.end + 1)
+        .map((item, offset) => ({ chapter: item, index: range.start + offset })),
+    [book.chapters, range.start, range.end]
+  );
+  const visibleChapters = paged ? pagedChapters : scrollChapters;
 
   const sentenceIndexByChapter = useMemo(() => {
     const map = new Map<number, Map<string, number>>();
     for (const { chapter: item, index } of visibleChapters) {
-      const inner = new Map<string, number>();
-      flattenChapter(item).forEach((sentence, i) => inner.set(sentence.id, i));
-      map.set(index, inner);
+      map.set(index, sentenceIndexOf(item));
     }
     return map;
   }, [visibleChapters]);
+
+  // 页脚页码、顶上「已读」跟着阅读器自己量到的位置走，不等书架那份节流过的进度。
+  // 之前直接读 book.readingPosition：它半秒才刷一次，和 chapterIndex 对不上时
+  // 页码会退回「这一章第一页」。
+  const [livePosition, setLivePosition] = useState(() => ({
+    chapterIndex: initial.chapterIndex,
+    sentenceIndex: initial.sentenceIndex,
+  }));
+  const showLivePosition = useCallback(
+    (nextChapter: number, nextSentence: number) =>
+      setLivePosition((current) =>
+        current.chapterIndex === nextChapter &&
+        current.sentenceIndex === nextSentence
+          ? current
+          : { chapterIndex: nextChapter, sentenceIndex: nextSentence }
+      ),
+    []
+  );
   const marksBySentence = useMemo(() => {
     const map = new Map<string, BookNote[]>();
     for (const note of notes) {
@@ -3672,10 +3987,11 @@ function ReaderScreen({
       const index = Number(target?.dataset.sentenceIndex);
       if (!id || Number.isNaN(index) || savedSentenceRef.current === id) return;
       savedSentenceRef.current = id;
+      showLivePosition(chapterIndex, index);
       progressRef.current(positionFor(bookRef.current, chapterIndex, index));
     }, 320);
     return () => clearTimeout(timer);
-  }, [paged, pageIndex, pageStep, pageCount, chapterIndex]);
+  }, [paged, pageIndex, pageStep, pageCount, chapterIndex, showLivePosition]);
 
   useEffect(() => {
     if (paged) return;
@@ -3757,6 +4073,7 @@ function ReaderScreen({
 
     const commitAnchor = (anchor: Anchor) => {
       setChapterIndex(anchor.chIndex);
+      showLivePosition(anchor.chIndex, anchor.index);
       // 一整段可能有好几屏高：同一段里往下读时 id 不变但句内偏移在变，
       // 只按 id 去重会把这段时间读的都丢掉。差过一行就重存。
       if (
@@ -3794,6 +4111,8 @@ function ReaderScreen({
         snapshotAt = now;
         const snapshot = measureAnchor();
         pendingSave = snapshot ? () => commitAnchor(snapshot) : null;
+        // 页码边滑边走，不用等停下来才一下跳过去。
+        if (snapshot) showLivePosition(snapshot.chIndex, snapshot.index);
       }
       if (pendingTimer) clearTimeout(pendingTimer);
       pendingTimer = setTimeout(() => {
@@ -3804,17 +4123,9 @@ function ReaderScreen({
       }, 400);
     };
 
-    // observer 只当「跨章了」的触发器；真正决定存什么的是停下来那一刻的锚点线。
-    const observer = new IntersectionObserver(schedule, {
-      rootMargin: "-90px 0px -58% 0px",
-      threshold: 0.15,
-    });
-    // 手指停住时未必有元素跨过观察带，那样 observer 不会再响，进度就停在半路。
-    // 滚动本身才是「位置变了」最可靠的信号。
+    // 滚动本身就是「位置变了」最可靠的信号。以前还给窗口里每个句子挂 IntersectionObserver
+    // 当触发器，每接一章就得把上千个句子重新 observe 一遍，白白压在接章那一帧上。
     window.addEventListener("scroll", schedule, { passive: true });
-    articleRef.current
-      .querySelectorAll("[data-sentence-id]")
-      .forEach((element) => observer.observe(element));
     return () => {
       window.removeEventListener("scroll", schedule);
       // 卸载前如果还有没落盘的最新位置（防抖还没到），立即量一次存掉，
@@ -3823,62 +4134,128 @@ function ReaderScreen({
         clearTimeout(pendingTimer);
         pendingSave?.();
       }
-      observer.disconnect();
     };
-    // 重挂观察器只该发生在被观察的句子元素本身换了的时候：换书，或者窗口挪了。
-  }, [book.id, paged, range.start, range.end]);
+  }, [book.id, paged, showLivePosition]);
 
-  // 接章／摘章都会改变正文上方的高度，不补偿的话页面会当场跳一下。
-  // 先记住视口里第一章的位置，重排后按它的位移把滚动条推回去。
-  const anchorRef = useRef<{ index: number; top: number } | null>(null);
-  const captureAnchor = () => {
-    const sections = articleRef.current?.querySelectorAll<HTMLElement>(
+  // 接章、摘章、整章排版都会改变正文上方的高度，不补偿的话页面会当场跳一下。
+  // 改之前记住视口里正在看的那一段在哪，改完按它的位移把滚动条推回去。
+  // 只在停稳时这么做（见 rebalance），而且改动和补偿在同一个任务里完成、中间不绘制，
+  // 读者看不到那一下。滑动中往下接章不动视口上方，不需要补偿。
+  const viewAnchorRef = useRef<{ element: HTMLElement; top: number } | null>(
+    null
+  );
+  const captureViewAnchor = useCallback(() => {
+    viewAnchorRef.current = null;
+    const article = articleRef.current;
+    if (!article) return;
+    const box = article.getBoundingClientRect();
+    const x = box.left + box.width / 2;
+    for (const y of [READING_ANCHOR_TOP, window.innerHeight / 2]) {
+      for (const hit of document.elementsFromPoint(x, y)) {
+        const block = hit.closest<HTMLElement>(
+          ".reader-block, .reader-title, .reader-end"
+        );
+        if (block && article.contains(block)) {
+          viewAnchorRef.current = {
+            element: block,
+            top: block.getBoundingClientRect().top,
+          };
+          return;
+        }
+      }
+    }
+    // 两条探测线都落在段间留白里：退回视口里第一个露出来的章。
+    for (const section of article.querySelectorAll<HTMLElement>(
       "[data-chapter-section]"
-    );
-    if (!sections) return;
-    for (const section of sections) {
+    )) {
       const rect = section.getBoundingClientRect();
       if (rect.bottom > 0) {
-        anchorRef.current = {
-          index: Number(section.dataset.chapterSection),
-          top: rect.top,
-        };
+        viewAnchorRef.current = { element: section, top: rect.top };
         return;
       }
     }
-  };
+  }, []);
+
+  const restoreViewAnchor = useCallback(() => {
+    const anchor = viewAnchorRef.current;
+    viewAnchorRef.current = null;
+    if (!anchor || !anchor.element.isConnected) return;
+    const delta = anchor.element.getBoundingClientRect().top - anchor.top;
+    if (delta) window.scrollBy(0, delta);
+  }, []);
 
   useLayoutEffect(() => {
     rangeRef.current = range;
-    const anchor = anchorRef.current;
-    anchorRef.current = null;
-    if (!anchor) return;
-    const section = articleRef.current?.querySelector<HTMLElement>(
-      `[data-chapter-section="${anchor.index}"]`
-    );
-    if (!section) return;
-    const delta = section.getBoundingClientRect().top - anchor.top;
-    if (delta) window.scrollBy(0, delta);
-  }, [range]);
+    const pending = pendingPrimeRef.current;
+    pendingPrimeRef.current = [];
+    for (const index of pending) {
+      primeSection(
+        articleRef.current?.querySelector<HTMLElement>(
+          `[data-chapter-section="${index}"]`
+        )
+      );
+    }
+    restoreViewAnchor();
+  }, [range, restoreViewAnchor]);
 
   // 换窗口之后才知道目标元素在哪，所以跳转的滚动必须等这次提交落地再做，而且得是瞬时的。
-  // 在点击事件里同步发平滑滚动，动画是照着旧窗口的文档高度跑的；等它跑到一半，头部哨兵
-  // 已经把上一章补了回来，补偿用的 scrollBy 又会按规范中止这段动画，最后停在半路。
+  // 在点击事件里同步发平滑滚动，动画是照着旧窗口的文档高度跑的；等它跑到一半，窗口调整
+  // 补偿用的 scrollBy 又会按规范中止这段动画，最后停在半路。
   const pendingScrollRef = useRef<{
     selector: string;
     block: ScrollLogicalPosition;
   } | null>(null);
+
+  // 滚到目标，再盯住它直到上方的占位都撑开完。只滚一下的话 iOS 上会被撑开的段落推走。
+  const releaseHoldRef = useRef<(() => void) | null>(null);
+  const revealTarget = useCallback(
+    (selector: string, block: ScrollLogicalPosition) => {
+      releaseHoldRef.current?.();
+      releaseHoldRef.current = null;
+      const article = articleRef.current;
+      const element = article?.querySelector<HTMLElement>(selector);
+      if (!article || !element) return;
+      element.scrollIntoView({ block });
+      releaseHoldRef.current = holdInPlace(element, article);
+    },
+    []
+  );
+  useEffect(() => () => releaseHoldRef.current?.(), []);
+  // 阅读器按书 key，离开这本书时组件卸载，图片缓存跟着释放。
+  useEffect(() => releaseImageUrls, []);
+
+  /**
+   * 跳到某一章里的某个位置：以这一章为中心重新开窗，落地后再滚过去。
+   *
+   * 前后两章一起挂上：落地时两端的哨兵往往已经在缓冲区里，observer 不会再为它们
+   * 报第二次，只挂目标章的话就再也接不上邻章，只能在这一章里上下滑。
+   * 跳转是重新开窗，不是接章，所以不做锚点补偿。
+   */
+  const jumpWithin = useCallback(
+    (index: number, selector: string, block: ScrollLogicalPosition) => {
+      const last = bookRef.current.chapters.length - 1;
+      viewAnchorRef.current = null;
+      pendingScrollRef.current = { selector, block };
+      const next = {
+        start: Math.max(0, index - 1),
+        end: Math.min(last, index + 1),
+      };
+      // 目标章和它上面那章当场整章排好：落点上方没有估算占位，就没有东西会把目标推走。
+      // 下面那章留给停稳之后再排，跳转这一下只多花两章的排版。
+      pendingPrimeRef.current = [index, next.start];
+      rangeRef.current = next;
+      setRange(next);
+    },
+    []
+  );
+
   useLayoutEffect(() => {
     const pending = pendingScrollRef.current;
     if (!pending) return;
     pendingScrollRef.current = null;
     // 目录之类的浮层通常是"点了就关"，跳转落地时它可能还在收起、body 还锁着。
-    scrollWhenUnlocked(() =>
-      articleRef.current
-        ?.querySelector<HTMLElement>(pending.selector)
-        ?.scrollIntoView({ block: pending.block })
-    );
-  }, [range]);
+    scrollWhenUnlocked(() => revealTarget(pending.selector, pending.block));
+  }, [range, revealTarget]);
 
   // 改排版会让正文整体重排。分页模式在 measure() 里按句子重新对页，连续滚动这边得自己来：
   // 先记下锚点句在视口里的位置，重排后按位移把滚动条推回去，否则调一次字号就找不到读到哪了。
@@ -3933,72 +4310,168 @@ function ReaderScreen({
 
   const scrollToSpeaking = () => {
     const selector = `[data-sentence-id="${currentSentenceId}"]`;
-    const element = articleRef.current?.querySelector<HTMLElement>(selector);
-    if (element) {
-      element.scrollIntoView({ block: "center" });
+    if (articleRef.current?.querySelector(selector)) {
+      revealTarget(selector, "center");
       return;
     }
     // 朗读已经走到窗口之外的章去了，先按那一章重新开窗，落地后再滚过去。
-    anchorRef.current = null;
-    pendingScrollRef.current = { selector, block: "center" };
-    const next = { start: speakingChapterIndex, end: speakingChapterIndex };
-    rangeRef.current = next;
-    setRange(next);
+    jumpWithin(speakingChapterIndex, selector, "center");
   };
 
-  // 正文两端各放一个哨兵，进到缓冲区就接下一章。用 observer 而不是 scroll 事件，
-  // 免得每次滚动都去读 scrollHeight 触发同步布局。
+  // 正文两端各放一个哨兵。尾部哨兵进缓冲区就往下接一章：只动视口下方，滑动中也能做。
+  // 用 observer 而不是 scroll 事件，免得每次滚动都去读 scrollHeight 触发同步布局。
+  // 头部哨兵只留作渲染探针的挂载点，往上接章交给 rebalance。
   const startSentinelRef = useRef<HTMLDivElement>(null);
   const endSentinelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (paged) return;
-    const article = articleRef.current;
-    const startEl = startSentinelRef.current;
     const endEl = endSentinelRef.current;
-    if (!article || !startEl || !endEl) return;
-    if (!("IntersectionObserver" in window)) return;
+    if (!endEl || !("IntersectionObserver" in window)) return;
     const last = book.chapters.length - 1;
-
-    const rectOf = (index: number) =>
-      article
-        .querySelector<HTMLElement>(`[data-chapter-section="${index}"]`)
-        ?.getBoundingClientRect() ?? null;
-
     const observer = new IntersectionObserver(
-      (entries) => {
-        // 拖选期间保留当前章节 DOM，避免窗口裁剪删掉仍在选区里的起点。
-        if (selectionActiveRef.current) return;
+      ([entry]) => {
+        // 拖选期间保留当前章节 DOM，避免窗口变化打断选区。
+        if (!entry?.isIntersecting || selectionActiveRef.current) return;
         const current = rangeRef.current;
-        const hit = (target: Element) =>
-          entries.some((entry) => entry.target === target && entry.isIntersecting);
-
-        const next = nextChapterRange(current, {
-          lastChapter: last,
-          hitStart: hit(startEl),
-          hitEnd: hit(endEl),
-          firstBottom: rectOf(current.start)?.bottom ?? null,
-          lastTop: rectOf(current.end)?.top ?? null,
-          viewportHeight: window.innerHeight,
-          margin: CHAPTER_LOAD_MARGIN,
-          windowSize: CHAPTER_WINDOW,
-        });
-        if (next === current) return;
-        captureAnchor();
+        if (current.end >= last) return;
+        const next = { start: current.start, end: current.end + 1 };
         rangeRef.current = next;
         setRange(next);
       },
-      { rootMargin: `${CHAPTER_LOAD_MARGIN}px 0px` }
+      { rootMargin: `0px 0px ${CHAPTER_LOAD_MARGIN}px 0px` }
     );
-    observer.observe(startEl);
     observer.observe(endEl);
     return () => observer.disconnect();
   }, [paged, book.chapters.length, range, textSelection.active]);
+
+  /**
+   * 停稳之后调整窗口：往上接章、摘掉远处的章、把附近的章整章排好。
+   *
+   * 这些都会改变视口上方的高度，必须补偿滚动位置。iOS 惯性滚动期间脚本发的 scrollBy
+   * 会被丢掉——补偿一丢，正文就整章地跳（「从第 90 页直接跳到 53 页」就是这个），
+   * 就算没丢也会把惯性掐断，滑着滑着突然一顿。所以手在屏上、或者还在惯性里时一律不动，
+   * 停稳 200ms 后再一步一步做，每一步都在同一个任务里改完、补偿完，中间不绘制。
+   *
+   * 整章排好之后正文就和原生排版一样：滑进视口的段落早就排完了，不会先空一下再出字，
+   * 也不会被撑开把正在读的地方顶走。
+   */
+  useEffect(() => {
+    if (paged) return;
+    let touching = false;
+    let lastScrollAt = performance.now();
+    /** 我们自己补偿滚动落下的位置：它引发的 scroll 事件不算用户在滑。 */
+    let ownScrollY = -1;
+    let timer = 0;
+
+    const arm = (delay: number) => {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(step, delay);
+    };
+
+    function step() {
+      timer = 0;
+      if (touching || selectionActiveRef.current) return;
+      const quietFor = performance.now() - lastScrollAt;
+      if (quietFor < WINDOW_IDLE_MS) {
+        arm(WINDOW_IDLE_MS - quietFor);
+        return;
+      }
+      const article = articleRef.current;
+      if (!article) return;
+      const sections = Array.from(
+        article.querySelectorAll<HTMLElement>("[data-chapter-section]"),
+        (element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            index: Number(element.dataset.chapterSection),
+            top: rect.top,
+            bottom: rect.bottom,
+          };
+        }
+      );
+      const viewportHeight = window.innerHeight;
+      const current = rangeRef.current;
+      const primed = new Set(
+        Array.from(
+          article.querySelectorAll<HTMLElement>("[data-chapter-section][data-primed]"),
+          (element) => Number(element.dataset.chapterSection)
+        )
+      );
+      const action = planChapterWindow({
+        range: current,
+        lastChapter: bookRef.current.chapters.length - 1,
+        primed,
+        sections,
+        viewportHeight,
+        buffer: viewportHeight * WINDOW_BUFFER_SCREENS,
+        trimDistance: viewportHeight * WINDOW_TRIM_SCREENS,
+      });
+      if (!action) return;
+
+      captureViewAnchor();
+      if (action.kind === "prime") {
+        // 不经过 React：直接改段落上的标记，量一下、补偿，一步十几毫秒。
+        const section = article.querySelector<HTMLElement>(
+          `[data-chapter-section="${action.index}"]`
+        );
+        if (section) primeChunk(section, PRIME_CHUNK_CHARS);
+        restoreViewAnchor();
+      } else {
+        const nextRange =
+          action.kind === "prepend"
+            ? { start: current.start - 1, end: current.end }
+            : action.kind === "append"
+              ? { start: current.start, end: current.end + 1 }
+              : action.kind === "trim-start"
+                ? { start: current.start + 1, end: current.end }
+                : { start: current.start, end: current.end - 1 };
+        rangeRef.current = nextRange;
+        // 同步提交：改版面和补偿滚动在这一个任务里做完，不留给手指插进来的空档。
+        // 新接上的章先按估算占位挂上（便宜），后面几步再一段段排好。
+        flushSync(() => setRange(nextRange));
+      }
+      ownScrollY = window.scrollY;
+      arm(WINDOW_STEP_GAP_MS);
+    }
+
+    const onScroll = () => {
+      if (Math.abs(window.scrollY - ownScrollY) <= 1) return;
+      ownScrollY = -1;
+      lastScrollAt = performance.now();
+      arm(WINDOW_IDLE_MS);
+    };
+    const onTouchStart = () => {
+      touching = true;
+      if (timer) window.clearTimeout(timer);
+      timer = 0;
+    };
+    const onTouchEnd = (event: TouchEvent) => {
+      if (event.touches.length) return;
+      touching = false;
+      lastScrollAt = performance.now();
+      arm(WINDOW_IDLE_MS);
+    };
+
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchend", onTouchEnd, { passive: true });
+    window.addEventListener("touchcancel", onTouchEnd, { passive: true });
+    arm(WINDOW_IDLE_MS);
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchEnd);
+    };
+  }, [paged, book.id, captureViewAnchor, restoreViewAnchor]);
 
   // 换书或切换阅读模式时重新以当前章开窗，别把旧窗口带过去。
   useEffect(() => {
     const reset = { start: chapterIndex, end: chapterIndex };
     rangeRef.current = reset;
+    pendingPrimeRef.current = [chapterIndex];
     // 这里是在换书／切模式后同步重置窗口，避免旧章节窗口短暂残留。
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setRange(reset);
@@ -4170,26 +4643,17 @@ function ReaderScreen({
     restoreRef.current = landing === "last" ? "last" : null;
     setPopup(null);
     goToPage(0);
-    // 跳章是重新开窗，不是接章，所以这里不做锚点补偿，直接回到章首。
-    // 前后两章一起挂上：落地时两端的哨兵往往已经在缓冲区里，observer 不会再为它们
-    // 报第二次，只挂目标章的话就再也接不上邻章，只能在这一章里上下滑。
-    anchorRef.current = null;
-    const jumped = paged
-      ? { start: safe, end: safe }
-      : {
-          start: Math.max(0, safe - 1),
-          end: Math.min(currentBook.chapters.length - 1, safe + 1),
-        };
-    rangeRef.current = jumped;
-    setRange(jumped);
-    // 分页模式靠平移正文切页，不动滚动条。
-    if (!paged) {
-      pendingScrollRef.current = {
-        selector: `[data-chapter-section="${safe}"]`,
-        block: "start",
-      };
+    // 分页模式一次只排一章、靠平移正文切页，不动滚动条。
+    showLivePosition(safe, 0);
+    if (paged) {
+      viewAnchorRef.current = null;
+      const jumped = { start: safe, end: safe };
+      rangeRef.current = jumped;
+      setRange(jumped);
+      return;
     }
-  }, [clearTextSelection, goToPage, onProgress, paged]);
+    jumpWithin(safe, `[data-chapter-section="${safe}"]`, "start");
+  }, [clearTextSelection, goToPage, jumpWithin, onProgress, paged, showLivePosition]);
 
   const turnPage = useCallback((delta: number) => {
     const next = pageIndexRef.current + delta;
@@ -4420,33 +4884,37 @@ function ReaderScreen({
   }, []);
   const handleInlineClose = useCallback(() => setInlineAsk(null), []);
 
+  const pageViewport = usePageViewport();
+
   const readerStyle = {
     "--reader-font-size": `${settings.fontSize}px`,
     "--reader-line-height": String(settings.lineHeight),
     "--reader-width": `${settings.contentWidth}px`,
+    // 段落占位高度的估算要用：一行几个字。
+    "--reader-cpl": charsPerLine(
+      settings,
+      typeof window === "undefined" ? 390 : window.innerWidth
+    ),
   } as CSSProperties;
 
   const remainingPages = Math.max(0, pageCount - pageIndex - 1);
-  const readPercent = Math.round(
-    book.readingPosition?.percent ?? initial.percent ?? 0
+  const readPercent = useMemo(
+    () =>
+      positionFor(book, livePosition.chapterIndex, livePosition.sentenceIndex)
+        .percent,
+    [book, livePosition]
   );
 
-  // 目录与页脚用的全书绝对页码：按当前排版估算，改字号／转窗会跟着重算。
+  // 目录与页脚用的全书绝对页码：按当前排版估算，改字号／转屏会跟着重算。
   const pagination = useMemo(
-    () =>
-      estimatePagination(book, settings, {
-        width: typeof window === "undefined" ? 390 : window.innerWidth,
-        height: typeof window === "undefined" ? 844 : window.innerHeight,
-      }),
-    [book, settings]
+    () => estimatePagination(book, settings, pageViewport),
+    [book, settings, pageViewport]
   );
   const currentPage = pageAt(
     pagination,
-    chapterIndex,
-    book.readingPosition?.chapterIndex === chapterIndex
-      ? book.readingPosition.sentenceIndex
-      : 0,
-    chapter?.sentenceCount ?? 0
+    livePosition.chapterIndex,
+    livePosition.sentenceIndex,
+    book.chapters[livePosition.chapterIndex]?.sentenceCount ?? 0
   );
 
   // 目录/设置/写想法/问 AI 这几个全屏浮层打开时，顶/底浮条必须跟着强制隐藏，
@@ -4503,12 +4971,12 @@ function ReaderScreen({
         <ArticleBody
           paged={paged}
           book={book}
-          chapter={chapter}
           settings={settings}
           visibleChapters={visibleChapters}
           sentenceIndexByChapter={sentenceIndexByChapter}
           marksBySentence={marksBySentence}
           currentSentenceId={currentSentenceId}
+          speakingChapterIndex={speakingChapterIndex}
           askingIds={askingIds}
           inlineAsk={inlineAsk}
           chatTurns={chatTurns}
@@ -5936,6 +6404,8 @@ export default function MotingApp() {
     >()
   );
   const readingUiProgressRef = useRef(new Map<string, number>());
+  /** 书架进度节流窗口里被压下的最后一次，到点补上。 */
+  const readingUiTimerRef = useRef(new Map<string, number>());
   const readingProgressTimerRef = useRef<number | null>(null);
   const flushReadingProgress = useCallback(async () => {
     if (readingProgressTimerRef.current !== null) {
@@ -6676,9 +7146,11 @@ export default function MotingApp() {
       });
       // 进度落盘可以更慢，但界面上的百分比不能等到落盘才动；按半秒节流，
       // 既保住书架上的实时反馈，也不让长文每句都重排整个应用。
-      const lastUiUpdate = readingUiProgressRef.current.get(book.id) ?? 0;
-      if (now - lastUiUpdate >= 500) {
-        readingUiProgressRef.current.set(book.id, now);
+      // 节流窗口里的最后一次必须补上：以前直接丢掉，两次进度挨得近时，
+      // 书架上的进度就停在前一次，一直等到下一次滑动才对。
+      // 每次调用都会清掉上一次的补发计时，所以这里闭包里的永远是最新的位置。
+      const applyToShelf = () => {
+        readingUiProgressRef.current.set(book.id, Date.now());
         setBooks((current) =>
           current.map((item) =>
             item.id === book.id
@@ -6691,6 +7163,21 @@ export default function MotingApp() {
               : item
           )
         );
+      };
+      const trailing = readingUiTimerRef.current.get(book.id);
+      if (trailing) window.clearTimeout(trailing);
+      readingUiTimerRef.current.delete(book.id);
+      const sinceLast = now - (readingUiProgressRef.current.get(book.id) ?? 0);
+      if (sinceLast >= 500) {
+        applyToShelf();
+      } else {
+        readingUiTimerRef.current.set(
+          book.id,
+          window.setTimeout(() => {
+            readingUiTimerRef.current.delete(book.id);
+            applyToShelf();
+          }, 500 - sinceLast)
+        );
       }
       scheduleReadingProgressFlush();
     },
@@ -6702,6 +7189,8 @@ export default function MotingApp() {
     if (player.location?.bookId === deleteTarget.id) player.stop();
     pendingReadingProgressRef.current.delete(deleteTarget.id);
     readingUiProgressRef.current.delete(deleteTarget.id);
+    window.clearTimeout(readingUiTimerRef.current.get(deleteTarget.id));
+    readingUiTimerRef.current.delete(deleteTarget.id);
     try {
       await removeBook(deleteTarget.id);
     } catch (error) {

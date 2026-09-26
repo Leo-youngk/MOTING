@@ -59,6 +59,8 @@ npm run deploy:dry-run
 
 本地库（IndexedDB）里书目和正文分开存：`books` 表只有书目（含从正文算出的目录 `chapterOutline`），正文在 `contents` 表。书库、主页、同步只碰书目；进阅读器、播放器、单书笔记之前才读那一本的正文（`MotingApp` 的 `loadContent`）。
 
+连续阅读（上下滑动）只挂视口附近几章。**滑动中（手在屏上或惯性里）不许改视口上方的 DOM**：iOS Safari 没有 scroll anchoring，惯性期间脚本发的 `scrollBy` 会被丢掉或掐断惯性，补偿一丢正文就整章地跳。所以滑动中只往下接章；往上接章、摘章、把段落从估算占位换成真实排版（`data-primed`）都在停稳 200ms 后由 `planChapterWindow()` 一步步做，每步在同一个任务里改完并补偿。跳转（目录、回到朗读处）当场把目标章和上一章整章排好再滚过去。改这块要跑 `tests/reader-scroll-browser.py`，它模拟了上面两个 iOS 特性。
+
 书名、章名只在显示时处理（`lib/display-title.ts`）：列表和播放条用去掉营销括注的短书名，书籍资料页用全名；章名是「未知 / Unknown」这类占位词的章算上一章的续页，目录里不单列、阅读页不另起章首。
 
 ## 界面规范
