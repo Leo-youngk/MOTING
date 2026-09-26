@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect } from "react";
+import { useEffect } from "react";
 
 /** 状态栏再高也就这么多，超出这个值的差值一律当作量错了。 */
 const STATUS_BAR_MAX = 80;
@@ -19,40 +19,36 @@ const STATUS_BAR_MAX = 80;
  * 只在 standalone 补偿：普通浏览器里 `screen.height` 是整块显示器高，跟窗口高的
  * 差值毫无意义，补了反而把布局顶坏。
  */
-function syncViewportFill() {
-  const standalone = window.matchMedia("(display-mode: standalone)").matches;
-  const raw = standalone
-    ? Math.round(window.screen.height - window.innerHeight)
-    : 0;
-  // 差值本该只有一个状态栏那么高。量出更大的值说明这次测量赶上了别的状态
-  // （横屏、分屏、启动过渡），宁可不补也不要凭空垫出一条死白。
-  const fill = raw > 0 && raw <= STATUS_BAR_MAX ? raw : 0;
-  document.documentElement.style.setProperty("--viewport-fill-bottom", `${fill}px`);
-}
-
-export function useViewportFill(route: string) {
-  // A route can change the standalone layout viewport without a resize event.
-  // Reconcile before painting the uncovered tab, so the bottom surface and bar
-  // never use the previous reader viewport for one frame.
-  useLayoutEffect(() => {
-    syncViewportFill();
-  }, [route]);
-
+export function useViewportFill() {
   useEffect(() => {
+    const root = document.documentElement;
+
+    const sync = () => {
+      const standalone = window.matchMedia("(display-mode: standalone)").matches;
+      const raw = standalone
+        ? Math.round(window.screen.height - window.innerHeight)
+        : 0;
+      // 差值本该只有一个状态栏那么高。量出更大的值说明这次测量赶上了别的状态
+      // （横屏、分屏、启动过渡），宁可不补也不要凭空垫出一条死白。
+      const fill = raw > 0 && raw <= STATUS_BAR_MAX ? raw : 0;
+      root.style.setProperty("--viewport-fill-bottom", `${fill}px`);
+    };
+
+    sync();
     const viewport = window.visualViewport;
-    window.addEventListener("resize", syncViewportFill);
-    window.addEventListener("orientationchange", syncViewportFill);
-    window.addEventListener("pageshow", syncViewportFill);
-    document.addEventListener("visibilitychange", syncViewportFill);
-    viewport?.addEventListener("resize", syncViewportFill);
+    window.addEventListener("resize", sync);
+    window.addEventListener("orientationchange", sync);
+    window.addEventListener("pageshow", sync);
+    document.addEventListener("visibilitychange", sync);
+    viewport?.addEventListener("resize", sync);
 
     return () => {
-      window.removeEventListener("resize", syncViewportFill);
-      window.removeEventListener("orientationchange", syncViewportFill);
-      window.removeEventListener("pageshow", syncViewportFill);
-      document.removeEventListener("visibilitychange", syncViewportFill);
-      viewport?.removeEventListener("resize", syncViewportFill);
-      document.documentElement.style.removeProperty("--viewport-fill-bottom");
+      window.removeEventListener("resize", sync);
+      window.removeEventListener("orientationchange", sync);
+      window.removeEventListener("pageshow", sync);
+      document.removeEventListener("visibilitychange", sync);
+      viewport?.removeEventListener("resize", sync);
+      root.style.removeProperty("--viewport-fill-bottom");
     };
   }, []);
 }
