@@ -7320,6 +7320,10 @@ export default function MotingApp() {
             ? "home"
             : view.name;
 
+  // 阅读器暂时盖住书库时保留书库节点。返回后搜索、封面和滚动位置
+  // 都沿用原来的页面，避免整张书架重新挂载造成一次明显的闪动。
+  const frameView = view.name === "reader" ? ({ name: "library" } as const) : view;
+
   if (!ready) {
     // 书目读出来之前只有底色，颜色由 layout 里的开机脚本按上次的配色提前套好。
     // 书目几十毫秒就读完，不再摆「正在打开你的书架」那种闪屏：
@@ -7335,8 +7339,7 @@ export default function MotingApp() {
 
   return (
     <main className="app-shell">
-      {view.name === "reader" ? (
-        selectedBook ? (
+      {view.name === "reader" && selectedBook ? (
         <ReaderScreen
           key={selectedBook.id}
           book={selectedBook}
@@ -7368,8 +7371,8 @@ export default function MotingApp() {
           onSettingsChange={changeSettings}
           onToast={showToast}
         />
-        ) : null
-      ) : view.name === "settings" ? (
+      ) : null}
+      {view.name === "settings" ? (
         <SettingsScreen
           section={view.section}
           settings={settings}
@@ -7407,7 +7410,11 @@ export default function MotingApp() {
         />
         ) : null
       ) : (
-        <div className={`app-frame${view.name === "find" ? " is-bare" : ""}`}>
+        <div
+          className={`app-frame${view.name === "find" ? " is-bare" : ""}${view.name === "reader" ? " is-reader-background" : ""}`}
+          aria-hidden={view.name === "reader"}
+          inert={view.name === "reader"}
+        >
           {/* 在线找书是一段专心的事：手机上底栏收起（is-bare），结果区一直铺到屏幕底。 */}
           <div className="desktop-brand">
             <BearMark className="app-mark" />
@@ -7425,7 +7432,7 @@ export default function MotingApp() {
           </div>
 
           <section className="app-content">
-            {view.name === "home" ? (
+            {frameView.name === "home" ? (
               <HomeScreen
                 books={books}
                 stats={stats}
@@ -7442,12 +7449,12 @@ export default function MotingApp() {
                 }
                 onSearchStore={(query) => navigate({ name: "store", query })}
               />
-            ) : view.name === "history" ? (
+            ) : frameView.name === "history" ? (
               <HistoryScreen
                 sessions={sessions}
                 onBack={() => goBack({ name: "home" })}
               />
-            ) : view.name === "library" ? (
+            ) : frameView.name === "library" ? (
               <LibraryScreen
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
@@ -7458,36 +7465,36 @@ export default function MotingApp() {
                 onOpenMetadata={setMetadataBook}
                 onDelete={setDeleteTarget}
               />
-            ) : view.name === "store" ? (
+            ) : frameView.name === "store" ? (
               <div className="screen">
                 <Bookstore
-                  key={view.query ?? ""}
+                  key={frameView.query ?? ""}
                   books={books}
-                  initialBookId={view.bookId ?? ""}
-                  initialQuery={view.query ?? ""}
+                  initialBookId={frameView.bookId ?? ""}
+                  initialQuery={frameView.query ?? ""}
                   onBack={() => goBack({ name: "home" })}
                   onFindBook={(title, author) =>
                     navigate({ name: "find", query: bookSearchQuery(title, author) })
                   }
                 />
               </div>
-            ) : view.name === "find" ? (
+            ) : frameView.name === "find" ? (
               <OnlineLibrary
-                key={view.query}
-                initialQuery={view.query}
+                key={frameView.query}
+                initialQuery={frameView.query}
                 books={books}
                 onImport={handleOnlineImport}
                 onOpen={(book) => openReader(book)}
                 onBack={() => goBack({ name: "library" })}
                 onToast={showToast}
               />
-            ) : view.name === "listen" ? (
+            ) : frameView.name === "listen" ? (
               <ListenScreen
                 books={books}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}
               />
-            ) : view.name === "book-notes" ? (
+            ) : frameView.name === "book-notes" ? (
               selectedBook ? (
                 <BookNotesScreen
                   book={selectedBook}

@@ -422,6 +422,11 @@ button:disabled {
   min-height: 100dvh;
 }
 
+/* 阅读期间保留书库的 DOM 和组件状态，退出阅读器时直接露出原来的书架。 */
+.app-frame.is-reader-background {
+  display: none;
+}
+
 .app-content {
   min-height: 100dvh;
   padding-bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + 28px);
