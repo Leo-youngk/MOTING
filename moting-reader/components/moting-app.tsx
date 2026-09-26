@@ -1024,6 +1024,40 @@ function HomeScreen({
   );
 }
 
+const LibraryBookCard = memo(function LibraryBookCard({
+  book,
+  onOpen,
+  onMore,
+}: {
+  book: BookMeta;
+  onOpen: (book: BookMeta) => void;
+  onMore: (book: BookMeta) => void;
+}) {
+  const percent = Math.round(book.readingPosition?.percent ?? 0);
+  const isNew = !book.readingPosition && !book.listeningPosition;
+  const progressLabel = isNew
+    ? "未读"
+    : percent >= 99
+      ? "已读完"
+      : `已读 ${percent}%`;
+  return (
+    <article className="grid-book">
+      <button type="button" className="grid-book__cover"
+        aria-label={`阅读${displayTitle(book.title)}`} onClick={() => onOpen(book)}>
+        <BookCover book={book} size="large" />
+      </button>
+      <strong className="grid-book__title">{displayTitle(book.title)}</strong>
+      <div className="grid-book__footer">
+        <span className="grid-book__progress">{progressLabel}</span>
+        <button type="button" className="grid-book__more"
+          aria-label={`${book.title}的更多操作`} onClick={() => onMore(book)}>
+          <MoreHorizontal size={18} />
+        </button>
+      </div>
+    </article>
+  );
+});
+
 function LibraryScreen({
   books,
   onImport,
@@ -1047,6 +1081,13 @@ function LibraryScreen({
   const [query, setQuery] = useState("");
   const [sheetBook, setSheetBook] = useState<BookMeta | null>(null);
   const [showSources, setShowSources] = useState(false);
+  // Navigation creates a new handler on root renders. Keep list-row props stable;
+  // reading progress should only update the one book whose progress changed.
+  const onOpenRef = useRef(onOpen);
+  useLayoutEffect(() => {
+    onOpenRef.current = onOpen;
+  }, [onOpen]);
+  const openBook = useCallback((book: BookMeta) => onOpenRef.current(book), []);
 
   const filtered = books.filter((book) =>
     `${book.title} ${book.author}`.toLowerCase().includes(query.toLowerCase())
@@ -1109,39 +1150,9 @@ function LibraryScreen({
 
           {filtered.length ? (
             <div className="book-grid">
-              {filtered.map((book) => {
-                const percent = Math.round(book.readingPosition?.percent ?? 0);
-                const isNew = !book.readingPosition && !book.listeningPosition;
-                const progressLabel = isNew
-                  ? "未读"
-                  : percent >= 99
-                    ? "已读完"
-                    : `已读 ${percent}%`;
-                return (
-                  <article className="grid-book" key={book.id}>
-                    <button
-                      type="button"
-                      className="grid-book__cover"
-                      aria-label={`阅读${displayTitle(book.title)}`}
-                      onClick={() => onOpen(book)}
-                    >
-                      <BookCover book={book} size="large" />
-                    </button>
-                    <strong className="grid-book__title">{displayTitle(book.title)}</strong>
-                    <div className="grid-book__footer">
-                      <span className="grid-book__progress">{progressLabel}</span>
-                      <button
-                        type="button"
-                        className="grid-book__more"
-                        aria-label={`${book.title}的更多操作`}
-                        onClick={() => setSheetBook(book)}
-                      >
-                        <MoreHorizontal size={18} />
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
+              {filtered.map((book) => (
+                <LibraryBookCard key={book.id} book={book} onOpen={openBook} onMore={setSheetBook} />
+              ))}
             </div>
           ) : (
             <div className="library-miss">
@@ -5883,7 +5894,6 @@ function MiniPlayer({
 
 export default function MotingApp() {
   useKeyboardInset();
-  useViewportFill();
   // 书库里只有书目；正文在 contentRef 里，打开哪本读哪本。
   const [books, setBooks] = useState<BookMeta[]>([]);
   const [notes, setNotes] = useState<BookNote[]>([]);
@@ -5906,6 +5916,7 @@ export default function MotingApp() {
   // 系统返回手势也能用。切板块是平级移动，下钻才进历史栈。
   const { view, backgroundView, navigate, selectTab, replace: replaceView, goBack } =
     useAppNavigation();
+  useViewportFill(view.name);
   const [ready, setReady] = useState(false);
   // 老用户第一次打开新版时，本地库要把正文从书目里搬出去，这一次会多等几秒。
   const [upgrading, setUpgrading] = useState(false);
@@ -6896,12 +6907,16 @@ export default function MotingApp() {
 
   // PWA 全屏时 iOS 用 theme-color 给状态栏那条填色。写死一个值的话，
   // 换书架或翻开书后状态栏和页面就裂成两块颜色，看着像没做全屏。
+  useLayoutEffect(() => {
+    if (!ready) return;
+    // The reader unmount and the root background must change in the same paint.
+    document.documentElement.toggleAttribute("data-in-reader", isReading);
+  }, [ready, isReading]);
+
   useEffect(() => {
     // 设置读出来之前别动：首帧的底色和状态栏颜色由开机脚本按上次的配色套好了。
     if (!ready) return;
     const root = document.documentElement;
-    if (isReading) root.dataset.inReader = "";
-    else delete root.dataset.inReader;
     const meta = document.querySelector<HTMLMetaElement>(
       'meta[name="theme-color"]'
     );
@@ -7416,7 +7431,7 @@ export default function MotingApp() {
           </div>
 
           <section className="app-content">
-            <RetainedTab name="home" active={!frameSuspended && !tabSuspended && backgroundView === "home"}>
+            <RetainedTab name="home" active={!tabSuspended && backgroundView === "home"} foreground={!frameSuspended}>
               <HomeScreen
                 books={books}
                 stats={stats}
@@ -7434,7 +7449,7 @@ export default function MotingApp() {
                 onSearchStore={(query) => navigate({ name: "store", query })}
               />
             </RetainedTab>
-            <RetainedTab name="library" active={!frameSuspended && !tabSuspended && backgroundView === "library"}>
+            <RetainedTab name="library" active={!tabSuspended && backgroundView === "library"} foreground={!frameSuspended}>
               <LibraryScreen
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
@@ -7446,14 +7461,14 @@ export default function MotingApp() {
                 onDelete={setDeleteTarget}
               />
             </RetainedTab>
-            <RetainedTab name="listen" active={!frameSuspended && !tabSuspended && backgroundView === "listen"}>
+            <RetainedTab name="listen" active={!tabSuspended && backgroundView === "listen"} foreground={!frameSuspended}>
               <ListenScreen
                 books={books}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}
               />
             </RetainedTab>
-            <RetainedTab name="notes" active={!frameSuspended && !tabSuspended && backgroundView === "notes"}>
+            <RetainedTab name="notes" active={!tabSuspended && backgroundView === "notes"} foreground={!frameSuspended}>
               <NotesScreen
                 notes={notes}
                 books={books}

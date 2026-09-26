@@ -4,7 +4,9 @@
  */
 
 .settings-screen {
-  min-height: 100dvh;
+  position: relative;
+  z-index: 1;
+  min-height: calc(100dvh + var(--viewport-fill-bottom, 0px));
   background: var(--paper);
 }
 
