@@ -7320,9 +7320,15 @@ export default function MotingApp() {
             ? "home"
             : view.name;
 
-  // 阅读器暂时盖住书库时保留书库节点。返回后搜索、封面和滚动位置
-  // 都沿用原来的页面，避免整张书架重新挂载造成一次明显的闪动。
-  const frameView = view.name === "reader" ? ({ name: "library" } as const) : view;
+  // 阅读器和播放器打开时保留各自的列表。返回后搜索、封面和滚动位置
+  // 都沿用原来的节点，避免列表重新挂载造成一次明显的闪动。
+  const frameView =
+    view.name === "reader"
+      ? ({ name: "library" } as const)
+      : view.name === "player"
+        ? ({ name: "listen" } as const)
+        : view;
+  const frameSuspended = view.name === "reader" || view.name === "player";
 
   if (!ready) {
     // 书目读出来之前只有底色，颜色由 layout 里的开机脚本按上次的配色提前套好。
@@ -7372,6 +7378,19 @@ export default function MotingApp() {
           onToast={showToast}
         />
       ) : null}
+      {view.name === "player" && selectedBook ? (
+        <PlayerScreen
+          book={selectedBook}
+          settings={settings}
+          player={player}
+          onBack={() => goBack({ name: "listen" })}
+          onOpenReader={(position) => void openReader(selectedBook, position)}
+          onAddNote={(position, excerpt) =>
+            addListeningMark(selectedBook, position, excerpt)
+          }
+          onSettingsChange={changeSettings}
+        />
+      ) : null}
       {view.name === "settings" ? (
         <SettingsScreen
           section={view.section}
@@ -7395,25 +7414,11 @@ export default function MotingApp() {
           onOpen={(section) => navigate({ name: "settings", section })}
           onBack={() => goBack(view.section ? { name: "settings" } : { name: "home" })}
         />
-      ) : view.name === "player" ? (
-        selectedBook ? (
-        <PlayerScreen
-          book={selectedBook}
-          settings={settings}
-          player={player}
-          onBack={() => goBack({ name: "listen" })}
-          onOpenReader={(position) => void openReader(selectedBook, position)}
-          onAddNote={(position, excerpt) =>
-            addListeningMark(selectedBook, position, excerpt)
-          }
-          onSettingsChange={changeSettings}
-        />
-        ) : null
       ) : (
         <div
-          className={`app-frame${view.name === "find" ? " is-bare" : ""}${view.name === "reader" ? " is-reader-background" : ""}`}
-          aria-hidden={view.name === "reader"}
-          inert={view.name === "reader"}
+          className={`app-frame${view.name === "find" ? " is-bare" : ""}${frameSuspended ? " is-suspended" : ""}`}
+          aria-hidden={frameSuspended}
+          inert={frameSuspended}
         >
           {/* 在线找书是一段专心的事：手机上底栏收起（is-bare），结果区一直铺到屏幕底。 */}
           <div className="desktop-brand">
