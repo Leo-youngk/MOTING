@@ -2687,6 +2687,7 @@ function AiAskPanel({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const streamTextRef = useRef({ content: "", reasoning: "" });
   const streamingTurnRef = useRef<{ id: string; replyTo?: string }>({ id: "" });
+  const [activeAnswerId, setActiveAnswerId] = useState("");
   const streamFrameRef = useRef<number | null>(null);
 
   useScrollLock();
@@ -2831,6 +2832,7 @@ function AiAskPanel({
     const assistantId = makeId("turn");
     const replyTo = history.at(-1)?.id;
     streamingTurnRef.current = { id: assistantId, replyTo };
+    setActiveAnswerId(assistantId);
     setTurns([...history, { id: assistantId, replyTo, role: "assistant", content: "", reasoning: "" }]);
     setBusy(true);
     setError("");
@@ -2877,7 +2879,6 @@ function AiAskPanel({
     }
   };
 
-  const lastIndex = turns.length - 1;
   const renderTurn = (turn: AiChatTurn, index: number) => {
     if (turn.role === "user") {
       return (
@@ -2889,7 +2890,7 @@ function AiAskPanel({
         </div>
       );
     }
-    const streaming = busy && index === lastIndex;
+    const streaming = busy && turn.id === activeAnswerId;
     const reasoningOpen = openReasoning.has(index);
     return (
       <div className="ai-ask__turn-assistant" key={turn.id ?? index}>
@@ -2935,7 +2936,7 @@ function AiAskPanel({
             {turn.model ? <span className="ai-ask__via">主模型太忙，由备用模型 {turn.model} 回答</span> : null}
           </div>
         ) : null}
-        {index === lastIndex && error && !busy ? (
+        {turn.id === activeAnswerId && error && !busy ? (
           <div className="ai-ask__failed">
             <p className="ai-ask__error">{error}</p>
             {turn.content ? null : (

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 
 const workerPath = new URL("../dist/server/index.js", import.meta.url);
 const configPath = new URL("../dist/server/wrangler.json", import.meta.url);
@@ -24,3 +24,14 @@ assert.equal(typeof worker.default?.fetch, "function");
 console.log(
   "Validated Cloudflare artifact: Worker entry, static assets, and compatibility settings are present.",
 );
+
+// 完整清单包含动态 import 分片；HTML 中的入口/preload 标签不能代表整个构建。
+const assetsRoot = new URL("../dist/client/assets/", import.meta.url);
+const files = await readdir(assetsRoot, { recursive: true, withFileTypes: true });
+const { relative, join } = await import("node:path");
+const { fileURLToPath } = await import("node:url");
+const assets = files.filter((entry) => entry.isFile()).map((entry) =>
+  "/assets/" + relative(fileURLToPath(assetsRoot), join(entry.parentPath, entry.name)).split("\\").join("/")
+).sort();
+assert.ok(assets.length > 0, "Build asset manifest must not be empty");
+await writeFile(new URL("../dist/client/asset-manifest.json", import.meta.url), JSON.stringify({ assets }));

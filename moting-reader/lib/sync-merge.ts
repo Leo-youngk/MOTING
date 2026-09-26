@@ -129,6 +129,7 @@ export function mergeNote<N extends { createdAt: number; updatedAt?: number }>(
 
 export interface MergeableChatTurn {
   id?: string;
+  replyTo?: string;
   role: "user" | "assistant";
   content: string;
   reasoning?: string;
@@ -146,19 +147,56 @@ export function mergeChatTurns<T extends MergeableChatTurn>(local: T[], remote: 
   const localKeys = local.map(chatTurnKey);
   const remoteKeys = remote.map(chatTurnKey);
   const turns = new Map<string, T>();
-  const outgoing = new Map<string, Set<string>>();
-  const incoming = new Map<string, number>();
-  const addSequence = (items: T[], keys: string[]) => {
+  for (const items of [local, remote]) {
     items.forEach((turn, index) => {
-      const key = keys[index];
+      const key = chatTurnKey(turn, index);
       const previous = turns.get(key);
-      if (!previous || turn.content.length + (turn.reasoning?.length ?? 0) > previous.content.length + (previous.reasoning?.length ?? 0)) {
+      const size = (item: T) => item.content.length + (item.reasoning?.length ?? 0);
+      if (!previous || size(turn) > size(previous) ||
+          (size(turn) === size(previous) && JSON.stringify(turn) > JSON.stringify(previous))) {
         turns.set(key, turn);
       }
-      if (!incoming.has(key)) incoming.set(key, 0);
-      if (index === 0) return;
-      const before = keys[index - 1];
-      if (before === key) return;
+    });
+  }
+
+  // 排序单位是问答组。逐条排序会把并行设备的问题插到另一问的回答之前。
+  const parent = new Map<string, string>();
+  const inferParents = (items: T[], keys: string[]) => {
+    let question: string | undefined;
+    items.forEach((turn, index) => {
+      const key = keys[index];
+      if (turn.role === "user") question = key;
+      else {
+        const explicit = turn.replyTo && turns.get(turn.replyTo)?.role === "user" ? turn.replyTo : undefined;
+        const candidate = explicit ?? question;
+        const previous = parent.get(key);
+        if (candidate && (!previous || candidate < previous)) parent.set(key, candidate);
+      }
+    });
+  };
+  inferParents(local, localKeys);
+  inferParents(remote, remoteKeys);
+  // 显式关联优先于旧客户端顺序推断。
+  for (const [key, turn] of turns) {
+    if (turn.role === "assistant" && turn.replyTo && turns.get(turn.replyTo)?.role === "user") {
+      parent.set(key, turn.replyTo);
+    }
+  }
+  const groups = new Map<string, string[]>();
+  for (const key of turns.keys()) {
+    const group = parent.get(key) ?? key;
+    const members = groups.get(group) ?? [];
+    members.push(key);
+    groups.set(group, members);
+  }
+  const outgoing = new Map<string, Set<string>>();
+  const incoming = new Map([...groups.keys()].map((key) => [key, 0]));
+  for (const keys of [localKeys, remoteKeys]) {
+    // 已经被旧算法交错过的问答也只贡献一次组顺序，避免 A,B,B,A 形成环。
+    const sequence = [...new Set(keys.map((key) => parent.get(key) ?? key))];
+    sequence.forEach((key, index) => {
+      if (!index) return;
+      const before = sequence[index - 1];
       const next = outgoing.get(before) ?? new Set<string>();
       if (!next.has(key)) {
         next.add(key);
@@ -166,20 +204,16 @@ export function mergeChatTurns<T extends MergeableChatTurn>(local: T[], remote: 
         incoming.set(key, (incoming.get(key) ?? 0) + 1);
       }
     });
-  };
-  addSequence(local, localKeys);
-  addSequence(remote, remoteKeys);
-
-  // 两边的新增轮次组成一个顺序图；拓扑排序保留各自聊天顺序，分支间按 ID 稳定排序。
-  // 已存在的历史序列即使先前合并过，也能与单侧分支再次合并并收敛。
-  const remaining = new Set(turns.keys());
+  }
+  const remaining = new Set(groups.keys());
   const ordered: T[] = [];
   while (remaining.size) {
-    const available = [...remaining].filter((key) => (incoming.get(key) ?? 0) === 0).sort();
-    // 旧客户端可能写入彼此矛盾的顺序；打破环时按固定 ID 选点，保证双方得出同一顺序。
+    const available = [...remaining].filter((key) => incoming.get(key) === 0).sort();
     const key = available[0] ?? [...remaining].sort()[0];
     remaining.delete(key);
-    ordered.push(turns.get(key)!);
+    const members = groups.get(key)!;
+    members.sort((a, b) => a === b ? 0 : a === key ? -1 : b === key ? 1 : a < b ? -1 : 1);
+    ordered.push(...members.map((member) => turns.get(member)!));
     for (const next of outgoing.get(key) ?? []) {
       if (remaining.has(next)) incoming.set(next, Math.max(0, (incoming.get(next) ?? 0) - 1));
     }

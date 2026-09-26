@@ -1,5 +1,6 @@
 // 云端同步客户端:收集本地脏记录 push、拉取远端增量按记录级 LWW 合并、
 // 按 syncReadyAt 下载完整正文。绝不整库覆盖——每条记录单独比时间,新者胜。
+import { recoverPendingImage } from "./sync-images";
 import { fetchWithTimeout } from "./fetch-utils";
 import {
   getAllBookMetadata,
@@ -20,7 +21,8 @@ import {
   mergeLegacyStats,
   removeBookIfOlder,
   saveBookMetaIfNewer,
-  saveBookImages,
+  saveRecoveredCover,
+  saveRecoveredImage,
   saveBookMetadataIfNewer,
   saveChat,
   saveImportedBookIfMissing,
@@ -772,38 +774,30 @@ export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
   if (signal.aborted) throw new DOMException("同步已取消", "AbortError");
 
   // 5. 失败的单张插图单独重试；404 表示源端没有该图片，其余失败保留到下轮。
-  const recoveredImages: BookImage[] = [];
   for (const [key, entry] of pendingImages) {
     if (refreshedBooks.has(entry.bookId)) continue;
     if (signal.aborted) throw new DOMException("同步已取消", "AbortError");
-    const meta = await getBookMeta(entry.bookId);
-    if (!meta) {
-      pendingImages.delete(key);
-      continue;
-    }
     try {
-      const existing = await getBookImage(entry.imageId);
-      if (existing) {
-        pendingImages.delete(key);
-        continue;
-      }
-      const blob = await downloadImage(entry.bookId, entry.imageId, signal);
+      const kind = await recoverPendingImage(entry, {
+        getBook: getBookMeta,
+        getImage: getBookImage,
+        download: (bookId, imageId) => downloadImage(bookId, imageId, signal),
+        toDataUrl: blobToDataUrl,
+        saveCover: saveRecoveredCover,
+        saveImage: saveRecoveredImage,
+      });
       pendingImages.delete(key);
-      if (blob) recoveredImages.push({ id: entry.imageId, bookId: entry.bookId, blob });
+      if (kind) {
+        changed = true;
+        deps.onApplied?.(kind);
+        if (kind === "images" && typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("moting:image-updated", { detail: { imageId: entry.imageId } }));
+        }
+      }
     } catch (error) {
       if (signal.aborted) throw error;
-      // 短暂网络/服务端错误下轮重试。
+      // 下载或落盘失败都保留队列，下轮重试。
     }
-  }
-  if (recoveredImages.length) {
-    await saveBookImages(recoveredImages);
-    for (const image of recoveredImages) {
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("moting:image-updated", { detail: { imageId: image.id } }));
-      }
-    }
-    changed = true;
-    deps.onApplied?.("images");
   }
 
   // 6. 听书进度:远端比本地新才写。不动书的 updatedAt,免得这本书的 meta 下一轮又被推回去。
