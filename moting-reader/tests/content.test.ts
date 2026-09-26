@@ -10,8 +10,8 @@ import {
   createChapter,
   formatRemaining,
   movePosition,
-  nextChapterRange,
   outlineOf,
+  planChapterWindow,
   positionAtPercent,
   positionFor,
   remainingCharacters,
@@ -285,88 +285,81 @@ test("进度条拖到哪个百分比就落在对应的章和句，读回来还�
   assert.equal(positionAtPercent(book, 180).percent, 100);
 });
 
-const scrollWindow = (over: Partial<Parameters<typeof nextChapterRange>[1]> = {}) => ({
-  lastChapter: 11,
-  hitStart: false,
-  hitEnd: false,
-  firstBottom: null,
-  lastTop: null,
-  viewportHeight: 800,
-  margin: 1200,
-  windowSize: 5,
-  ...over,
+const VIEW = 800;
+/** 按章高依次排开，offset 是第一章顶边相对视口的位置。 */
+const layoutSections = (start: number, heights: number[], offset: number) => {
+  let top = offset;
+  return heights.map((height, i) => {
+    const section = { index: start + i, top, bottom: top + height };
+    top += height;
+    return section;
+  });
+};
+const plan = (
+  range: { start: number; end: number },
+  sections: ReturnType<typeof layoutSections>,
+  primed: number[] = sections.map((section) => section.index)
+) =>
+  planChapterWindow({
+    range,
+    lastChapter: 11,
+    primed: new Set(primed),
+    sections,
+    viewportHeight: VIEW,
+    buffer: 2400,
+    trimDistance: 4800,
+  });
+
+test("连续滚动窗口：视口附近还没排版的章先排，往上翻时它就不会再被撑开", () => {
+  // 视口在第 5 章里，第 4 章（上方）和第 6 章（下方）都没排版，先排离得近的上方那章。
+  const sections = layoutSections(4, [3000, 3000, 3000], -3500);
+  assert.deepEqual(plan({ start: 4, end: 6 }, sections, [5]), {
+    kind: "prime",
+    index: 4,
+  });
 });
 
-test("连续滚动：底部哨兵进区就接上下一章", () => {
+test("连续滚动窗口：上方缓冲不够就往回接一章，下方不够就往下接", () => {
+  // 刚跳到第 5 章章首：上方什么都没有。
   assert.deepEqual(
-    nextChapterRange({ start: 5, end: 5 }, scrollWindow({ hitEnd: true })),
-    { start: 5, end: 6 }
+    plan({ start: 5, end: 5 }, layoutSections(5, [9000], 0)),
+    { kind: "prepend" }
+  );
+  // 上方够了，下方只剩半屏。
+  assert.deepEqual(
+    plan({ start: 4, end: 5 }, layoutSections(4, [4000, 1200], -4000)),
+    { kind: "append" }
   );
 });
 
-test("连续滚动：顶部哨兵进区就往回接上一章", () => {
-  assert.deepEqual(
-    nextChapterRange({ start: 5, end: 5 }, scrollWindow({ hitStart: true })),
-    { start: 4, end: 5 }
-  );
-});
-
-test("连续滚动：到书的两端就不再往外接", () => {
-  const atEnd = { start: 7, end: 11 };
+test("连续滚动窗口：到书的两端就不再往外接", () => {
+  assert.equal(plan({ start: 0, end: 0 }, layoutSections(0, [9000], 0)), null);
+  // 读到最后一章末尾：下方没有了，上方已经够。
   assert.equal(
-    nextChapterRange(atEnd, scrollWindow({ hitEnd: true })),
-    atEnd
-  );
-  const atStart = { start: 0, end: 4 };
-  assert.equal(
-    nextChapterRange(atStart, scrollWindow({ hitStart: true })),
-    atStart
+    plan({ start: 10, end: 11 }, layoutSections(10, [4000, 1000], -4200)),
+    null
   );
 });
 
-test("连续滚动：挂满一窗后接一章就摘掉另一头", () => {
-  assert.deepEqual(
-    nextChapterRange(
-      { start: 2, end: 6 },
-      scrollWindow({ hitEnd: true, firstBottom: -4000 })
-    ),
-    { start: 3, end: 7 }
-  );
-  assert.deepEqual(
-    nextChapterRange(
-      { start: 2, end: 6 },
-      scrollWindow({ hitStart: true, lastTop: 6000 })
-    ),
-    { start: 1, end: 5 }
-  );
+test("连续滚动窗口：缓冲补够之后再去排远处的章", () => {
+  // 下方第 7 章离视口 4000px 以外，没排版；上下缓冲都够了才轮到它。
+  const sections = layoutSections(4, [3000, 3000, 3000, 3000], -4000);
+  assert.deepEqual(plan({ start: 4, end: 7 }, sections, [4, 5, 6]), {
+    kind: "prime",
+    index: 7,
+  });
 });
 
-test("连续滚动：要摘的那一章还没退出缓冲区就先留着，免得来回抖", () => {
-  // 首章下边缘只在视口上方 300px，小于 1200px 的缓冲，摘掉它顶部哨兵会立刻再进区。
-  assert.deepEqual(
-    nextChapterRange(
-      { start: 2, end: 6 },
-      scrollWindow({ hitEnd: true, firstBottom: -300 })
-    ),
-    { start: 2, end: 7 }
-  );
-  assert.deepEqual(
-    nextChapterRange(
-      { start: 2, end: 6 },
-      scrollWindow({ hitStart: true, lastTop: 1500 })
-    ),
-    { start: 1, end: 6 }
-  );
-});
-
-test("连续滚动：两端同时进区时先往下接，读者是朝前走的", () => {
-  assert.deepEqual(
-    nextChapterRange(
-      { start: 5, end: 5 },
-      scrollWindow({ hitStart: true, hitEnd: true })
-    ),
-    { start: 5, end: 6 }
-  );
+test("连续滚动窗口：远到用不上的章才摘，摘完两头缓冲仍然够", () => {
+  // 第 2 章整章都在视口上方 6000px 以外。
+  const far = layoutSections(2, [3000, 3000, 3000, 9000], -12000);
+  assert.deepEqual(plan({ start: 2, end: 5 }, far), { kind: "trim-start" });
+  // 末章顶边在视口下方 5000px 以外。
+  const below = layoutSections(4, [3000, 9000, 3000], -3000);
+  assert.deepEqual(plan({ start: 4, end: 6 }, below), { kind: "trim-end" });
+  // 只差一点点够不上摘章距离的就留着，免得摘了又接、来回抖。
+  const near = layoutSections(2, [3000, 3000, 9000], -5000);
+  assert.equal(plan({ start: 2, end: 4 }, near), null);
 });
 
 const longText = (chars: number) => "字".repeat(chars) + "。";

@@ -3713,6 +3713,14 @@ html[data-keyboard-open] .bottom-bar {
   content-visibility: visible;
 }
 
+/* 停稳之后一段段排好的段落、整章排好的章（见 moting-app.tsx 的 rebalance）：
+   不再按估算占位。滑进视口的段落早就排完了，不会先空一下再出字，
+   往上翻也不会被撑开把正文顶走。估算占位只留给滑动中刚往下接上、还没来得及排的那一章。 */
+.reader-shell.is-scroll .reader-article .reader-block[data-primed],
+.reader-shell.is-scroll .reader-chapter[data-primed] .reader-block {
+  content-visibility: visible;
+}
+
 .reader-article .reader-block.is-heading {
   margin: 2em 0 0.9em;
   font-weight: 600;
