@@ -7403,7 +7403,9 @@ export default function MotingApp() {
           onOpen={(section) => navigate({ name: "settings", section })}
           onBack={() => goBack(view.section ? { name: "settings" } : { name: "home" })}
         />
-      ) : (
+      ) : null}
+      {/* 设置跟阅读器、听书页一样盖在上面，外壳只藏不卸：卸掉的话回来整个主页重建，
+          推荐区重新加载、滚动位置也回到顶上。 */}
         <div
           className={`app-frame${view.name === "find" ? " is-bare" : ""}${frameSuspended ? " is-suspended" : ""}`}
           aria-hidden={frameSuspended}
@@ -7537,7 +7539,7 @@ export default function MotingApp() {
             </div>
           ) : null}
         </div>
-      )}
+
 
       <input
         ref={fileInputRef}

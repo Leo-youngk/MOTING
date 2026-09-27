@@ -13,6 +13,7 @@ vinext 的 App Router 也监听 popstate，每次后退都去服务器取一遍 
 顺带检查回到读到的地方：
 4. 在阅读器里刷新（冷启动直接落进阅读器），第一帧正文就停在读到的那句，不先闪一帧章首。
 5. 左右翻页时退出再进，停在同一页——页首常是上一页没说完的半句，不能退回上一页。
+6. 从设置返回主页，主页还是原来那些节点，没有整页重建。
 """
 import os
 import random
@@ -122,6 +123,18 @@ def check_paged_reopen(page):
         assert before and before == after, f"左右翻页：退出前在 {before}，再进来到了 {after}"
 
 
+def check_settings_keeps_home(page):
+    page.get_by_role("button", name="主页", exact=True).click()
+    page.locator(".home-row").first.wait_for()
+    page.evaluate("() => { document.querySelector('.home-row').__kept = true; }")
+    page.get_by_role("button", name="设置", exact=True).click()
+    page.locator(".settings-screen").wait_for()
+    page.locator(".page-bar__back").click()
+    page.locator(".home-row").first.wait_for()
+    kept = page.evaluate("() => document.querySelector('.home-row').__kept === true")
+    assert kept, "从设置返回，主页被卸载重建了"
+
+
 def check_return(page, context, go_back, label):
     rsc = []
     listener = lambda request: ".rsc" in request.url and rsc.append(request.url)
@@ -172,6 +185,9 @@ def main():
         page.locator(".reader-article").wait_for()
         check_reload_lands_in_place(page)
         check_paged_reopen(page)
+        show_chrome(page)
+        page.get_by_role("button", name="返回书架").click()
+        check_settings_keeps_home(page)
 
         assert not errors, errors
         browser.close()
