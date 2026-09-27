@@ -70,3 +70,44 @@ cover cache reuse, no synthesis on playback, byte-range correctness, malformed
 requests, expiry and authentication. This validates transport and integration,
 not iPhone lock-screen reliability. Real-device validation remains required
 before integrating into the formal player.
+
+## Fast native stream — 2026-09-27-stream-v1
+
+Default test mode now creates a text session when a book/chapter is selected,
+prewarms only the first sentence (up to 40 characters), and enables the play
+button as soon as the session URL is ready. The click synchronously sets one
+native `<audio src>` and calls play. No foreground TTS pump or segment handoff
+is involved. Remaining text is synthesized server-side in batches up to 600
+characters as the native HTTP response is consumed. Completed batches are
+cached in R2; data is emitted before the upstream turn finishes. The existing
+framed `/api/tts` API and formal player remain compatible.
+
+The Edge websocket now converts Blob frames in order as they arrive, instead
+of waiting for all frames. It rejects premature websocket closure, preserves
+callback ordering, and never retries a stream segment after any bytes were
+sent. Request cancellation closes upstream work. Queue buffering is bounded
+per synthesis batch. Existing HLS/MMS/swap remain available for comparison.
+
+`stream-first-playing.ms` is click-to-first-playing (not an acoustic microphone
+measurement). `stream-server.firstAudioMs` is server synthesis/cache-to-first
+emission, excluding session lookup and client network; `firstSource` distinguishes
+cache from TTS. The metrics fetch is diagnostic only, not required for audio.
+Do not conflate these measurements or claim a subsecond target without device
+results. Opening the page may prewarm the first sentence, so a warm start is
+not a cold-start benchmark.
+
+This is a bounded validation session, not the final player: maximum 22,000 text
+characters / 40 synthesis batches, no seek or disconnect-resume, stop at requested
+duration on a batch boundary (or text end). Unknown length responses truthfully
+return HTTP 200 with `Accept-Ranges: none`, including when a client supplies Range.
+Safari's behavior for a long generated MP3 response needs real-device testing;
+HLS remains the comparison path. Generation depends on an open native media
+connection, not durable background jobs after disconnect. Cloudflare invocation
+and upstream limits still apply; this does not claim indefinite playback.
+
+Unlike the HLS VOD test, selected text is temporarily saved to authenticated R2
+session objects so the native player can GET its media URL. Session access expires
+in 48 hours; cache keys have daily buckets and are reused for up to 48 hours.
+Cleanup touches only `audio-stream-v1/`, at most 50 old objects on later successful
+warmups. It is opportunistic, not scheduled deletion. No sync book/position data
+is modified.

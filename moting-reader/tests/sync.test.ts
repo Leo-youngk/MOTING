@@ -583,7 +583,7 @@ test("legacy conversations preserve question and answer adjacency", () => {
 
 test("HLS preparation and media require a sync session and reject cross-origin requests", async () => {
   const { e } = env();
-  for (const [path, body] of [["hls/prepare", { text: "测试" }], ["hls/finish", { ids: [] }], ["hls/audio/missing.mp3", null]] as const) {
+  for (const [path, body] of [["audio-stream/session", { text: "测试", seconds: 600 }], ["audio-stream/missing.mp3", null], ["hls/prepare", { text: "测试" }], ["hls/finish", { ids: [] }], ["hls/audio/missing.mp3", null]] as const) {
     assert.equal((await handleSync(syncRequest(path, body), e)).status, 401);
   }
   const cookie = await loginCookie(e);

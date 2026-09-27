@@ -452,7 +452,7 @@ const worker = {
     if (pathname.startsWith("/api/zlibrary/")) return handleZlibrary(request);
     if (pathname.startsWith("/api/sync/")) {
       // 旧域名部署没有 R2/D1,凭 SYNC_UPSTREAM 把同步请求原样代理到主部署。
-      return env.SYNC_UPSTREAM ? forwardSync(request, env.SYNC_UPSTREAM) : handleSync(request, env);
+      return env.SYNC_UPSTREAM ? forwardSync(request, env.SYNC_UPSTREAM) : handleSync(request, env, ctx);
     }
     if (pathname === "/api/tts") {
       return handleSpeech(request, ctx);

@@ -15,7 +15,7 @@ const mp3=readFileSync(path), meta=Buffer.from('[]'), len=Buffer.alloc(4);len.wr
 const body=Buffer.concat([len,meta,mp3]);
 const browser=await chromium.launch({headless:true, ...(process.env.BROWSER_PATH ? {executablePath:process.env.BROWSER_PATH} : {})});
 try {
- for (const mode of ['mms','swap','hls']) {
+ for (const mode of (process.env.PROBE_MODES || 'mms,swap,hls,stream').split(',')) {
   const context=await browser.newContext();
   const page=await context.newPage(), errors=[];
   page.on('pageerror',e=>errors.push(e.message));
@@ -28,6 +28,9 @@ try {
     return b;
    };
   });
+  await page.route('**/api/sync/audio-stream/session',route=>route.fulfill({json:{id:'fixture',url:'/native-test.mp3',chars:1200}}));
+  await page.route('**/api/sync/audio-stream/fixture.json',route=>route.fulfill({json:{firstAudioMs:25,firstSource:'tts'}}));
+  await page.route('**/native-test.mp3',route=>route.fulfill({body:mp3,contentType:'audio/mpeg'}));
   if(mode==='hls') {
    await page.addInitScript(()=>{
     const original=HTMLMediaElement.prototype.canPlayType;
@@ -56,7 +59,10 @@ try {
   await page.waitForFunction(()=>document.querySelector('#chapter').options.length>0);
   await page.selectOption('#mode',mode);
   await page.click('#start');
-  if(mode==='hls') {
+  if(mode==='stream') {
+   await page.waitForFunction(()=>JSON.parse(localStorage.getItem('moting:mms-probe-log')||'[]').some(e=>e.type==='stream-first-playing'));
+   assert.match(await page.locator('#status').textContent(),/播放器开始播放/);
+  } else if(mode==='hls') {
    await page.waitForFunction(()=>!document.querySelector('#hls-play').hidden);
    assert.match(await page.locator('#status').textContent(),/已准备/);
    assert.equal(await page.locator('audio').getAttribute('src'),null);
@@ -70,7 +76,7 @@ try {
     await new Promise(r=>{b.addEventListener('updateend',r,{once:true});b.remove(start,end);});
     const e=new Event('bufferedchange');Object.defineProperty(e,'removedRanges',{value:{length:1,start:()=>start,end:()=>end}});b.dispatchEvent(e);
    });
-   await page.waitForFunction(()=>JSON.parse(localStorage.getItem('moting:mms-probe-log')||'[]').some(e=>e.type==='repaired'));
+   await page.waitForFunction(()=>JSON.parse(localStorage.getItem('moting:mms-probe-log')||'[]').some(e=>e.type==='repaired')).catch(async error=>{console.log(JSON.stringify({errors,logs:await page.evaluate(()=>localStorage.getItem('moting:mms-probe-log'))}));throw error;});
    await page.waitForFunction(()=>document.querySelector('audio').currentTime>5,null,{timeout:15000});
   } else {
    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('moting:mms-probe-log')||'[]').filter(e=>e.type==='cache-hit').length>=2,null,{timeout:15000});

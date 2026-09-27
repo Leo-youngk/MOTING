@@ -1,3 +1,4 @@
+import { handleAudioStream } from "./audio-stream.ts";
 import { handleHls } from "./hls.ts";
 import { synthesizeSpeech } from "./edge-tts.ts";
 // 云端同步服务端:登录会话 + 记录级 LWW 增量同步 + R2 正文/插图存取。
@@ -352,7 +353,7 @@ async function handleBookImage(
   return json({ error: "只支持 GET、HEAD 或 POST 请求" }, 405);
 }
 
-export async function handleSync(request: Request, env: SyncEnv): Promise<Response> {
+export async function handleSync(request: Request, env: SyncEnv, ctx?: ExecutionContext): Promise<Response> {
   try {
     if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "POST") {
       return json({ error: "只支持 GET、HEAD 或 POST 请求" }, 405);
@@ -381,6 +382,13 @@ export async function handleSync(request: Request, env: SyncEnv): Promise<Respon
       const token = sessionToken(request);
       if (TOKEN_PATTERN.test(token)) await resolved.store.dropSession(await sha256Hex(token));
       return json({ connected: false }, 200, sessionCookie(request, "", 0));
+    }
+    if (action.startsWith("audio-stream/")) {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先在设置里登录云端同步" }, 401);
+      const response = await handleAudioStream(request, resolved.bucket, ctx);
+      if (session.cookie) response.headers.set("set-cookie", session.cookie);
+      return response;
     }
     if (action.startsWith("hls/")) {
       const session = await checkSession(request, resolved.store);

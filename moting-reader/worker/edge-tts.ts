@@ -147,7 +147,8 @@ async function synthesizeOnce(
   text: string,
   voice: string,
   version: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onAudio?: (audio: Uint8Array) => void | Promise<void>
 ): Promise<SynthesisResult> {
   const connectionId = crypto.randomUUID().replace(/-/g, "");
   const url =
@@ -175,7 +176,8 @@ async function synthesizeOnce(
   }
   socket.accept();
 
-  const audioFrames: (Blob | ArrayBuffer)[] = [];
+  const chunks: Uint8Array[] = [];
+  let pending = Promise.resolve();
   const boundaries: WordBoundary[] = [];
   let audioBytes = 0;
   let onAbort: (() => void) | null = null;
@@ -211,7 +213,19 @@ async function synthesizeOnce(
           }
           return;
         }
-        audioFrames.push(event.data as Blob | ArrayBuffer);
+        const frame = event.data as Blob | ArrayBuffer;
+        // Serialize asynchronous Blob conversion so websocket frame order is preserved.
+        pending = pending.then(async () => {
+          const buffer = frame instanceof ArrayBuffer ? frame : await frame.arrayBuffer();
+          const view = new Uint8Array(buffer);
+          if (view.length < 2) throw new Error("朗读服务返回了无效音频帧");
+          const headerLength = (view[0] << 8) | view[1];
+          if (2 + headerLength > view.length) throw new Error("朗读服务返回了无效音频帧");
+          const audio = view.subarray(2 + headerLength);
+          if (audio.length) { chunks.push(audio); await onAudio?.(audio); }
+        });
+        // Attach immediately to avoid an unhandled rejection before turn.end.
+        pending.catch(error => fail(error instanceof Error ? error : new Error(String(error))));
         return;
       }
 
@@ -253,12 +267,12 @@ async function synthesizeOnce(
     });
 
     socket.addEventListener("close", (event: CloseEvent) => {
-      if (audioFrames.length) complete();
-      else fail(new Error(`朗读服务提前关闭：${event.code}`));
+      fail(new Error(`朗读服务提前关闭：${event.code}`));
     });
 
     onAbort = () => fail(new Error("朗读请求已取消"));
     signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
   });
 
   try {
@@ -282,6 +296,7 @@ async function synthesizeOnce(
         `${escapeXml(text)}</prosody></voice></speak>`
     );
     await finished;
+    await pending;
   } finally {
     if (onAbort) signal.removeEventListener("abort", onAbort);
     try {
@@ -289,21 +304,6 @@ async function synthesizeOnce(
     } catch {
       // 服务端可能已经关闭，忽略。
     }
-  }
-
-  // Workers 的二进制帧是 Blob，拿不到同步字节，只能收完再逐帧转换。
-  // 每帧前 2 字节是大端头部长度，其后是头部文本，剩下才是音频。
-  const chunks: Uint8Array[] = [];
-  for (const frame of audioFrames) {
-    const buffer =
-      frame instanceof ArrayBuffer ? frame : await (frame as Blob).arrayBuffer();
-    const view = new Uint8Array(buffer);
-    if (view.length < 2) throw new Error("朗读服务返回了无效音频帧");
-    const headerLength = (view[0] << 8) | view[1];
-    if (2 + headerLength > view.length) {
-      throw new Error("朗读服务返回了无效音频帧");
-    }
-    chunks.push(view.subarray(2 + headerLength));
   }
 
   const audio = new Uint8Array(
@@ -322,15 +322,16 @@ async function synthesizeOnce(
 export async function synthesizeSpeech(
   text: string,
   voice: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onAudio?: (audio: Uint8Array) => void | Promise<void>
 ): Promise<SynthesisResult> {
   const version = await edgeVersion(false, signal);
   try {
-    return await synthesizeOnce(text, voice, version, signal);
+    return await synthesizeOnce(text, voice, version, signal, onAudio);
   } catch (error) {
     if (!(error instanceof HandshakeError)) throw error;
     const fresh = await edgeVersion(true, signal);
     if (fresh === version) throw error;
-    return synthesizeOnce(text, voice, fresh, signal);
+    return synthesizeOnce(text, voice, fresh, signal, onAudio);
   }
 }

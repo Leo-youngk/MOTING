@@ -26,7 +26,7 @@
 <body>
 <p style="margin:0"><a href="/" style="color:var(--accent)">‹ 回到墨听</a></p>
 <h1>后台听书测试</h1>
-<p>HLS 测试：先登录云端同步，保持本页在前台准备音频，再点播放后锁屏。准备的音频存放云端，播放时由 Safari 直接读取。本页不保存正式听书进度；从所选章开头测试。切到后台与从任务列表强制关闭应用是不同操作。</p>
+<p>先登录云端同步，选择书和章节，点击开始即可播放。默认快速首播模式会在选择后上传本次测试的文字并预热首句；后续音频由服务端连续生成。仅测试从章首开始的播放，不修改正式听书进度。流式测试暂不支持拖动定位；请锁屏或切换应用，不要从任务列表强制关闭。</p>
 
 <section>
   <div id="caps">检测中…</div>
@@ -39,11 +39,12 @@
   <select id="chapter"></select>
   <label for="mode">播放方式</label>
   <select id="mode">
-    <option value="hls" selected>原生 HLS：准备完成后由 Safari 连续播放</option>
+    <option value="stream" selected>快速首播：原生音频流，服务端连续生成</option>
+    <option value="hls">原生 HLS：准备完成后由 Safari 连续播放</option>
     <option value="mms">MMS 连续流：所有音频追加进同一个音频元素</option>
     <option value="swap">逐段换源：每段播完换地址再 play()（现在的做法）</option>
   </select>
-  <label for="minutes">HLS 准备时长（按实际倍速计算，最多 40 批）</label>
+  <label for="minutes">测试时长（快速模式最多约 2.2 万字，实际时长以内容为准）</label>
   <select id="minutes"><option value="10">10 分钟快速验证</option><option value="60" selected>60 分钟锁屏验证</option></select>
   <button id="hls-play" hidden>准备完成，点击播放</button>
   <label for="size">每段字数（越小交接越频繁，越容易暴露问题）</label>
@@ -144,7 +145,7 @@ const MMS = window.ManagedMediaSource;
 const MS = window.MediaSource;
 const Source = MMS || MS;
 const caps = [
-  `测试版本: 2026-09-27-hls-v1`,
+  `测试版本: 2026-09-27-stream-v1`,
   `UA: ${navigator.userAgent}`,
   `独立模式（主屏幕打开）: ${matchMedia("(display-mode: standalone)").matches}`,
   `原生 HLS: ${audio.canPlayType("application/vnd.apple.mpegurl") || "不支持"}`,
@@ -215,6 +216,7 @@ async function loadChapters() {
   const book = books.find((b) => b.id === $("book").value);
   const position = book && (book.listeningPosition || book.readingPosition);
   if (position && position.chapterIndex < chapters.length) $("chapter").value = String(position.chapterIndex);
+  await prepareStreamSession();
 }
 $("book").addEventListener("change", loadChapters);
 
@@ -292,7 +294,7 @@ let playedSegments = 0;
 let startedAt = 0;
 
 function updateStatus(extra) {
-  if ($("mode").value === "hls") return;
+  if (["hls", "stream"].includes($("mode").value)) return;
   $("status").textContent = [
     `方式：${$("mode").value === "mms" ? "MMS 连续流" : "逐段换源"}`,
     `已开始 ${Math.round((Date.now() - startedAt) / 60000)} 分钟，播放位置 ${Math.round(audio.currentTime / 60)} 分钟`,
@@ -478,6 +480,84 @@ function silentClip() {
   return URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
 }
 
+let streamSession = null;
+let streamRevision = 0;
+let clickedAt = 0;
+let audibleLogged = false;
+async function prepareStreamSession() {
+  const revision = ++streamRevision;
+  streamSession = null;
+  if ($("mode").value !== "stream" || !chapters.length || running) return;
+  $("start").disabled = true;
+  $("status").textContent = "正在连接听书服务…";
+  let text = "";
+  for (const segment of segmentsFrom(Number($("chapter").value), 600)) {
+    text += segment.text;
+    if (text.length >= 22000) break;
+  }
+  text = text.slice(0, 22000);
+  if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+  try {
+    const response = await fetch("/api/sync/audio-stream/session", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text, seconds: Number($("minutes").value) * 60 * Number($("rate").value) }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (revision !== streamRevision) return;
+    streamSession = data;
+    $("start").disabled = false;
+    $("status").textContent = "可以播放。首句正在预热，点击开始无需等待后文生成。";
+    log("stream-session-ready", { chars: data.chars });
+  } catch (error) {
+    if (revision !== streamRevision) return;
+    $("status").textContent = String(error) + "。登录后重新打开测试页或重新选择章节。";
+    log("stream-session-fail", { message: String(error) });
+  }
+}
+for (const id of ["chapter", "mode", "minutes", "rate"]) $(id).addEventListener("change", () => {
+  if ($("mode").value !== "stream") $("start").disabled = false;
+  prepareStreamSession();
+});
+async function readStreamMetrics() {
+  if (!streamSession) return;
+  try {
+    const response = await fetch(`/api/sync/audio-stream/${streamSession.id}.json`);
+    if (!response.ok) return;
+    const metrics = await response.json();
+    log("stream-server", metrics);
+  } catch (error) { log("stream-metrics-fail", { message: String(error) }); }
+}
+function runStream() {
+  if (!streamSession) throw new Error("听书服务尚未连接，请重新选择章节");
+  clickedAt = performance.now(); audibleLogged = false;
+  audio.src = streamSession.url;
+  audio.playbackRate = Number($("rate").value);
+  log("stream-play-request");
+  // Called synchronously from the start click: keep Safari's user activation.
+  return audio.play();
+}
+audio.addEventListener("playing", () => {
+  if ($("mode").value !== "stream" || audibleLogged) return;
+  audibleLogged = true;
+  const elapsed = Math.round(performance.now() - clickedAt);
+  log("stream-first-playing", { ms: elapsed });
+  $("status").textContent = `点击到播放器开始播放：${elapsed} 毫秒。后文由服务端继续生成，可锁屏测试。`;
+  // Diagnostics only: this request does not supply or schedule audio.
+  setTimeout(readStreamMetrics, 1500);
+});
+audio.addEventListener("error", () => {
+  if ($("mode").value !== "stream") return;
+  $("status").textContent = `音频流中断（${audio.error?.code || "未知"}），请复制日志。`;
+  readStreamMetrics();
+});
+audio.addEventListener("ended", () => {
+  if ($("mode").value !== "stream") return;
+  $("status").textContent = "本次流式测试结束，请复制日志。";
+  readStreamMetrics();
+});
+
 async function hlsRequest(action, body) {
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -556,7 +636,8 @@ async function start() {
   setupMediaSession(book ? book.title : "测试");
   const segments = segmentsFrom(Number($("chapter").value), Number($("size").value));
   try {
-    if ($("mode").value === "hls") await runHls();
+    if ($("mode").value === "stream") await runStream();
+    else if ($("mode").value === "hls") await runHls();
     else if ($("mode").value === "mms") await runMms(segments);
     else await runSwap(segments);
   } catch (error) {
