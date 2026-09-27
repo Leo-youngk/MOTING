@@ -59,7 +59,6 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { RetainedTab } from "./retained-tab";
 import { useAppNavigation } from "../hooks/use-app-navigation";
 import { useAppUpdate } from "../hooks/use-app-update";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
@@ -6065,15 +6064,7 @@ export default function MotingApp() {
         ]);
       syncQuietRef.current = true;
       if (storedBooks) {
-        setBooks((current) => {
-          const incoming = new Map(storedBooks.map((book) => [book.id, book]));
-          const retained = current.flatMap((book) => {
-            const updated = incoming.get(book.id);
-            incoming.delete(book.id);
-            return updated ? [updated] : [];
-          });
-          return [...retained, ...incoming.values()];
-        });
+        setBooks(storedBooks);
         // 远端删掉的书，内存里那份正文也别留着。
         const alive = new Set(storedBooks.map((book) => book.id));
         dropContent((id) => alive.has(id));
@@ -6385,6 +6376,7 @@ export default function MotingApp() {
       setBooks((current) =>
         current
           .map((book) => (book.id === bookId ? { ...book, ...changes } : book))
+          .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
       );
       void updateBookMeta(bookId, changes).catch((error) => reportStorageError("book", error));
     },
@@ -6432,6 +6424,7 @@ export default function MotingApp() {
                 }
               : book;
           })
+          .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
       );
     } catch (error) {
       for (const entry of entries) {
@@ -6911,8 +6904,11 @@ export default function MotingApp() {
         .getPropertyValue(isReading ? "--reader-background" : "--paper")
         .trim();
       if (!color) return;
-      // Keep browser chrome stable: never clear a valid color just to force a repaint.
-      if (meta.content !== color) meta.content = color;
+      // iOS 从后台切回来会把状态栏刷回 HTML 里那条写死的浅色，露出「白色挡块」。
+      // 而 meta.content 还留着上次写进去的正确值，直接再赋一遍同样的字符串 iOS 不认、
+      // 不重绘。先塞个不同的值逼它认一次改动，再写回真正的底色，才会重新填色。
+      if (meta.content === color) meta.content = "";
+      meta.content = color;
     };
     apply();
     // 只在页面重新可见时补一次；隐藏时不用管，切回来那一下才是状态栏被刷掉的时机。
@@ -6923,6 +6919,7 @@ export default function MotingApp() {
     window.addEventListener("pageshow", apply);
     window.addEventListener("focus", apply);
     return () => {
+      delete root.dataset.inReader;
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("pageshow", apply);
       window.removeEventListener("focus", apply);
@@ -7306,6 +7303,7 @@ export default function MotingApp() {
   const activeMainView: MainView = backgroundView;
 
   // 详情页打开时保留真正的来处；可能从任意 Tab 进入同一本书。
+  const frameView = backgroundView;
   const frameSuspended = view.name === "reader" || view.name === "player" || view.name === "settings";
   const tabSuspended = view.name === "book-notes" || view.name === "history" || view.name === "store" || view.name === "find";
 
@@ -7393,7 +7391,7 @@ export default function MotingApp() {
           onOpen={(section) => navigate({ name: "settings", section })}
           onBack={() => goBack(view.section ? { name: "settings" } : { name: "home" })}
         />
-      ) : null}
+      ) : (
         <div
           className={`app-frame${view.name === "find" ? " is-bare" : ""}${frameSuspended ? " is-suspended" : ""}`}
           aria-hidden={frameSuspended}
@@ -7416,7 +7414,8 @@ export default function MotingApp() {
           </div>
 
           <section className="app-content">
-            <RetainedTab name="home" active={!frameSuspended && !tabSuspended && backgroundView === "home"}>
+            <div className={`app-tab-content${tabSuspended ? " is-suspended" : ""}`} aria-hidden={tabSuspended} inert={tabSuspended}>
+            {frameView === "home" ? (
               <HomeScreen
                 books={books}
                 stats={stats}
@@ -7433,8 +7432,7 @@ export default function MotingApp() {
                 }
                 onSearchStore={(query) => navigate({ name: "store", query })}
               />
-            </RetainedTab>
-            <RetainedTab name="library" active={!frameSuspended && !tabSuspended && backgroundView === "library"}>
+            ) : frameView === "library" ? (
               <LibraryScreen
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
@@ -7445,15 +7443,13 @@ export default function MotingApp() {
                 onOpenMetadata={setMetadataBook}
                 onDelete={setDeleteTarget}
               />
-            </RetainedTab>
-            <RetainedTab name="listen" active={!frameSuspended && !tabSuspended && backgroundView === "listen"}>
+            ) : frameView === "listen" ? (
               <ListenScreen
                 books={books}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}
               />
-            </RetainedTab>
-            <RetainedTab name="notes" active={!frameSuspended && !tabSuspended && backgroundView === "notes"}>
+            ) : (
               <NotesScreen
                 notes={notes}
                 books={books}
@@ -7461,7 +7457,8 @@ export default function MotingApp() {
                 onOpenBook={(book) => void openBookNotes(book)}
                 onOpenChat={setChatBook}
               />
-            </RetainedTab>
+            )}
+            </div>
             {view.name === "history" ? (
               <HistoryScreen sessions={sessions} onBack={() => goBack({ name: "home" })} />
             ) : view.name === "store" ? (
@@ -7528,6 +7525,7 @@ export default function MotingApp() {
             </div>
           ) : null}
         </div>
+      )}
 
       <input
         ref={fileInputRef}

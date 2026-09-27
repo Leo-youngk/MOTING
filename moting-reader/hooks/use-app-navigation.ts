@@ -200,8 +200,7 @@ export function useAppNavigation(): AppNavigation {
   // 回到列表页时把上次滚到哪儿放回去；没记过就是新进来，从头开始。
   useLayoutEffect(() => {
     if (!keepsScroll(view)) return;
-    // Tabs keep their own scroll surface; only document-scrolling detail pages restore here.
-    window.scrollTo({ top: isTab(view) ? 0 : scrollsRef.current.get(viewKey(view)) ?? 0, behavior: "instant" });
+    window.scrollTo(0, scrollsRef.current.get(viewKey(view)) ?? 0);
   }, [view]);
 
   return { view, backgroundView, navigate, selectTab, replace, goBack };
