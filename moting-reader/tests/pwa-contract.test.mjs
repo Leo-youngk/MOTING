@@ -51,3 +51,21 @@ test("production manifest includes every hashed asset, including lazy chunks", a
   assert.ok(expected.length > 0);
   assert.deepEqual(manifest.assets, expected);
 });
+
+// use-app-navigation 换掉 window.__VINEXT_RSC_NAVIGATE__，让应用自己的后退不去服务器取 RSC
+// （取不到就整页重载，读完书返回书库会白屏重开）。前提是 vinext 在 popstate 发生时才读这个入口；
+// 升级 vinext 后这里不过，说明那一招失效了，返回书库又会去拉 RSC。
+test("后退时 vinext 从 window 上现取 RSC 导航入口，应用能拦下自己的后退", async () => {
+  const { readdir } = await import("node:fs/promises");
+  const assetsRoot = new URL("dist/client/assets/", root);
+  const scripts = (await readdir(assetsRoot)).filter((name) => name.endsWith(".js"));
+  const bundles = await Promise.all(scripts.map((name) => readFile(new URL(name, assetsRoot), "utf8")));
+  const q = "[`\"']";
+  const popstateReadsGlobal = new RegExp(
+    `addEventListener\\(${q}popstate${q},[\\s\\S]{0,200}?window\\.__VINEXT_RSC_NAVIGATE__\\?\\.\\([^)]*${q}traverse${q}\\)`
+  );
+  assert.ok(bundles.some((code) => popstateReadsGlobal.test(code)));
+
+  const navigation = await readFile(new URL("hooks/use-app-navigation.ts", root), "utf8");
+  assert.match(navigation, /host\.__VINEXT_RSC_NAVIGATE__ = navigateRsc/);
+});
