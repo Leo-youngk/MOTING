@@ -26,6 +26,7 @@
 <body>
 <p style="margin:0"><a href="/" style="color:var(--accent)">‹ 回到墨听</a></p>
 <h1>后台听书测试</h1>
+<p>先用 600 字、4 分钟缓冲锁屏测试 60 分钟。回来复制日志，检查后台是否持续追加、播放是否越过切后台时的缓冲终点。本页不保存听书进度；更换方案请重新打开此页。</p>
 
 <section>
   <div id="caps">检测中…</div>
@@ -43,8 +44,8 @@
   </select>
   <label for="size">每段字数（越小交接越频繁，越容易暴露问题）</label>
   <select id="size">
-    <option value="600">600 字（约 2 分钟一段）</option>
-    <option value="1500" selected>1500 字（约 5 分钟一段）</option>
+    <option value="600" selected>600 字（约 2 分钟一段）</option>
+    <option value="1500">1500 字（约 5 分钟一段）</option>
     <option value="4800">4800 字（跟正式播放器一样）</option>
   </select>
   <label for="ahead">提前缓冲（MMS）</label>
@@ -78,8 +79,8 @@
   <div id="log"></div>
 </section>
 
-<script>
-"use strict";
+<script type="module">
+import { continuousAhead, missingInterval, appendWithRecovery } from "/mms-probe-core.mjs";
 // 验证 iOS 上后台连续听书：MMS 连续流 vs 逐段换源。日志存在 localStorage，锁屏一小时回来还在。
 const LOG_KEY = "moting:mms-probe-log";
 const LOG_LIMIT = 3000;
@@ -102,6 +103,8 @@ function log(type, data) {
     type,
     vis: document.visibilityState[0],
     ct: Math.round(audio.currentTime * 10) / 10,
+    epoch: Date.now(),
+    ahead: Math.round(continuousAhead(audio.buffered, audio.currentTime) * 10) / 10,
     buf: Math.round(bufferedEnd() * 10) / 10,
     paused: audio.paused,
     rs: audio.readyState,
@@ -137,6 +140,7 @@ const MMS = window.ManagedMediaSource;
 const MS = window.MediaSource;
 const Source = MMS || MS;
 const caps = [
+  `测试版本: 2026-09-27-recovery-v2`,
   `UA: ${navigator.userAgent}`,
   `独立模式（主屏幕打开）: ${matchMedia("(display-mode: standalone)").matches}`,
   `ManagedMediaSource: ${!!MMS}`,
@@ -237,12 +241,15 @@ async function fetchClip(segment, index) {
     try {
       const response = await fetch("/api/tts", {
         method: "POST",
+        signal: AbortSignal.timeout(60000),
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text: segment.text, voice: VOICE }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body = new Uint8Array(await response.arrayBuffer());
+      if (body.length < 4) throw new Error("音频响应过短");
       const metaLength = new DataView(body.buffer).getUint32(0);
+      if (4 + metaLength >= body.length) throw new Error("音频响应格式错误");
       const clip = body.slice(4 + metaLength);
       log("fetch-ok", { seg: index, ch: segment.chapter, chars: segment.text.length, kb: Math.round(clip.length / 1024), ms: Math.round(performance.now() - started) });
       return clip;
@@ -299,81 +306,110 @@ function setupMediaSession(title) {
 // ---------- 方式一：MMS 连续流 ----------
 async function runMms(segments) {
   const source = new Source();
-  // MMS 规定：不给 AirPlay 备用源就必须关掉远程播放，否则 sourceopen 不会来。
-  audio.disableRemotePlayback = true;
-  audio.src = URL.createObjectURL(source);
-  audio.playbackRate = Number($("rate").value);
-  // 这时还在点击手势的同步段里：先 play()，数据到了自己开始。
-  audio.play().then(() => log("play-ok")).catch((e) => log("play-reject", { message: String(e) }));
-  let streaming = true;
-  source.addEventListener("startstreaming", () => { streaming = true; log("startstreaming"); wake(); });
-  source.addEventListener("endstreaming", () => { streaming = false; log("endstreaming"); });
-  await new Promise((resolve) => source.addEventListener("sourceopen", resolve, { once: true }));
-  log("sourceopen", { managed: !!MMS });
-
-  const buffer = source.addSourceBuffer("audio/mpeg");
-  // MP3 本身不带时间戳，按顺序接在前一段后面。
-  buffer.mode = "sequence";
-  buffer.addEventListener("bufferedchange", (e) => {
-    if (e.removedRanges && e.removedRanges.length) log("evicted", { ranges: e.removedRanges.length });
-  });
-
   let wakeUp = null;
-  function wake() { if (wakeUp) { wakeUp(); wakeUp = null; } }
+  function wake() { const resolve = wakeUp; wakeUp = null; if (resolve) resolve(); }
+  const waitForNeed = () => new Promise((resolve) => {
+    const timer = setTimeout(done, 1000);
+    function done() { clearTimeout(timer); if (wakeUp === done) wakeUp = null; resolve(); }
+    wakeUp = done;
+  });
+  source.addEventListener("startstreaming", () => { log("startstreaming"); wake(); });
+  source.addEventListener("endstreaming", () => log("endstreaming"));
+  source.addEventListener("sourceclose", () => { log("sourceclose"); wake(); });
   audio.addEventListener("timeupdate", wake);
-  const waitForNeed = () => new Promise((resolve) => { wakeUp = resolve; setTimeout(resolve, 5000); });
-
-  // appendBuffer 满了会同步抛 QuotaExceededError，监听器要等它真的开始追加后再挂，
-  // 不然留下的 once 监听器会被下一次追加的 updateend 误触发。
-  const append = (bytes) => new Promise((resolve, reject) => {
-    buffer.appendBuffer(bytes);
-    const done = () => { buffer.removeEventListener("error", fail); resolve(); };
-    const fail = () => { buffer.removeEventListener("updateend", done); reject(new Error("SourceBuffer error")); };
+  document.addEventListener("visibilitychange", wake);
+  const opened = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("MMS sourceopen 超时")), 15000);
+    source.addEventListener("sourceopen", () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+  audio.disableRemotePlayback = true;
+  const sourceUrl = URL.createObjectURL(source);
+  audio.src = sourceUrl;
+  audio.playbackRate = Number($("rate").value);
+  audio.play().then(() => log("play-ok")).catch((e) => log("play-reject", { message: String(e) }));
+  await opened;
+  log("sourceopen", { managed: !!MMS });
+  const buffer = source.addSourceBuffer("audio/mpeg");
+  buffer.mode = "sequence";
+  const ledger = []; // 保存未播完的原始分段，以原时间戳补回被系统回收的区间。
+  let tail = 0;
+  let aheadCap = Number($("ahead").value);
+  let evicted = false;
+  buffer.addEventListener("bufferedchange", (e) => {
+    if (e.removedRanges && e.removedRanges.length) {
+      evicted = true;
+      log("evicted", { ranges: Array.from({length:e.removedRanges.length}, (_,i) => [e.removedRanges.start(i),e.removedRanges.end(i)]) });
+      wake();
+    }
+  });
+  const update = (operation) => new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); buffer.removeEventListener("updateend", done); buffer.removeEventListener("error", fail); source.removeEventListener("sourceclose", fail); };
+    const done = () => { cleanup(); resolve(); };
+    const fail = () => { cleanup(); reject(new Error("SourceBuffer 更新失败或超时")); };
+    const timer = setTimeout(fail, 15000);
     buffer.addEventListener("updateend", done, { once: true });
     buffer.addEventListener("error", fail, { once: true });
+    source.addEventListener("sourceclose", fail, { once: true });
+    try { operation(); } catch (e) { cleanup(); reject(e); }
   });
-  const trimPlayed = () => new Promise((resolve) => {
-    const cut = audio.currentTime - 60;
-    if (cut <= 0 || buffer.updating || !buffer.buffered.length || buffer.buffered.start(0) >= cut) return resolve();
-    buffer.addEventListener("updateend", resolve, { once: true });
-    buffer.remove(0, cut);
-  });
-  const ahead = () => bufferedEnd() - audio.currentTime;
-  /** 实际能提前缓冲多少秒：选的值，碰到存储上限后按装得下的量往下调。 */
-  let aheadCap = Number($("ahead").value);
-
-  let first = true;
-  for (const segment of segments) {
-    if (!running) return;
-    while (running && !first && ahead() > aheadCap) await waitForNeed();
-    const clip = await fetchClip(segment, segmentIndex);
-    // 同一段追加成功才往下走：装不下就等播放消化掉一些再试，不能跳过这段。
-    for (;;) {
-      if (!running) return;
-      await trimPlayed();
-      const before = bufferedEnd();
-      try {
-        await append(clip);
-        log("appended", { seg: segmentIndex, from: Math.round(before), to: Math.round(bufferedEnd()), streaming });
-        break;
-      } catch (error) {
-        if (!error || error.name !== "QuotaExceededError") {
-          log("append-fail", { seg: segmentIndex, message: String(error) });
-          running = false;
-          return;
-        }
-        aheadCap = Math.max(60, Math.floor(ahead()) - 60);
-        log("quota", { seg: segmentIndex, aheadCap });
-        const until = audio.currentTime + 60;
-        while (running && audio.currentTime < until) await waitForNeed();
+  const trimPlayed = async (aggressive = false) => {
+    const cut = audio.currentTime - (aggressive ? 2 : 60);
+    if (cut > 0 && buffer.buffered.length && buffer.buffered.start(0) < cut) await update(() => buffer.remove(0, cut));
+    while (ledger.length && ledger[0].end < audio.currentTime - 60) ledger.shift();
+  };
+  const append = async (bytes, start) => {
+    buffer.timestampOffset = start;
+    await appendWithRecovery(bytes, {
+      append: part => update(() => buffer.appendBuffer(part)),
+      trim: () => trimPlayed(true),
+      wait: waitForNeed,
+      alive: () => running && source.readyState === "open",
+      onQuota: size => {
+        aheadCap = Math.max(15, Math.min(aheadCap, continuousAhead(audio.buffered, audio.currentTime) / audio.playbackRate));
+        log("quota", { chunkBytes:size, aheadCap });
+      },
+    });
+  };
+  const repair = async () => {
+    evicted = false;
+    for (const item of ledger) {
+      if (!missingInterval(audio.buffered, Math.max(item.start, audio.currentTime), item.end)) continue;
+      await append(item.bytes, item.start);
+      if (missingInterval(audio.buffered, Math.max(item.start, audio.currentTime), item.end)) {
+        throw new Error("回收的音频无法完整补回；请降低提前缓冲量后重试");
       }
+      log("repaired", { seg:item.index, from:item.start, to:item.end });
     }
-    segmentIndex++;
-    first = false;
-  }
-  if (running && source.readyState === "open") {
-    source.endOfStream();
-    log("end-of-stream");
+  };
+  try {
+    for (const segment of segments) {
+      if (!running) return;
+      for (;;) {
+        if (source.readyState !== "open") throw new Error("MMS 已关闭");
+        if (evicted || continuousAhead(audio.buffered, audio.currentTime) < 15) await repair();
+        const ahead = continuousAhead(audio.buffered, audio.currentTime) / audio.playbackRate;
+        const needsData = !MMS || source.streaming || ahead < 15;
+        if (ahead <= aheadCap && needsData) break;
+        await waitForNeed();
+      }
+      const clip = await fetchClip(segment, segmentIndex);
+      await trimPlayed();
+      await repair();
+      const start = tail;
+      await append(clip, start);
+      tail = bufferedEnd();
+      if (tail <= start) throw new Error("追加音频未推进时间轴");
+      ledger.push({ index:segmentIndex, start, end:tail, bytes:clip });
+      log("appended", { seg:segmentIndex, from:start, to:tail, streaming:source.streaming });
+      segmentIndex++;
+    }
+    // 保持媒体源打开直到缓冲播完，期间仍可恢复被 MMS 回收的未来内容。
+    while (running && audio.currentTime < tail - 0.15) { await repair(); await waitForNeed(); }
+    if (source.readyState === "open") { source.endOfStream(); log("end-of-stream"); }
+  } finally {
+    audio.removeEventListener("timeupdate", wake);
+    document.removeEventListener("visibilitychange", wake);
+    URL.revokeObjectURL(sourceUrl);
   }
 }
 
@@ -381,43 +417,47 @@ async function runMms(segments) {
 async function runSwap(segments) {
   const iterator = segments[Symbol.iterator]();
   let pending = null;
+  let currentUrl = "";
+  const silence = silentClip();
   const prefetch = () => {
     const next = iterator.next();
     if (next.done) { pending = null; return; }
-    const index = segmentIndex++;
-    pending = fetchClip(next.value, index).then((clip) => ({ index, clip }));
-    pending.catch(() => undefined);
+    const entry = { index:segmentIndex++, clip:null, promise:null };
+    entry.promise = fetchClip(next.value, entry.index).then(clip => { entry.clip = clip; return entry; });
+    entry.promise.catch(() => undefined);
+    pending = entry;
   };
-  let currentUrl = "";
   const playClip = ({ index, clip }) => {
-    const url = URL.createObjectURL(new Blob([clip], { type: "audio/mpeg" }));
-    if (currentUrl) URL.revokeObjectURL(currentUrl);
-    currentUrl = url;
-    audio.src = url;
+    const previous = currentUrl;
+    currentUrl = URL.createObjectURL(new Blob([clip], { type:"audio/mpeg" }));
+    audio.loop = false;
+    audio.src = currentUrl;
+    if (previous) URL.revokeObjectURL(previous);
     audio.playbackRate = Number($("rate").value);
-    log("swap-src", { seg: index });
-    audio.play().then(() => log("play-ok", { seg: index })).catch((e) => log("play-reject", { seg: index, message: String(e) }));
+    log("swap-src", { seg:index });
+    audio.play().then(() => log("play-ok", { seg:index })).catch(e => log("play-reject", { seg:index, message:String(e) }));
     playedSegments++;
     prefetch();
   };
-  audio.onended = async () => {
+  const nextClip = () => {
     if (!running) return;
-    if (!pending) { log("finished"); return; }
-    let ready = null;
-    const timer = setTimeout(() => { if (!ready) log("next-not-ready"); }, 50);
-    ready = await pending;
-    clearTimeout(timer);
-    playClip(ready);
+    const next = pending;
+    if (!next) { log("finished"); running = false; return; }
+    // 与正式播放器一致：命中缓存时同步换源，不经过 await。
+    if (next.clip) { log("cache-hit", {seg:next.index}); playClip(next); return; }
+    log("next-not-ready", {seg:next.index});
+    audio.loop = true;
+    audio.src = silence;
+    audio.play().catch(e => log("silent-play-reject", {message:String(e)}));
+    next.promise.then(entry => { if (running) playClip(entry); }).catch(e => {
+      running = false;
+      audio.pause();
+      log("run-fail", {message:String(e)});
+    });
   };
-  audio.loop = true;
-  audio.src = silentClip();
-  audio.play().then(() => log("play-ok", { silent: true })).catch((e) => {
-    if (e && e.name !== "AbortError") log("play-reject", { silent: true, message: String(e) });
-  });
+  audio.onended = nextClip;
   prefetch();
-  const first = await pending;
-  audio.loop = false;
-  playClip(first);
+  nextClip();
 }
 
 /** 1 秒静音 WAV。 */
@@ -438,6 +478,8 @@ async function start() {
     alert("这台设备的 MMS 不支持 audio/mpeg，MMS 方式跑不了");
     return;
   }
+  if (navigator.audioSession) navigator.audioSession.type = "playback";
+  for (const id of ["book", "chapter", "mode", "size", "ahead", "rate"]) $(id).disabled = true;
   running = true;
   startedAt = Date.now();
   $("start").disabled = true;
@@ -450,7 +492,10 @@ async function start() {
     if ($("mode").value === "mms") await runMms(segments);
     else await runSwap(segments);
   } catch (error) {
+    running = false;
+    audio.pause();
     log("run-fail", { message: String(error) });
+    $("status").textContent = "测试中止：" + String(error) + "。请复制日志，重新打开测试页重试。";
   }
 }
 
