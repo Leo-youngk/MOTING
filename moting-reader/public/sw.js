@@ -139,6 +139,9 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/")) return;
 
+  // 应用只有 "/" 这一页；别的页面（诊断页）照常走网络，不能拿首页顶替，也不缓存。
+  if (request.mode === "navigate" && url.pathname !== "/") return;
+
   if (request.mode === "navigate") {
     // 后台取新版，打开这一下先用缓存里的；没有缓存（第一次打开）才等网络。
     // 取完告诉页面：新版已经存好了，页面上会出「更新」，点一下重新载入就是新版。

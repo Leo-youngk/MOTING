@@ -506,6 +506,14 @@ export function SettingsScreen({
               value={UPDATE_LABEL[update.status]}
               onClick={update.status === "available" ? update.apply : update.check}
             />
+            {/* 临时的诊断页：在主屏幕打开的 PWA 里验证锁屏连续听书，定下播放方案后删掉。 */}
+            <LinkRow
+              icon={<Headphones size={24} strokeWidth={1.7} />}
+              label="后台听书测试"
+              detail="锁屏连续播放诊断"
+              value=""
+              onClick={() => window.location.assign("/mms-probe.html")}
+            />
           </div>
         </Section>
       </main>

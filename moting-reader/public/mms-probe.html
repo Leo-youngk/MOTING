@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>后台听书测试</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f5f7fb; --card: #fff; --ink: #1f2a44; --muted: #7a8499; --accent: #e8768f; --bad: #c0392b; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #12151c; --card: #1c2029; --ink: #e6e9f0; --muted: #8b93a5; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px 16px calc(24px + env(safe-area-inset-bottom)); background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+  h1 { font-size: 20px; margin: 4px 0 12px; }
+  section { background: var(--card); border-radius: 16px; padding: 14px; margin-bottom: 12px; }
+  label { display: block; margin: 8px 0 4px; color: var(--muted); font-size: 13px; }
+  select, button { font: inherit; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #8883; background: var(--card); color: var(--ink); }
+  .row { display: flex; gap: 8px; margin-top: 10px; }
+  .row button { flex: 1; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #1f2a44; font-weight: 600; }
+  audio { width: 100%; margin-top: 10px; }
+  #caps, #status { font-size: 13px; white-space: pre-wrap; }
+  #log { font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; max-height: 50vh; overflow: auto; }
+  .bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<p style="margin:0"><a href="/" style="color:var(--accent)">‹ 回到墨听</a></p>
+<h1>后台听书测试</h1>
+
+<section>
+  <div id="caps">检测中…</div>
+</section>
+
+<section>
+  <label for="book">书</label>
+  <select id="book"><option value="">（读取书库中…）</option></select>
+  <label for="chapter">从哪一章开始</label>
+  <select id="chapter"></select>
+  <label for="mode">播放方式</label>
+  <select id="mode">
+    <option value="mms">MMS 连续流：所有音频追加进同一个音频元素</option>
+    <option value="swap">逐段换源：每段播完换地址再 play()（现在的做法）</option>
+  </select>
+  <label for="size">每段字数（越小交接越频繁，越容易暴露问题）</label>
+  <select id="size">
+    <option value="600">600 字（约 2 分钟一段）</option>
+    <option value="1500" selected>1500 字（约 5 分钟一段）</option>
+    <option value="4800">4800 字（跟正式播放器一样）</option>
+  </select>
+  <label for="ahead">提前缓冲（MMS）</label>
+  <select id="ahead">
+    <option value="240" selected>4 分钟</option>
+    <option value="1800">30 分钟（后台脚本停住时也能多撑一会）</option>
+  </select>
+  <label for="rate">倍速</label>
+  <select id="rate">
+    <option value="1" selected>1.0×</option>
+    <option value="1.25">1.25×</option>
+    <option value="1.5">1.5×</option>
+    <option value="2">2.0×</option>
+  </select>
+  <div class="row">
+    <button id="start" class="primary">开始</button>
+    <button id="toggle" disabled>暂停</button>
+  </div>
+  <audio id="audio" controls playsinline></audio>
+</section>
+
+<section>
+  <div id="status">未开始</div>
+</section>
+
+<section>
+  <div class="row" style="margin-top:0">
+    <button id="copy">复制日志</button>
+    <button id="clear">清空日志</button>
+  </div>
+  <div id="log"></div>
+</section>
+
+<script>
+"use strict";
+// 验证 iOS 上后台连续听书：MMS 连续流 vs 逐段换源。日志存在 localStorage，锁屏一小时回来还在。
+const LOG_KEY = "moting:mms-probe-log";
+const LOG_LIMIT = 3000;
+const VOICE = "zh-CN-YunjianNeural";
+
+const $ = (id) => document.getElementById(id);
+const audio = $("audio");
+let entries = [];
+try { entries = JSON.parse(localStorage.getItem(LOG_KEY) || "[]"); } catch { entries = []; }
+
+function bufferedEnd() {
+  const b = audio.buffered;
+  return b && b.length ? b.end(b.length - 1) : 0;
+}
+
+function log(type, data) {
+  const now = new Date();
+  const entry = {
+    t: now.toLocaleTimeString("zh-CN", { hour12: false }) + "." + String(now.getMilliseconds()).padStart(3, "0"),
+    type,
+    vis: document.visibilityState[0],
+    ct: Math.round(audio.currentTime * 10) / 10,
+    buf: Math.round(bufferedEnd() * 10) / 10,
+    paused: audio.paused,
+    rs: audio.readyState,
+    ...(data || {}),
+  };
+  entries.push(entry);
+  if (entries.length > LOG_LIMIT) entries = entries.slice(-LOG_LIMIT);
+  try { localStorage.setItem(LOG_KEY, JSON.stringify(entries)); } catch { /* 满了就只留在内存里 */ }
+  renderLog();
+}
+
+function formatEntry(e) {
+  const { t, type, vis, ct, buf, paused, rs, ...rest } = e;
+  const extra = Object.keys(rest).length ? " " + JSON.stringify(rest) : "";
+  return `${t} [${vis}] ${type} ct=${ct} buf=${buf}${paused ? " paused" : ""} rs=${rs}${extra}`;
+}
+
+let renderQueued = false;
+function renderLog() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    const bad = /error|stalled|fail|reject|quota|not-ready|evict/;
+    $("log").innerHTML = entries.slice(-300).reverse()
+      .map((e) => `<div${bad.test(e.type) ? ' class="bad"' : ""}>${formatEntry(e).replace(/</g, "&lt;")}</div>`)
+      .join("");
+  });
+}
+
+// ---------- 能力检测 ----------
+const MMS = window.ManagedMediaSource;
+const MS = window.MediaSource;
+const Source = MMS || MS;
+const caps = [
+  `UA: ${navigator.userAgent}`,
+  `独立模式（主屏幕打开）: ${matchMedia("(display-mode: standalone)").matches}`,
+  `ManagedMediaSource: ${!!MMS}`,
+  `MediaSource: ${!!MS}`,
+  `audio/mpeg: ${Source ? Source.isTypeSupported("audio/mpeg") : "—"}`,
+  `audio/mp4 AAC: ${Source ? Source.isTypeSupported('audio/mp4; codecs="mp4a.40.2"') : "—"}`,
+];
+$("caps").textContent = caps.join("\n");
+if (!Source || !Source.isTypeSupported("audio/mpeg")) $("caps").classList.add("bad");
+
+// ---------- 读书库 ----------
+let books = [];
+let chapters = [];
+
+async function openLibrary() {
+  // 书库不存在时别用 open() 顺手建一个空库：正式应用升级时会当成旧库去迁移。
+  if (indexedDB.databases) {
+    const list = await indexedDB.databases();
+    if (!list.some((d) => d.name === "moting-reader")) return null;
+  }
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("moting-reader");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function readAll(db, store) {
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(store).objectStore(store).getAll();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function readOne(db, store, key) {
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(store).objectStore(store).get(key);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+let db = null;
+(async () => {
+  try {
+    db = await openLibrary();
+    books = db && db.objectStoreNames.contains("books") ? await readAll(db, "books") : [];
+    // 默认选最近在读的那本，从读到的那一章开始。
+    books.sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
+  } catch (error) {
+    log("library-error", { message: String(error) });
+  }
+  const select = $("book");
+  select.innerHTML = books.length
+    ? books.map((b) => `<option value="${b.id}">${b.title}</option>`).join("")
+    : '<option value="">书库是空的：先在墨听里导入一本书</option>';
+  if (books.length) await loadChapters();
+})();
+
+async function loadChapters() {
+  const content = db ? await readOne(db, "contents", $("book").value) : null;
+  chapters = content ? content.chapters : [];
+  $("chapter").innerHTML = chapters
+    .map((c, i) => `<option value="${i}">${c.title || "第 " + (i + 1) + " 章"}</option>`)
+    .join("");
+  const book = books.find((b) => b.id === $("book").value);
+  const position = book && (book.listeningPosition || book.readingPosition);
+  if (position && position.chapterIndex < chapters.length) $("chapter").value = String(position.chapterIndex);
+}
+$("book").addEventListener("change", loadChapters);
+
+/** 从某一章起按句子凑成每段不超过 size 字的朗读文本，章名单独起头。 */
+function* segmentsFrom(startChapter, size) {
+  for (let c = startChapter; c < chapters.length; c++) {
+    const chapter = chapters[c];
+    let text = chapter.title ? chapter.title + "。" : "";
+    for (const paragraph of chapter.paragraphs || []) {
+      if (paragraph.kind === "image") continue;
+      for (const sentence of paragraph.sentences || []) {
+        const piece = (sentence.speakableText || sentence.text || "").trim();
+        if (!piece) continue;
+        if (text && text.length + piece.length > size) {
+          yield { chapter: c, text };
+          text = "";
+        }
+        text += piece;
+      }
+    }
+    if (text) yield { chapter: c, text };
+  }
+}
+
+// ---------- 取音频 ----------
+async function fetchClip(segment, index) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const started = performance.now();
+    try {
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: segment.text, voice: VOICE }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = new Uint8Array(await response.arrayBuffer());
+      const metaLength = new DataView(body.buffer).getUint32(0);
+      const clip = body.slice(4 + metaLength);
+      log("fetch-ok", { seg: index, ch: segment.chapter, chars: segment.text.length, kb: Math.round(clip.length / 1024), ms: Math.round(performance.now() - started) });
+      return clip;
+    } catch (error) {
+      log("fetch-fail", { seg: index, attempt, message: String(error), ms: Math.round(performance.now() - started) });
+      await new Promise((r) => setTimeout(r, 1500 * attempt));
+    }
+  }
+  throw new Error("取音频连续失败");
+}
+
+// ---------- 共用：音频事件 ----------
+for (const type of ["play", "playing", "pause", "waiting", "stalled", "ended", "emptied", "ratechange"]) {
+  audio.addEventListener(type, () => log(type));
+}
+audio.addEventListener("error", () => log("audio-error", { code: audio.error && audio.error.code, message: audio.error && audio.error.message }));
+let lastTimeLog = 0;
+audio.addEventListener("timeupdate", () => {
+  if (audio.currentTime - lastTimeLog >= 60 || audio.currentTime < lastTimeLog) {
+    lastTimeLog = audio.currentTime;
+    log("progress");
+  }
+});
+document.addEventListener("visibilitychange", () => log("visibility"));
+window.addEventListener("pagehide", () => log("pagehide"));
+window.addEventListener("pageshow", (e) => log("pageshow", { persisted: e.persisted }));
+document.addEventListener("freeze", () => log("freeze"));
+document.addEventListener("resume", () => log("resume"));
+// 定时器在后台会被节流甚至停掉，心跳之间的空档本身就是要看的信息。
+setInterval(() => { if (running) log("heartbeat"); }, 30000);
+
+let running = false;
+let segmentIndex = 0;
+let playedSegments = 0;
+let startedAt = 0;
+
+function updateStatus(extra) {
+  $("status").textContent = [
+    `方式：${$("mode").value === "mms" ? "MMS 连续流" : "逐段换源"}`,
+    `已开始 ${Math.round((Date.now() - startedAt) / 60000)} 分钟，播放位置 ${Math.round(audio.currentTime / 60)} 分钟`,
+    `已缓冲到 ${Math.round(bufferedEnd() / 60)} 分钟；已取 ${segmentIndex} 段`,
+    extra || "",
+  ].join("\n");
+}
+setInterval(() => { if (running) updateStatus(); }, 1000);
+
+function setupMediaSession(title) {
+  if (!("mediaSession" in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({ title, artist: "墨听 · 后台听书测试" });
+  navigator.mediaSession.setActionHandler("play", () => { log("session-play"); audio.play().catch((e) => log("play-reject", { message: String(e) })); });
+  navigator.mediaSession.setActionHandler("pause", () => { log("session-pause"); audio.pause(); });
+}
+
+// ---------- 方式一：MMS 连续流 ----------
+async function runMms(segments) {
+  const source = new Source();
+  // MMS 规定：不给 AirPlay 备用源就必须关掉远程播放，否则 sourceopen 不会来。
+  audio.disableRemotePlayback = true;
+  audio.src = URL.createObjectURL(source);
+  audio.playbackRate = Number($("rate").value);
+  // 这时还在点击手势的同步段里：先 play()，数据到了自己开始。
+  audio.play().then(() => log("play-ok")).catch((e) => log("play-reject", { message: String(e) }));
+  let streaming = true;
+  source.addEventListener("startstreaming", () => { streaming = true; log("startstreaming"); wake(); });
+  source.addEventListener("endstreaming", () => { streaming = false; log("endstreaming"); });
+  await new Promise((resolve) => source.addEventListener("sourceopen", resolve, { once: true }));
+  log("sourceopen", { managed: !!MMS });
+
+  const buffer = source.addSourceBuffer("audio/mpeg");
+  // MP3 本身不带时间戳，按顺序接在前一段后面。
+  buffer.mode = "sequence";
+  buffer.addEventListener("bufferedchange", (e) => {
+    if (e.removedRanges && e.removedRanges.length) log("evicted", { ranges: e.removedRanges.length });
+  });
+
+  let wakeUp = null;
+  function wake() { if (wakeUp) { wakeUp(); wakeUp = null; } }
+  audio.addEventListener("timeupdate", wake);
+  const waitForNeed = () => new Promise((resolve) => { wakeUp = resolve; setTimeout(resolve, 5000); });
+
+  // appendBuffer 满了会同步抛 QuotaExceededError，监听器要等它真的开始追加后再挂，
+  // 不然留下的 once 监听器会被下一次追加的 updateend 误触发。
+  const append = (bytes) => new Promise((resolve, reject) => {
+    buffer.appendBuffer(bytes);
+    const done = () => { buffer.removeEventListener("error", fail); resolve(); };
+    const fail = () => { buffer.removeEventListener("updateend", done); reject(new Error("SourceBuffer error")); };
+    buffer.addEventListener("updateend", done, { once: true });
+    buffer.addEventListener("error", fail, { once: true });
+  });
+  const trimPlayed = () => new Promise((resolve) => {
+    const cut = audio.currentTime - 60;
+    if (cut <= 0 || buffer.updating || !buffer.buffered.length || buffer.buffered.start(0) >= cut) return resolve();
+    buffer.addEventListener("updateend", resolve, { once: true });
+    buffer.remove(0, cut);
+  });
+  const ahead = () => bufferedEnd() - audio.currentTime;
+  /** 实际能提前缓冲多少秒：选的值，碰到存储上限后按装得下的量往下调。 */
+  let aheadCap = Number($("ahead").value);
+
+  let first = true;
+  for (const segment of segments) {
+    if (!running) return;
+    while (running && !first && ahead() > aheadCap) await waitForNeed();
+    const clip = await fetchClip(segment, segmentIndex);
+    // 同一段追加成功才往下走：装不下就等播放消化掉一些再试，不能跳过这段。
+    for (;;) {
+      if (!running) return;
+      await trimPlayed();
+      const before = bufferedEnd();
+      try {
+        await append(clip);
+        log("appended", { seg: segmentIndex, from: Math.round(before), to: Math.round(bufferedEnd()), streaming });
+        break;
+      } catch (error) {
+        if (!error || error.name !== "QuotaExceededError") {
+          log("append-fail", { seg: segmentIndex, message: String(error) });
+          running = false;
+          return;
+        }
+        aheadCap = Math.max(60, Math.floor(ahead()) - 60);
+        log("quota", { seg: segmentIndex, aheadCap });
+        const until = audio.currentTime + 60;
+        while (running && audio.currentTime < until) await waitForNeed();
+      }
+    }
+    segmentIndex++;
+    first = false;
+  }
+  if (running && source.readyState === "open") {
+    source.endOfStream();
+    log("end-of-stream");
+  }
+}
+
+// ---------- 方式二：逐段换源（对照组，模拟现在的播放器） ----------
+async function runSwap(segments) {
+  const iterator = segments[Symbol.iterator]();
+  let pending = null;
+  const prefetch = () => {
+    const next = iterator.next();
+    if (next.done) { pending = null; return; }
+    const index = segmentIndex++;
+    pending = fetchClip(next.value, index).then((clip) => ({ index, clip }));
+    pending.catch(() => undefined);
+  };
+  let currentUrl = "";
+  const playClip = ({ index, clip }) => {
+    const url = URL.createObjectURL(new Blob([clip], { type: "audio/mpeg" }));
+    if (currentUrl) URL.revokeObjectURL(currentUrl);
+    currentUrl = url;
+    audio.src = url;
+    audio.playbackRate = Number($("rate").value);
+    log("swap-src", { seg: index });
+    audio.play().then(() => log("play-ok", { seg: index })).catch((e) => log("play-reject", { seg: index, message: String(e) }));
+    playedSegments++;
+    prefetch();
+  };
+  audio.onended = async () => {
+    if (!running) return;
+    if (!pending) { log("finished"); return; }
+    let ready = null;
+    const timer = setTimeout(() => { if (!ready) log("next-not-ready"); }, 50);
+    ready = await pending;
+    clearTimeout(timer);
+    playClip(ready);
+  };
+  audio.loop = true;
+  audio.src = silentClip();
+  audio.play().then(() => log("play-ok", { silent: true })).catch((e) => {
+    if (e && e.name !== "AbortError") log("play-reject", { silent: true, message: String(e) });
+  });
+  prefetch();
+  const first = await pending;
+  audio.loop = false;
+  playClip(first);
+}
+
+/** 1 秒静音 WAV。 */
+function silentClip() {
+  const rate = 8000;
+  const bytes = new DataView(new ArrayBuffer(44 + rate * 2));
+  const text = (offset, value) => [...value].forEach((ch, i) => bytes.setUint8(offset + i, ch.charCodeAt(0)));
+  text(0, "RIFF"); bytes.setUint32(4, 36 + rate * 2, true); text(8, "WAVEfmt ");
+  bytes.setUint32(16, 16, true); bytes.setUint16(20, 1, true); bytes.setUint16(22, 1, true);
+  bytes.setUint32(24, rate, true); bytes.setUint32(28, rate * 2, true); bytes.setUint16(32, 2, true);
+  bytes.setUint16(34, 16, true); text(36, "data"); bytes.setUint32(40, rate * 2, true);
+  return URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+}
+
+async function start() {
+  if (!chapters.length) { alert("先选一本书"); return; }
+  if ($("mode").value === "mms" && (!Source || !Source.isTypeSupported("audio/mpeg"))) {
+    alert("这台设备的 MMS 不支持 audio/mpeg，MMS 方式跑不了");
+    return;
+  }
+  running = true;
+  startedAt = Date.now();
+  $("start").disabled = true;
+  $("toggle").disabled = false;
+  const book = books.find((b) => b.id === $("book").value);
+  log("start", { mode: $("mode").value, book: book && book.title, chapter: Number($("chapter").value), size: Number($("size").value), ahead: Number($("ahead").value), rate: Number($("rate").value), standalone: matchMedia("(display-mode: standalone)").matches });
+  setupMediaSession(book ? book.title : "测试");
+  const segments = segmentsFrom(Number($("chapter").value), Number($("size").value));
+  try {
+    if ($("mode").value === "mms") await runMms(segments);
+    else await runSwap(segments);
+  } catch (error) {
+    log("run-fail", { message: String(error) });
+  }
+}
+
+// iOS 只认手势里同步发出的 play()：start() 到第一个 await 之前都还在这次点击里，
+// 两种方式都在那之前设好音频源并调用 play()。
+$("start").addEventListener("click", () => { start(); });
+$("toggle").addEventListener("click", () => {
+  if (audio.paused) {
+    audio.play().catch((e) => log("play-reject", { message: String(e) }));
+    $("toggle").textContent = "暂停";
+  } else {
+    audio.pause();
+    $("toggle").textContent = "继续";
+  }
+});
+$("copy").addEventListener("click", async () => {
+  const text = [caps.join("\n"), "", ...entries.map(formatEntry)].join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    alert(`已复制 ${entries.length} 条日志`);
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+    alert("已复制");
+  }
+});
+$("clear").addEventListener("click", () => {
+  entries = [];
+  localStorage.removeItem(LOG_KEY);
+  renderLog();
+});
+renderLog();
+</script>
+</body>
+</html>
