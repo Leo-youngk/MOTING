@@ -15,7 +15,7 @@ const mp3=readFileSync(path), meta=Buffer.from('[]'), len=Buffer.alloc(4);len.wr
 const body=Buffer.concat([len,meta,mp3]);
 const browser=await chromium.launch({headless:true, ...(process.env.BROWSER_PATH ? {executablePath:process.env.BROWSER_PATH} : {})});
 try {
- for (const mode of ['mms','swap']) {
+ for (const mode of ['mms','swap','hls']) {
   const context=await browser.newContext();
   const page=await context.newPage(), errors=[];
   page.on('pageerror',e=>errors.push(e.message));
@@ -28,7 +28,15 @@ try {
     return b;
    };
   });
-  await page.route('**/api/tts',route=>route.fulfill({status:200,body,contentType:'application/octet-stream'}));
+  if(mode==='hls') {
+   await page.addInitScript(()=>{
+    const original=HTMLMediaElement.prototype.canPlayType;
+    HTMLMediaElement.prototype.canPlayType=function(type){return type==='application/vnd.apple.mpegurl'?'probably':original.call(this,type);};
+   });
+   await page.route('**/api/sync/hls/prepare',route=>route.fulfill({json:{id:'fixture',duration:121}}));
+   await page.route('**/api/sync/hls/finish',route=>route.fulfill({json:{url:'/native-test.m3u8',duration:3630}}));
+  }
+  await page.route('**/api/tts' ,route=>route.fulfill({status:200,body,contentType:'application/octet-stream'}));
   const base=process.argv[2] || 'http://127.0.0.1:8765';
   await page.goto(base+'/mms-probe.html');
   await page.evaluate(async()=>{
@@ -48,7 +56,12 @@ try {
   await page.waitForFunction(()=>document.querySelector('#chapter').options.length>0);
   await page.selectOption('#mode',mode);
   await page.click('#start');
-  if(mode==='mms') {
+  if(mode==='hls') {
+   await page.waitForFunction(()=>!document.querySelector('#hls-play').hidden);
+   assert.match(await page.locator('#status').textContent(),/已准备/);
+   assert.equal(await page.locator('audio').getAttribute('src'),null);
+   assert.equal(await page.locator('#hls-play').isEnabled(),true);
+  } else if(mode==='mms') {
    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('moting:mms-probe-log')||'[]').filter(e=>e.type==='appended').length>=3);
    await page.evaluate(async()=>{
     const b=window.probeBuffer;

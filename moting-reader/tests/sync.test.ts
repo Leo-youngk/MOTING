@@ -579,3 +579,14 @@ test("legacy conversations preserve question and answer adjacency", () => {
   assert.deepEqual(merged.map(t => t.content), ["旧问题", "旧回答", "A", "答A", "B", "答B"]);
   assert.deepEqual(mergeChatTurns(right, left), merged);
 });
+
+
+test("HLS preparation and media require a sync session and reject cross-origin requests", async () => {
+  const { e } = env();
+  for (const [path, body] of [["hls/prepare", { text: "测试" }], ["hls/finish", { ids: [] }], ["hls/audio/missing.mp3", null]] as const) {
+    assert.equal((await handleSync(syncRequest(path, body), e)).status, 401);
+  }
+  const cookie = await loginCookie(e);
+  assert.equal((await handleSync(syncRequest("hls/prepare", { text: "测试" }, { cookie, origin: "https://other.example" }), e)).status, 403);
+  assert.equal((await handleSync(syncRequest("hls/prepare", { text: "" }, { cookie }), e)).status, 400);
+});

@@ -26,7 +26,7 @@
 <body>
 <p style="margin:0"><a href="/" style="color:var(--accent)">‹ 回到墨听</a></p>
 <h1>后台听书测试</h1>
-<p>先用 600 字、4 分钟缓冲锁屏测试 60 分钟。回来复制日志，检查后台是否持续追加、播放是否越过切后台时的缓冲终点。本页不保存听书进度；更换方案请重新打开此页。</p>
+<p>HLS 测试：先登录云端同步，保持本页在前台准备音频，再点播放后锁屏。准备的音频存放云端，播放时由 Safari 直接读取。本页不保存正式听书进度；从所选章开头测试。切到后台与从任务列表强制关闭应用是不同操作。</p>
 
 <section>
   <div id="caps">检测中…</div>
@@ -39,9 +39,13 @@
   <select id="chapter"></select>
   <label for="mode">播放方式</label>
   <select id="mode">
+    <option value="hls" selected>原生 HLS：准备完成后由 Safari 连续播放</option>
     <option value="mms">MMS 连续流：所有音频追加进同一个音频元素</option>
     <option value="swap">逐段换源：每段播完换地址再 play()（现在的做法）</option>
   </select>
+  <label for="minutes">HLS 准备时长（按实际倍速计算，最多 40 批）</label>
+  <select id="minutes"><option value="10">10 分钟快速验证</option><option value="60" selected>60 分钟锁屏验证</option></select>
+  <button id="hls-play" hidden>准备完成，点击播放</button>
   <label for="size">每段字数（越小交接越频繁，越容易暴露问题）</label>
   <select id="size">
     <option value="600" selected>600 字（约 2 分钟一段）</option>
@@ -140,9 +144,10 @@ const MMS = window.ManagedMediaSource;
 const MS = window.MediaSource;
 const Source = MMS || MS;
 const caps = [
-  `测试版本: 2026-09-27-recovery-v2`,
+  `测试版本: 2026-09-27-hls-v1`,
   `UA: ${navigator.userAgent}`,
   `独立模式（主屏幕打开）: ${matchMedia("(display-mode: standalone)").matches}`,
+  `原生 HLS: ${audio.canPlayType("application/vnd.apple.mpegurl") || "不支持"}`,
   `ManagedMediaSource: ${!!MMS}`,
   `MediaSource: ${!!MS}`,
   `audio/mpeg: ${Source ? Source.isTypeSupported("audio/mpeg") : "—"}`,
@@ -287,6 +292,7 @@ let playedSegments = 0;
 let startedAt = 0;
 
 function updateStatus(extra) {
+  if ($("mode").value === "hls") return;
   $("status").textContent = [
     `方式：${$("mode").value === "mms" ? "MMS 连续流" : "逐段换源"}`,
     `已开始 ${Math.round((Date.now() - startedAt) / 60000)} 分钟，播放位置 ${Math.round(audio.currentTime / 60)} 分钟`,
@@ -472,24 +478,86 @@ function silentClip() {
   return URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
 }
 
+async function hlsRequest(action, body) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await fetch("/api/sync/hls/" + action, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(90000),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const error = new Error(data.error || `HTTP ${response.status}`);
+        if (response.status < 500) { error.permanent = true; throw error; }
+        throw error;
+      }
+      return data;
+    } catch (error) {
+      if (error.permanent) throw error;
+      lastError = error;
+      log("hls-prepare-retry", { action, attempt, message: String(error) });
+    }
+  }
+  throw lastError;
+}
+async function runHls() {
+  $("toggle").disabled = true;
+  const ids = [];
+  let duration = 0;
+  const target = Number($("minutes").value) * 60 * Number($("rate").value);
+  // Hard splitting also handles a single unusually long sentence.
+  outer: for (const segment of segmentsFrom(Number($("chapter").value), 600)) {
+    const chars = Array.from(segment.text);
+    while (chars.length) {
+      let text = "";
+      while (chars.length && text.length + chars[0].length <= 600) text += chars.shift();
+      $("status").textContent = `正在准备第 ${ids.length + 1} 批，已完成 ${(duration / 60 / Number($("rate").value)).toFixed(1)} 分钟。请保持前台，准备完成后再锁屏。`;
+      const clip = await hlsRequest("prepare", { text });
+      ids.push(clip.id); duration += clip.duration;
+      log("hls-prepared", { batch: ids.length, duration, chapter: segment.chapter });
+      if (duration >= target || ids.length >= 40) break outer;
+    }
+  }
+  if (!ids.length) throw new Error("没有可朗读的文字");
+  const result = await hlsRequest("finish", { ids });
+  const playbackMinutes = result.duration / 60 / Number($("rate").value);
+  $("status").textContent = `已准备 ${playbackMinutes.toFixed(1)} 分钟${duration < target ? "（已到书末或批次上限）" : ""}。点击下方播放后可锁屏；播放期间无需本页继续生成音频。`;
+  log("hls-ready", { duration: result.duration, batches: ids.length });
+  const button = $("hls-play");
+  button.hidden = false;
+  button.onclick = () => {
+    audio.src = result.url;
+    audio.playbackRate = Number($("rate").value);
+    audio.play().then(() => {
+      button.hidden = true; $("toggle").disabled = false;
+      log("hls-play-ok");
+    }).catch(error => log("hls-play-reject", { message: String(error) }));
+  };
+}
+
 async function start() {
   if (!chapters.length) { alert("先选一本书"); return; }
   if ($("mode").value === "mms" && (!Source || !Source.isTypeSupported("audio/mpeg"))) {
     alert("这台设备的 MMS 不支持 audio/mpeg，MMS 方式跑不了");
     return;
   }
+  if ($("mode").value === "hls" && !audio.canPlayType("application/vnd.apple.mpegurl")) {
+    alert("当前浏览器不支持原生 HLS，请在 iPhone Safari 或主屏幕 PWA 中测试"); return;
+  }
   if (navigator.audioSession) navigator.audioSession.type = "playback";
-  for (const id of ["book", "chapter", "mode", "size", "ahead", "rate"]) $(id).disabled = true;
+  for (const id of ["book", "chapter", "mode", "size", "ahead", "rate", "minutes"]) $(id).disabled = true;
   running = true;
   startedAt = Date.now();
   $("start").disabled = true;
   $("toggle").disabled = false;
   const book = books.find((b) => b.id === $("book").value);
-  log("start", { mode: $("mode").value, book: book && book.title, chapter: Number($("chapter").value), size: Number($("size").value), ahead: Number($("ahead").value), rate: Number($("rate").value), standalone: matchMedia("(display-mode: standalone)").matches });
+  log("start", { mode: $("mode").value, book: book && book.title, chapter: Number($("chapter").value), size: Number($("size").value), aheadTarget: Number($("ahead").value), rate: Number($("rate").value), standalone: matchMedia("(display-mode: standalone)").matches });
   setupMediaSession(book ? book.title : "测试");
   const segments = segmentsFrom(Number($("chapter").value), Number($("size").value));
   try {
-    if ($("mode").value === "mms") await runMms(segments);
+    if ($("mode").value === "hls") await runHls();
+    else if ($("mode").value === "mms") await runMms(segments);
     else await runSwap(segments);
   } catch (error) {
     running = false;
@@ -500,7 +568,7 @@ async function start() {
 }
 
 // iOS 只认手势里同步发出的 play()：start() 到第一个 await 之前都还在这次点击里，
-// 两种方式都在那之前设好音频源并调用 play()。
+// MMS / 换源模式同步播放；HLS 准备完成后通过第二次点击播放。
 $("start").addEventListener("click", () => { start(); });
 $("toggle").addEventListener("click", () => {
   if (audio.paused) {
