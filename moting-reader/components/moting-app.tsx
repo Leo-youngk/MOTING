@@ -3859,18 +3859,19 @@ function ReaderScreen({
       return;
     }
 
-    // 定位只在进书后的这一小段窗口里做，而且一旦成功、或者发现用户已经在滚，
-    // 就立刻把所有钩子摘干净。之前放到 8 秒、成功后还留着 ResizeObserver，
-    // iPhone 上冷启动版面稳得慢（读库、渲染、图片占位、地址栏收起导致视口变高），
-    // 会被一次次重新唤醒，表现就是刚进书滑动发滞、过一会才正常。
+    // 真实书的首次重进里，第一次滚准之后，上方正文仍可能在接下来几帧排版：
+    // 提前停掉校正会留下整段高度的偏差。短时间继续复查，到期或用户一动就退出。
+    // 不能重新放宽到几秒，否则会妨碍刚进书时的手势。
     const SETTLE_WINDOW_MS = 1500;
+    const MIN_STABLE_MS = 1200;
+    const QUIET_MS = 200;
     let settled = false;
     let frame = 0;
     let resize: ResizeObserver | null = null;
+    let targetElement: HTMLElement | null = null;
     const deadline = Date.now() + SETTLE_WINDOW_MS;
-    /** 我们自己滚到的位置，用来把「用户在滚」和「我们在滚」区分开。 */
-    let appliedY = window.scrollY;
-
+    const startedAt = Date.now();
+    let lastAdjustmentAt = startedAt;
     const stop = () => {
       if (settled) return;
       settled = true;
@@ -3878,18 +3879,12 @@ function ReaderScreen({
       frame = 0;
       resize?.disconnect();
       resize = null;
-      window.removeEventListener("scroll", onUserScroll);
       window.removeEventListener("wheel", stop);
       window.removeEventListener("touchstart", stop);
       window.removeEventListener("touchmove", stop);
+      window.removeEventListener("pointerdown", stop);
       window.removeEventListener("keydown", stop);
     };
-
-    function onUserScroll() {
-      // 这一下要是我们自己滚出来的就不算；否则说明用户已经在读了，立刻收手。
-      if (Math.abs(window.scrollY - appliedY) <= 1) return;
-      stop();
-    }
 
     /**
      * 把这句话放回保存时的那个高度。返回「是不是已经到位」。
@@ -3899,10 +3894,13 @@ function ReaderScreen({
      * 所以这里要实际复查一次位置，没到位就交给下面的循环继续盯。
      */
     const place = () => {
-      const element = articleRef.current?.querySelector<HTMLElement>(
-        `[data-sentence-id="${targetId}"]`
-      );
+      const element = targetElement?.isConnected
+        ? targetElement
+        : articleRef.current?.querySelector<HTMLElement>(
+            `[data-sentence-id="${targetId}"]`
+          );
       if (!element) return false;
+      targetElement = element;
       // 目标高度 = 锚点线往上退回「当初读到这句第几像素」，这样长段落读到一半
       // 也能回到原处，而不是退回整段开头。
       const targetTop =
@@ -3912,7 +3910,7 @@ function ReaderScreen({
       const drift = driftNow();
       if (Math.abs(drift) <= 2) return true;
       window.scrollBy(0, drift);
-      appliedY = window.scrollY;
+      lastAdjustmentAt = Date.now();
 
       // 这里不能用「已经滚到底了就算到位」来提前收工：正文刚挂上的那几帧
       // scrollHeight 只有一屏、maxScroll 恰好是 0，那个判断会在第一帧就为真，
@@ -3922,16 +3920,16 @@ function ReaderScreen({
 
     const settle = () => {
       if (settled) return;
-      // 用户已经在滚了（scrollY 离开了我们上次 place() 落下的位置），别再拽回去。
-      // scroll 事件是异步派发的，ResizeObserver／rAF 回调有可能先跑到——
-      // 尤其是滑动触发接章／摘章时，版面变化会让 ResizeObserver 抢先回调，
-      // 光靠 onUserScroll 拦不住这一下，表现就是「刚进书滑动会被弹回原位」。
-      if (Math.abs(window.scrollY - appliedY) > 1) {
-        stop();
-        return;
-      }
-      // 一次落位就收手，不再留着钩子等下一次版面变化。
-      if (place() || Date.now() > deadline) {
+      // 这里不能用 scrollY 的变化判断手势：首次渲染的文档可能短得只能滚
+      // 535px，正文接着排开时浏览器会自己改动 scrollY；那不是用户在滚。
+      // 用户输入由下方的 touch / wheel / pointer / keydown 事件立即停止恢复。
+      const aligned = place();
+      const now = Date.now();
+      // 初次对准只是暂时的：上方段落和字体随后可能再改变高度。
+      // 连续稳定一小段时间才结束，最多保留 1.5 秒；所有手势仍立即 stop。
+      if (now > deadline ||
+          (aligned && now - startedAt >= MIN_STABLE_MS &&
+           now - lastAdjustmentAt >= QUIET_MS && document.fonts?.status !== "loading")) {
         stop();
         return;
       }
@@ -3939,8 +3937,7 @@ function ReaderScreen({
     };
     settle();
 
-    // 窗口内版面还在长高（接章、图片占位、视口变化）时补一次；一旦落位，
-    // stop() 会把这个观察器一起摘掉。
+    // 窗口内版面还在长高（接章、图片占位、视口变化）时补一次。
     resize = new ResizeObserver(() => {
       if (settled || Date.now() > deadline) return;
       settle();
@@ -3952,12 +3949,12 @@ function ReaderScreen({
       settle();
     });
 
-    window.addEventListener("scroll", onUserScroll, { passive: true });
     window.addEventListener("wheel", stop, { passive: true, once: true });
     window.addEventListener("touchstart", stop, { passive: true, once: true });
     // 点进书的那一下 touchstart 在 effect 挂上之前就派发过了，once 监听器接不到；
     // 手指还没抬就开始滑时，靠 touchmove 兜住这段手势，立刻停止位置恢复。
     window.addEventListener("touchmove", stop, { passive: true, once: true });
+    window.addEventListener("pointerdown", stop, { passive: true, once: true });
     window.addEventListener("keydown", stop, { once: true });
     return stop;
     // 只在进入这本书／切换阅读模式时回到上次的位置。连续滚动里 chapterIndex 会随滑动
