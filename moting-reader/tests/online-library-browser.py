@@ -84,7 +84,7 @@ with sync_playwright() as playwright:
     # 书库不空时「在线找书」收在右上角「+」里。
     page.get_by_role("button", name="添加书籍", exact=True).click()
     page.get_by_role("button", name="在线找书", exact=True).click()
-    expect(page.get_by_placeholder("搜索书名或作者")).to_be_visible()
+    expect(page.get_by_label("在线搜索书名或作者")).to_be_visible()
     # 找书页：手机上底栏收起，没有格式标签和说明行，整页正好一屏不滚。
     expect(page.locator(".bottom-bar")).to_be_hidden()
     expect(page.locator(".online-formats, .online-feedback")).to_have_count(0)

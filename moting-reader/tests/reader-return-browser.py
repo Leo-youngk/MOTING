@@ -9,6 +9,10 @@ vinext 的 App Router 也监听 popstate，每次后退都去服务器取一遍 
 1. 页面没有重载（打在 window 上的记号还在，也没有出现开机底色）。
 2. 后退没有发 .rsc 请求。
 3. 书库当场就在，阅读器已经退掉。
+
+顺带检查回到读到的地方：
+4. 在阅读器里刷新（冷启动直接落进阅读器），第一帧正文就停在读到的那句，不先闪一帧章首。
+5. 左右翻页时退出再进，停在同一页——页首常是上一页没说完的半句，不能退回上一页。
 """
 import os
 import random
@@ -44,6 +48,78 @@ def open_reader(page):
         page.mouse.wheel(0, 700)
         page.wait_for_timeout(200)
     page.wait_for_timeout(600)
+
+
+# 锚点附近那一句。正好点在行距里时往下探几个像素。
+SENTENCE_AT = """() => {
+  for (let y = 150; y < 230; y += 6) {
+    const hit = document.elementFromPoint(innerWidth / 2, y)?.closest('[data-sentence-id]');
+    if (hit) return hit.dataset.sentenceId;
+  }
+  return null;
+}"""
+SENTENCE_AT_ANCHOR = f"({SENTENCE_AT})"
+
+# 每一帧记下锚点处是哪一句，直到开机底色退掉、正文出来。
+WATCH_FIRST_FRAME = ("""() => {
+  const seen = [];
+  const tick = () => {
+    if (document.querySelector('.reader-article')) {
+      seen.push((%s)());
+      if (seen.length >= 3) { window.__firstFrames = seen; return; }
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}""" % SENTENCE_AT)
+
+
+def check_reload_lands_in_place(page):
+    for _ in range(20):
+        page.mouse.wheel(0, 800)
+        page.wait_for_timeout(120)
+    page.wait_for_timeout(1500)
+    saved = page.evaluate(SENTENCE_AT_ANCHOR)
+    page.add_init_script(f"addEventListener('DOMContentLoaded', {WATCH_FIRST_FRAME})")
+    page.reload()
+    page.wait_for_function("() => window.__firstFrames", timeout=15000)
+    frames = page.evaluate("() => window.__firstFrames")
+    assert saved and frames[0] == saved, f"刷新后第一帧正文在 {frames[0]}，读到的是 {saved}（先闪了一帧别处）"
+
+
+def page_label(page):
+    return page.evaluate(
+        "() => [...document.querySelectorAll('.reader-chrome *')]"
+        ".map(e => e.textContent).find(t => /^\\d+\\/\\d+页$/.test(t)) ?? ''"
+    )
+
+
+def show_chrome(page):
+    if page.locator(".chrome-hidden").count():
+        page.mouse.click(195, 420)
+        page.wait_for_timeout(400)
+
+
+def check_paged_reopen(page):
+    show_chrome(page)
+    page.get_by_role("button", name="阅读菜单").click()
+    page.get_by_role("menu").get_by_text("主题与设置").click()
+    page.get_by_text("左右翻页", exact=True).click()
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(800)
+    for flips in (1, 2, 1, 3, 1, 2):
+        for _ in range(flips):
+            page.keyboard.press("ArrowRight")
+            page.wait_for_timeout(250)
+        page.wait_for_timeout(900)
+        before = page_label(page)
+        show_chrome(page)
+        page.get_by_role("button", name="返回书架").click()
+        page.get_by_role("button", name="阅读返回测试书").click()
+        page.locator(".reader-article").wait_for()
+        page.wait_for_timeout(1200)
+        after = page_label(page)
+        assert before and before == after, f"左右翻页：退出前在 {before}，再进来到了 {after}"
 
 
 def check_return(page, context, go_back, label):
@@ -91,6 +167,11 @@ def main():
         check_return(page, context, lambda: page.get_by_role("button", name="返回书架").click(), "点返回书架")
         open_reader(page)
         check_return(page, context, lambda: page.go_back(), "系统返回手势")
+
+        page.get_by_role("button", name="阅读返回测试书").click()
+        page.locator(".reader-article").wait_for()
+        check_reload_lands_in_place(page)
+        check_paged_reopen(page)
 
         assert not errors, errors
         browser.close()

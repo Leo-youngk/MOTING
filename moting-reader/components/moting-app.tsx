@@ -3842,7 +3842,9 @@ function ReaderScreen({
     goToPage,
   ]);
 
-  useEffect(() => {
+  // 第一次落位得在绘制之前：从书库点进来是点击触发的更新，普通 effect 也会赶在绘制前跑；
+  // 冷启动（刷新、被 iOS 回收后重开）直接落进阅读器时不是，会先画出一帧章首再跳到读到的地方。
+  useLayoutEffect(() => {
     if (paged) return;
     const targetId = restorePosition?.sentenceId;
     if (!targetId) return;
@@ -3971,9 +3973,19 @@ function ReaderScreen({
       // 正文整体被平移过，当前页的左边界要把平移量加回去才算得对。
       const left =
         article.getBoundingClientRect().left + pageIndex * pageStep;
-      const target = Array.from(
+      const sentences = Array.from(
         article.querySelectorAll<HTMLElement>("[data-sentence-id]")
-      ).find((element) => element.getBoundingClientRect().right > left + 1);
+      );
+      const first = sentences.findIndex(
+        (element) => element.getBoundingClientRect().right > left + 1
+      );
+      // 这一页开头常是上一页没说完的半句。记它的话，恢复时按它的开头落页，会退回上一页；
+      // 所以记这一页上第一句从头开始的。整页都是同一句（长句跨好几页）时只能记它。
+      const startsHere = sentences.slice(Math.max(first, 0)).find((element) => {
+        const head = element.getClientRects()[0];
+        return !!head && head.left >= left - 1 && head.left < left + pageStep - 1;
+      });
+      const target = startsHere ?? sentences[first];
       const id = target?.dataset.sentenceId;
       const index = Number(target?.dataset.sentenceIndex);
       if (!id || Number.isNaN(index) || savedSentenceRef.current === id) return;
