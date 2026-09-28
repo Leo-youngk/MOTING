@@ -5,6 +5,7 @@ import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
 import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
 import { aiAttemptPlan, aiFailureMessage, requestWithRetry } from "./ai-upstream";
 import { synthesizeSpeech } from "./edge-tts";
+import { processLiveHlsJob, type LiveHlsJob } from "./live-hls";
 import { forwardSync, handleSync } from "./sync";
 import { handleWeread } from "./weread";
 import { handleZlibrary } from "./zlibrary";
@@ -442,6 +443,13 @@ async function handleSpeech(
 }
 
 const worker = {
+  async queue(batch: MessageBatch<LiveHlsJob>, env: Env): Promise<void> {
+    if (!env.BOOKS_BUCKET || !env.AUDIO_QUEUE) throw new Error("音频任务缺少 R2/Queue 绑定");
+    for (const message of batch.messages) {
+      await processLiveHlsJob(message.body, env.BOOKS_BUCKET, env.AUDIO_QUEUE, undefined, env.DB);
+      message.ack();
+    }
+  },
   async fetch(
     request: Request,
     env: Env,
@@ -465,6 +473,6 @@ const worker = {
     }
     return handler.fetch(request, env, ctx);
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<Env, LiveHlsJob>;
 
 export default worker;

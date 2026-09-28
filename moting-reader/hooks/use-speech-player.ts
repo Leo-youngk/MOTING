@@ -17,6 +17,7 @@ import {
   type SpeechEngine,
 } from "../lib/speech-segments";
 import { SpeechClipError, type SpeechClip } from "../lib/speech-audio";
+import { liveLocationAt, liveTimeFor, makeLivePlan, type LivePlan, type LiveStatus } from "../lib/live-speech";
 import { charIndexAt, spanAt, timeAt } from "../lib/speech-timeline";
 import type {
   Book,
@@ -88,6 +89,18 @@ function voiceScore(voice: SpeechSynthesisVoice): number {
 const CJK_CHARS_PER_SECOND = 5.2;
 const LATIN_CHARS_PER_SECOND = 15;
 const HIGHLIGHT_INTERVAL_MS = 100;
+function reportLiveEvent(id: string, audio: HTMLAudioElement, type: string) {
+  const url = `/api/sync/live/${id}/event`;
+  const body = JSON.stringify({
+    type, ct: audio.currentTime, rs: audio.readyState,
+    visibility: document.visibilityState,
+  });
+  if (navigator.sendBeacon?.(url, new Blob([body], { type: "application/json" }))) return;
+  void fetch(url, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body, keepalive: true,
+  }).catch(() => undefined);
+}
 /** 面板打开时最多顺手准备几个音色。再多就是在替用户瞎猜，白烧合成次数。 */
 const MAX_VOICE_PREFETCH = 3;
 
@@ -214,7 +227,7 @@ export function useSpeechPlayer({
   const locationRef = useRef<SpeechLocation | null>(null);
   const playingRef = useRef(false);
   const tokenRef = useRef(0);
-  const engineRef = useRef<SpeechEngine | null>(null);
+  const engineRef = useRef<SpeechEngine | "live" | null>(null);
   const sleepModeRef = useRef<SleepMode>("off");
   const sleepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -222,6 +235,15 @@ export function useSpeechPlayer({
   const segmentCacheRef = useRef(new Map<string, SpeechBlock | null>());
   const blockedVoicesRef = useRef(new Set<string>());
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const liveRef = useRef<{ bookId: string; plan: LivePlan; id: string; status: LiveStatus } | null>(null);
+  const preparedLiveRef = useRef<{
+    key: string;
+    plan: LivePlan;
+    id?: string;
+    url?: string;
+    status?: LiveStatus;
+    controller: AbortController;
+  } | null>(null);
   const clipUrlRef = useRef("");
   /**
    * 正在播的这一段音频、它对应的文本和时间轴。
@@ -360,6 +382,12 @@ export function useSpeechPlayer({
     audio.pause();
     audio.onended = null;
     audio.onerror = null;
+    audio.ontimeupdate = null;
+    audio.onplaying = null;
+    audio.onwaiting = null;
+    audio.onplay = null;
+    audio.onpause = null;
+    audio.onstalled = null;
     audio.removeAttribute("src");
     audio.load();
   }, []);
@@ -377,6 +405,7 @@ export function useSpeechPlayer({
     silenceAudio();
     releaseClip();
     playingClipRef.current = null;
+    liveRef.current = null;
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
@@ -484,6 +513,15 @@ export function useSpeechPlayer({
 
       tokenRef.current += 1;
       const token = tokenRef.current;
+      liveRef.current = null;
+      if (audioRef.current) {
+        audioRef.current.ontimeupdate = null;
+        audioRef.current.onplaying = null;
+        audioRef.current.onwaiting = null;
+        audioRef.current.onplay = null;
+        audioRef.current.onpause = null;
+        audioRef.current.onstalled = null;
+      }
       clearTimers();
       abortRef.current?.abort();
       abortRef.current = null;
@@ -987,6 +1025,43 @@ export function useSpeechPlayer({
       if (edgeDownRef.current) return;
       const voiceURI = settingsRef.current.voiceURI;
       if (voiceURI && !isEdgeVoiceURI(voiceURI)) return;
+      const voiceName = edgeVoiceName(voiceURI);
+      const supportsHls = typeof document !== "undefined" &&
+        !!document.createElement("audio").canPlayType("application/vnd.apple.mpegurl");
+      if (supportsHls) {
+        const key = `${book.id}:${position.chapterIndex}:${position.sentenceIndex}:${voiceName}`;
+        if (preparedLiveRef.current?.key === key) return;
+        preparedLiveRef.current?.controller.abort();
+        const plan = makeLivePlan(book, position);
+        if (plan.sentences.length) {
+          const prepared = { key, plan, controller: new AbortController() } as NonNullable<typeof preparedLiveRef.current>;
+          preparedLiveRef.current = prepared;
+          void (async () => {
+            try {
+              const response = await fetch("/api/sync/live/session", {
+                method: "POST", headers: { "content-type": "application/json" },
+                body: JSON.stringify({ text: plan.text, voice: voiceName }),
+                signal: prepared.controller.signal,
+              });
+              if (!response.ok) throw new Error(`音频会话返回 ${response.status}`);
+              const session = await response.json() as { id: string; url: string };
+              prepared.id = session.id;
+              prepared.url = session.url;
+              for (let attempt = 0; attempt < 35 && !prepared.controller.signal.aborted; attempt++) {
+                const statusResponse = await fetch(`/api/sync/live/${session.id}/status`, {
+                  signal: prepared.controller.signal,
+                });
+                if (!statusResponse.ok) throw new Error(`音频状态返回 ${statusResponse.status}`);
+                prepared.status = await statusResponse.json() as LiveStatus;
+                if (prepared.status.ready || prepared.status.complete) return;
+                await new Promise<void>(resolve => setTimeout(resolve, 1000));
+              }
+            } catch {
+              // Offline and unauthenticated readers retain the existing TTS player.
+            }
+          })();
+        }
+      }
       // 这里收整本书而不是 bookId：调用方（播放页）手里本来就是这本书的整本，不用再查一次。
       const chapter = book.chapters[position.chapterIndex];
       if (!chapter) return;
@@ -998,12 +1073,109 @@ export function useSpeechPlayer({
         true
       );
       if (!segment) return;
-      const voiceName = edgeVoiceName(voiceURI);
       if (store.has(segment.text, voiceName)) return;
       store.prefetch(segment.text, voiceName);
     },
     [store]
   );
+
+  const startLive = useCallback((book: Book, prepared: NonNullable<typeof preparedLiveRef.current>): boolean => {
+    if (!prepared.id || !prepared.url || !prepared.status?.ready) return false;
+    const first = prepared.plan.sentences[0];
+    if (!first) return false;
+    tokenRef.current++;
+    clearTimers();
+    abortRef.current?.abort();
+    cancelHandover();
+    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
+    releaseClip();
+    playingClipRef.current = null;
+    const audio = new Audio();
+    audio.loop = false;
+    audio.src = prepared.url;
+    audio.playbackRate = settingsRef.current.speechRate;
+    audioRef.current?.pause();
+    audioRef.current = audio;
+    const id = prepared.id;
+    const live = { bookId: book.id, plan: prepared.plan, id, status: prepared.status };
+    let started = false;
+    liveRef.current = live;
+    engineRef.current = "live";
+    playingRef.current = true;
+    waitingForClipRef.current = false;
+    setIsPlaying(true);
+    setIsPaused(false);
+    setIsBuffering(true);
+    setError("");
+    noteVoiceUsed(resolvedEdgeVoiceURI(settingsRef.current.voiceURI));
+    commitSpan(book, first.chapterIndex, {
+      sentenceId: first.sentenceId, sentenceIndex: first.sentenceIndex,
+      start: first.start, end: first.end,
+    });
+    const update = () => {
+      if (liveRef.current !== live) return;
+      const at = liveLocationAt(live.plan, live.status, audio.currentTime);
+      if (at) commitSpan(book, at.chapterIndex, {
+        sentenceId: at.sentenceId, sentenceIndex: at.sentenceIndex,
+        start: at.start, end: at.end,
+      });
+    };
+    const refresh = async () => {
+      try {
+        const response = await fetch(`/api/sync/live/${id}/status`);
+        if (response.ok && liveRef.current === live) live.status = await response.json() as LiveStatus;
+        update();
+      } catch { /* The native media requests continue independently of this diagnostic poll. */ }
+    };
+    audio.ontimeupdate = update;
+    audio.onplay = () => reportLiveEvent(id, audio, "play");
+    audio.onpause = () => reportLiveEvent(id, audio, "pause");
+    audio.onstalled = () => reportLiveEvent(id, audio, "stalled");
+    audio.onplaying = () => {
+      started = true;
+      if (liveRef.current === live) setIsBuffering(false);
+      reportLiveEvent(id, audio, "playing");
+    };
+    audio.onwaiting = () => {
+      if (liveRef.current === live) { setIsBuffering(true); void refresh(); }
+      reportLiveEvent(id, audio, "waiting");
+    };
+    audio.onerror = () => {
+      reportLiveEvent(id, audio, "error");
+      if (liveRef.current === live) holdForResume("音频暂时中断，点一下继续");
+    };
+    audio.onended = () => {
+      reportLiveEvent(id, audio, "ended");
+      if (liveRef.current === live) { update(); stop(); }
+    };
+    trackRef.current = setInterval(() => {
+      if (liveRef.current !== live || document.visibilityState !== "visible") return;
+      update();
+      void refresh();
+    }, 15_000);
+    // Called in the same user gesture as start(): Safari can activate native playback.
+    void audio.play().catch(() => {
+      if (liveRef.current === live) holdForResume("播放被系统拦下，点一下继续");
+    });
+    setTimeout(() => {
+      if (liveRef.current !== live || started || document.visibilityState !== "visible") return;
+      reportLiveEvent(id, audio, "error");
+      // Native HLS can be advertised as "maybe" but never reach HAVE_CURRENT_DATA.
+      // The old player is still warmed and can be reused without trapping the user.
+      playAtRef.current?.(book.id, first.chapterIndex, first.sentenceIndex, { quick: true });
+    }, 8000);
+    return true;
+  }, [cancelHandover, clearTimers, commitSpan, holdForResume, noteVoiceUsed, releaseClip, stop]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      const live = liveRef.current;
+      const audio = audioRef.current;
+      if (live && audio) reportLiveEvent(live.id, audio, "visibility");
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
 
   const start = useCallback(
     (bookId: string, position?: BookPosition) => {
@@ -1017,16 +1189,37 @@ export function useSpeechPlayer({
       setVoiceError("");
       const nextPosition =
         position ?? book.listeningPosition ?? initialPosition(book);
+      const prepared = preparedLiveRef.current;
+      const key = `${book.id}:${nextPosition.chapterIndex}:${nextPosition.sentenceIndex}:${edgeVoiceName(settingsRef.current.voiceURI)}`;
+      if (prepared?.key === key && startLive(book, prepared)) return;
       playAt(bookId, nextPosition.chapterIndex, nextPosition.sentenceIndex, {
         quick: true,
       });
     },
-    [cancelHandover, playAt]
+    [cancelHandover, playAt, startLive]
   );
 
   const toggle = useCallback(() => {
     const current = locationRef.current;
     if (!current) return;
+
+    if (engineRef.current === "live") {
+      const audio = audioRef.current;
+      if (!audio) return;
+      if (playingRef.current) {
+        audio.pause();
+        playingRef.current = false;
+        setIsPlaying(false);
+        setIsPaused(true);
+        setIsBuffering(false);
+      } else {
+        playingRef.current = true;
+        setIsPlaying(true);
+        setIsPaused(false);
+        void audio.play().catch(() => holdForResume("播放被系统拦下，点一下继续"));
+      }
+      return;
+    }
 
     // 暂停期间换过音色：恢复时不能把旧音色那段接着放完。
     const resolvedRequest = isEdgeVoiceURI(settingsRef.current.voiceURI) ||
@@ -1101,7 +1294,7 @@ export function useSpeechPlayer({
     playAt(current.bookId, current.chapterIndex, current.sentenceIndex, {
       quick: true,
     });
-  }, [cancelHandover, playAt]);
+  }, [cancelHandover, holdForResume, playAt]);
 
   const skipSentences = useCallback(
     (delta: number) => {
@@ -1117,6 +1310,19 @@ export function useSpeechPlayer({
       );
       if (!next) return;
       cancelHandover();
+      if (engineRef.current === "live" && liveRef.current && audioRef.current && playingRef.current) {
+        const seconds = liveTimeFor(liveRef.current.plan, liveRef.current.status, next.chapterIndex, next.sentenceIndex);
+        if (seconds !== null) {
+          audioRef.current.currentTime = seconds;
+          const sentence = liveRef.current.plan.sentences.find(part =>
+            part.chapterIndex === next.chapterIndex && part.sentenceIndex === next.sentenceIndex);
+          if (sentence) commitSpan(book, next.chapterIndex, {
+            sentenceId: sentence.sentenceId, sentenceIndex: sentence.sentenceIndex,
+            start: sentence.start, end: sentence.end,
+          });
+          return;
+        }
+      }
 
       // 目标句还在正在播的这段音频里就直接跳时间轴。
       //
