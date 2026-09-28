@@ -89,6 +89,16 @@ function voiceScore(voice: SpeechSynthesisVoice): number {
 const CJK_CHARS_PER_SECOND = 5.2;
 const LATIN_CHARS_PER_SECOND = 15;
 const HIGHLIGHT_INTERVAL_MS = 100;
+const LIVE_CLIENT_VERSION = "2026-09-28-live-v2";
+let liveClientId = "";
+function reportLiveClient(stage: "prewarm" | "prewarm-failed" | "legacy-start", reason: string, hls: boolean) {
+  liveClientId ||= crypto.randomUUID().replaceAll("-", "");
+  void fetch("/api/sync/live/client", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: liveClientId, stage, reason: reason.slice(0, 96), hls, version: LIVE_CLIENT_VERSION }),
+    keepalive: true,
+  }).catch(() => undefined);
+}
 function reportLiveEvent(id: string, audio: HTMLAudioElement, type: string) {
   const url = `/api/sync/live/${id}/event`;
   const body = JSON.stringify({
@@ -1022,12 +1032,19 @@ export function useSpeechPlayer({
       // 正在播的时候没什么可备的，接下一段自有 prefetchNext 管。
       if (playingRef.current || waitingForClipRef.current) return;
       // 云端已经不可用（退回了系统朗读），备了也用不上。
-      if (edgeDownRef.current) return;
+      if (edgeDownRef.current) {
+        reportLiveClient("prewarm-failed", "edge-unavailable", false);
+        return;
+      }
       const voiceURI = settingsRef.current.voiceURI;
-      if (voiceURI && !isEdgeVoiceURI(voiceURI)) return;
+      if (voiceURI && !isEdgeVoiceURI(voiceURI)) {
+        reportLiveClient("prewarm-failed", "unsupported-voice", false);
+        return;
+      }
       const voiceName = edgeVoiceName(voiceURI);
       const supportsHls = typeof document !== "undefined" &&
         !!document.createElement("audio").canPlayType("application/vnd.apple.mpegurl");
+      reportLiveClient("prewarm", supportsHls ? "native-hls" : "no-native-hls", supportsHls);
       if (supportsHls) {
         const key = `${book.id}:${position.chapterIndex}:${position.sentenceIndex}:${voiceName}`;
         if (preparedLiveRef.current?.key === key) return;
@@ -1056,11 +1073,14 @@ export function useSpeechPlayer({
                 if (prepared.status.ready || prepared.status.complete) return;
                 await new Promise<void>(resolve => setTimeout(resolve, 1000));
               }
-            } catch {
+            } catch (error) {
+              if (!prepared.controller.signal.aborted) {
+                reportLiveClient("prewarm-failed", error instanceof Error ? error.message : "request-failed", true);
+              }
               // Offline and unauthenticated readers retain the existing TTS player.
             }
           })();
-        }
+        } else reportLiveClient("prewarm-failed", "no-sentences", true);
       }
       // 这里收整本书而不是 bookId：调用方（播放页）手里本来就是这本书的整本，不用再查一次。
       const chapter = book.chapters[position.chapterIndex];
@@ -1192,6 +1212,9 @@ export function useSpeechPlayer({
       const prepared = preparedLiveRef.current;
       const key = `${book.id}:${nextPosition.chapterIndex}:${nextPosition.sentenceIndex}:${edgeVoiceName(settingsRef.current.voiceURI)}`;
       if (prepared?.key === key && startLive(book, prepared)) return;
+      reportLiveClient("legacy-start", !prepared ? "no-prewarm" : prepared.key !== key ? "position-changed" :
+        !prepared.id ? "session-pending" : !prepared.status?.ready ? `buffer-${Math.round(prepared.status?.duration ?? 0)}` : "not-playable",
+        !!document.createElement("audio").canPlayType("application/vnd.apple.mpegurl"));
       playAt(bookId, nextPosition.chapterIndex, nextPosition.sentenceIndex, {
         quick: true,
       });

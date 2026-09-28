@@ -25,6 +25,8 @@ producer/consumer，R2 仍用 `moting-books`；为 `live-hls-v1/` 前缀
 后台可查询 `SELECT * FROM audio_telemetry ORDER BY id DESC LIMIT 100`，
 再按 session_id 追查一段收听。日志不记录书籍正文或登录凭据。
 简要事件保留约 7 天，每次建立新会话时清理；R2 会话对象按 2 天规则过期。
+客户端打开播放页时也会记下版本、原生 HLS 支持状态和回退原因；未出现这些
+事件而只出现 `/api/tts` 请求，说明设备仍在运行旧版页面。
 这能区分上游合成失败、队列停止和手机没有继续请求媒体。未使用音频
 设备的自动化测试不能证明 iPhone 锁屏稳定或首播达到 1–2 秒。
 

@@ -166,6 +166,23 @@ export async function handleLiveHls(
   db?: D1Database
 ): Promise<Response> {
   const action = new URL(request.url).pathname.replace("/api/sync/live/", "");
+  if (request.method === "POST" && action === "client") {
+    let body: { id?: unknown; stage?: unknown; reason?: unknown; version?: unknown; hls?: unknown };
+    try {
+      const bytes = await request.arrayBuffer();
+      if (bytes.byteLength > 512) return json({ error: "事件过大" }, 413);
+      body = JSON.parse(new TextDecoder().decode(bytes));
+    } catch { return json({ error: "事件格式无效" }, 400); }
+    if (!body || typeof body.id !== "string" || !/^[a-f0-9]{32}$/.test(body.id) ||
+        typeof body.stage !== "string" || !/^(prewarm|prewarm-failed|legacy-start)$/.test(body.stage) ||
+        typeof body.reason !== "string" || body.reason.length > 96 ||
+        typeof body.version !== "string" || !/^[\w-]{1,50}$/.test(body.version) ||
+        typeof body.hls !== "boolean") return json({ error: "事件内容无效" }, 400);
+    const entry = { version: body.version, reason: body.reason, hls: body.hls };
+    await record(db, `client-${body.id}`, body.stage, entry);
+    console.log("live_hls_client", { stage: body.stage, ...entry });
+    return json({ ok: true });
+  }
   if (request.method === "POST" && action === "session") {
     if (!queue) return json({ error: "音频任务服务未启用" }, 503);
     let body: { text?: unknown; voice?: unknown };
