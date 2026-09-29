@@ -305,7 +305,7 @@ test("长选区翻到下方时，菜单摆在选区末尾之后，不压正文",
   );
 });
 
-test("上方放得下就照旧摆在选区上端", () => {
+test("下方放得下就摆在选区末行下面，给终点手柄留出位置", () => {
   const rects = [lineRect(0, 40, 340), lineRect(1, 20, 350)];
   const union = { top: rects[0].top, bottom: rects[1].bottom, left: 20, right: 350 };
 
@@ -316,6 +316,20 @@ test("上方放得下就照旧摆在选区上端", () => {
     viewport: IPHONE,
     insets: INSETS,
   });
+
+  assert.equal(placement.side, "below");
+  assert.ok(placement.top >= rects[1].bottom + 20, "菜单压到了终点手柄");
+});
+
+test("选区贴着屏幕底部时翻到上方，锚在首行之上不压正文", () => {
+  const low = IPHONE.height - INSETS.bottom - 60;
+  const rects = [
+    { top: low - 36, bottom: low, left: 40, right: 340 },
+    { top: low, bottom: low + 36, left: 20, right: 350 },
+  ];
+  const union = { top: rects[0].top, bottom: rects[1].bottom, left: 20, right: 350 };
+
+  const placement = placeForSelection({ rects, union, menu: MENU, viewport: IPHONE, insets: INSETS });
 
   assert.equal(placement.side, "above");
   assert.ok(placement.top + MENU.height <= rects[0].top);
