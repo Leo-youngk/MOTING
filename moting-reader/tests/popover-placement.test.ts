@@ -12,8 +12,8 @@ import {
 /** iPhone 15 Pro 的竖屏尺寸，加上刘海和 Home 指示条。 */
 const IPHONE = { width: 393, height: 852 };
 const INSETS = { top: 59, bottom: 34 };
-/** 收敛成「划线 / 想法 / 复制 / 更多」之后量到的宽度量级。 */
-const MENU = { width: 288, height: 48 };
+/** 「划线 / 想法 / 复制 / 从这里听 / 问 AI」一排、图标在字上面，375～430px 屏上实测 278×62。 */
+const MENU = { width: 278, height: 62 };
 
 test("横屏刘海和视觉视口左右偏移都计入菜单安全区", () => {
   const placement = placePopover({
