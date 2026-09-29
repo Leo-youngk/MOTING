@@ -87,16 +87,13 @@ import {
   charsPerLine,
   findSentence,
   flattenChapter,
-  formatReadingTime,
   formatRemaining,
   initialPosition,
   makeId,
   estimatePagination,
   pageAt,
   planChapterWindow,
-  positionAtPercent,
   positionFor,
-  remainingCharacters,
 } from "../lib/content";
 import { createDemoBook } from "../lib/demo";
 import {
@@ -106,9 +103,17 @@ import {
   isPlaceholderTitle,
   tocIndexes,
   tocIndexFor,
+  tocRange,
 } from "../lib/display-title";
 import { MAX_BOOK_FILE_BYTES, MAX_BOOK_FILE_ERROR } from "../lib/file-limits";
 import { mergeChatTurns } from "../lib/sync-merge";
+import {
+  chapterDuration,
+  formatClock,
+  listenChapter,
+  sentenceAtSeconds,
+  sentenceSeconds,
+} from "../lib/listen-clock";
 import { springTo } from "../lib/motion";
 import {
   getSyncSession,
@@ -5401,9 +5406,10 @@ function PlayerScreen({
   const [showMore, setShowMore] = useState(false);
   const [viewMode, setViewMode] = useState<"cover" | "text">("cover");
   /**
-   * 拖进度条时先只挪圆点、预览拖到了哪一章哪一句，松手才真的跳过去——
+   * 拖进度条时先只挪圆点、预览拖到了哪一句，松手才真的跳过去——
    * 拖的一路上每动一下就重新开播，云端合成会被来回掐断。
-   * ref 是同一个值的同步副本：松手时 pointerup 和 touchend 可能前后脚都到，只认第一次。
+   * 值是本章 1× 下的秒数。ref 是同一个值的同步副本：松手时 pointerup 和 touchend
+   * 可能前后脚都到，只认第一次。
    */
   const [seeking, setSeeking] = useState<number | null>(null);
   const seekRef = useRef<number | null>(null);
@@ -5417,17 +5423,59 @@ function PlayerScreen({
           player.location.sentenceIndex
         )
       : book.listeningPosition ?? initialPosition(book);
-  // 拖动时整块信息（章名、这一句、时长）都跟着预览拖到的位置。
-  const shown = seeking === null ? basePosition : positionAtPercent(book, seeking);
-  const chapter = book.chapters[shown.chapterIndex];
   const tocList = useMemo(() => tocIndexes(book.chapters), [book.chapters]);
   const tocActive = tocIndexFor(tocList, basePosition.chapterIndex);
+  // 进度条和时长只管目录里的这一项，跟微信读书一样一章一章算，不是全书。
+  const { first: listenFirst, last: listenLast } = tocRange(
+    tocList,
+    basePosition.chapterIndex,
+    book.chapters.length
+  );
+  const listen = useMemo(
+    () => listenChapter(book.chapters, listenFirst, listenLast),
+    [book.chapters, listenFirst, listenLast]
+  );
+  const duration = chapterDuration(listen);
+  // 拖动时整块信息（章名、这一句、时间）都跟着预览拖到的位置。
+  const shownAt =
+    seeking === null
+      ? basePosition
+      : sentenceAtSeconds(listen, seeking);
+  const chapter = book.chapters[shownAt.chapterIndex];
   const sentences = chapter ? flattenChapter(chapter) : [];
-  const sentence = sentences[shown.sentenceIndex] ?? sentences[0];
+  const sentence = sentences[shownAt.sentenceIndex] ?? sentences[0];
   const playing = activeForBook && player.isPlaying;
-  const remaining = remainingCharacters(book, shown);
-  const elapsed = Math.max(0, book.characterCount - remaining);
-  const seekValue = seeking ?? shown.percent;
+  const rate = Math.max(settings.speechRate, 0.1);
+
+  /**
+   * 位置一句一跳，一句要读好几秒，时间要是跟着一句一跳就不像个时钟。所以正在出声时
+   * 从这一句开头起按墙钟往前走，封顶到下一句开头；暂停时停在原地，继续时接着走。
+   */
+  const current = sentenceSeconds(
+    listen,
+    basePosition.chapterIndex,
+    basePosition.sentenceIndex
+  );
+  const sentenceKey = `${book.id}:${basePosition.chapterIndex}:${basePosition.sentenceIndex}`;
+  const ticking = playing && !player.isBuffering;
+  const [drift, setDrift] = useState({ key: "", seconds: 0 });
+  const driftRef = useRef(drift);
+  useEffect(() => {
+    if (!ticking) return;
+    const carried = driftRef.current.key === sentenceKey ? driftRef.current.seconds : 0;
+    const startedAt = Date.now() - carried * 1000;
+    const timer = window.setInterval(() => {
+      const next = { key: sentenceKey, seconds: (Date.now() - startedAt) / 1000 };
+      driftRef.current = next;
+      setDrift(next);
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [ticking, sentenceKey]);
+  const playedSeconds = Math.min(
+    current.start + (drift.key === sentenceKey ? drift.seconds * rate : 0),
+    current.end
+  );
+  const seekValue = seeking ?? playedSeconds;
 
   const toggle = () => {
     if (activeForBook && (player.isPlaying || player.isPaused)) player.toggle();
@@ -5438,9 +5486,23 @@ function PlayerScreen({
     const value = seekRef.current;
     seekRef.current = null;
     setSeeking(null);
+    if (value === null) return;
     // 跟点目录换章一样：跳过去就从那里开始听。
-    if (value !== null) player.start(book.id, positionAtPercent(book, value));
+    const target = sentenceAtSeconds(listen, value);
+    player.start(book.id, positionFor(book, target.chapterIndex, target.sentenceIndex));
   };
+
+  // 目录里每一项的时长，跟进度条同一把尺子。只在打开目录时算。
+  const tocDurations = useMemo(
+    () =>
+      showChapters
+        ? tocList.map((index) => {
+            const range = tocRange(tocList, index, book.chapters.length);
+            return chapterDuration(listenChapter(book.chapters, range.first, range.last));
+          })
+        : [],
+    [showChapters, tocList, book.chapters]
+  );
 
   // 进到这一页多半就是要听。趁用户还在看封面、调速度的这几秒把首段备上，
   // 点下去就能同步命中缓存、立刻出声，而不是干等一轮云端合成。
@@ -5527,8 +5589,8 @@ function PlayerScreen({
             <div className="player-transcript-inline">
               {sentences
                 .slice(
-                  Math.max(0, shown.sentenceIndex - 1),
-                  shown.sentenceIndex + 2
+                  Math.max(0, shownAt.sentenceIndex - 1),
+                  shownAt.sentenceIndex + 2
                 )
                 .map((item) => (
                   <p
@@ -5546,7 +5608,7 @@ function PlayerScreen({
           <h1>{displayTitle(book.title)}</h1>
           <p>{book.author}</p>
           <strong>
-            {chapter ? chapterLabel(book.chapters, shown.chapterIndex) : "正文"}
+            {chapter ? chapterLabel(book.chapters, shownAt.chapterIndex) : "正文"}
           </strong>
         </div>
 
@@ -5557,9 +5619,10 @@ function PlayerScreen({
         <div className="player-seek">
           <SoftRange
             min={0}
-            max={100}
-            step={0.1}
-            aria-label="播放进度"
+            max={Math.max(duration, 1)}
+            step={1}
+            aria-label="本章播放进度"
+            aria-valuetext={`${formatClock(seekValue / rate)} / ${formatClock(duration / rate)}`}
             value={seekValue}
             onValue={(value) => {
               seekRef.current = value;
@@ -5575,8 +5638,8 @@ function PlayerScreen({
             }}
           />
           <div>
-            <span>已听{formatReadingTime(elapsed)}</span>
-            <span>剩余{formatReadingTime(remaining)}</span>
+            <span>{formatClock(seekValue / rate)}</span>
+            <span>{formatClock(duration / rate)}</span>
           </div>
         </div>
 
@@ -5710,6 +5773,7 @@ function PlayerScreen({
               >
                 <span>{String(number + 1).padStart(2, "0")}</span>
                 <strong>{chapterLabel(book.chapters, index)}</strong>
+                <small>{formatClock(tocDurations[number] / rate)}</small>
                 {index === tocActive ? <Volume2 size={17} /> : null}
               </button>
             ))}
