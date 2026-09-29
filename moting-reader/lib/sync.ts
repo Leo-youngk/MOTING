@@ -104,12 +104,17 @@ interface SyncResponse {
   error?: string;
 }
 
+/** keepalive 请求体的上限（浏览器规定同时在路上的 keepalive 请求合计不超过 64 KB，留点余量）。 */
+const KEEPALIVE_MAX_BYTES = 60_000;
+
 async function request<T extends object>(
   path: string,
   body: object | null,
   signal: AbortSignal,
-  timeoutMs = 60_000
+  timeoutMs = 60_000,
+  keepalive = false
 ): Promise<T & SyncResponse> {
+  const text = body === null ? undefined : JSON.stringify(body);
   let response: Response;
   try {
     response = await fetchWithTimeout(`/api/sync/${path}`, {
@@ -117,7 +122,10 @@ async function request<T extends object>(
       headers: body === null ? undefined : { "content-type": "application/json" },
       credentials: "same-origin",
       cache: "no-store",
-      body: body === null ? undefined : JSON.stringify(body),
+      body: text,
+      // 超过上限的请求带 keepalive 会被浏览器直接拒掉，那就只能按普通请求发。
+      keepalive:
+        keepalive && !!text && new TextEncoder().encode(text).length <= KEEPALIVE_MAX_BYTES,
       signal,
     }, timeoutMs);
   } catch (error) {
@@ -452,6 +460,11 @@ export interface SyncDeps {
   onProgress?: (label: string) => void;
   /** 云端记录落库后通知 UI 重读本地数据。 */
   onApplied?: (kind: SyncAppliedKind) => void;
+  /**
+   * 别的设备存的阅读位置比本机新、刚写进本地。本机自己推上去再拉回来的不算
+   * （时间相同，合并时就挡掉了）。正开着这本书时界面据此问一句要不要跳过去。
+   */
+  onRemotePosition?: (bookId: string, position: BookPosition) => void;
 }
 
 interface PushResult {
@@ -484,6 +497,23 @@ async function pushAll(payload: PushPayload, signal: AbortSignal): Promise<PushR
     rejected[kind] = [...new Set(keys)];
   }
   return { skipped, rejected };
+}
+
+/**
+ * 只推不拉：离开前台、停止播放、锁屏听书时，把本机的改动先送上云端。
+ *
+ * 一整轮同步（推 → 传正文 → 分页拉 → 下书）在 iOS 切后台后跑不完：页面几秒内就被冻结，
+ * 锁屏听书时更是一轮都不会发起，最后那段进度要等下次打开 App 才传上去（实测晚过 70 分钟、6 小时）。
+ * 这里只发推送，请求体够小就带 keepalive，页面冻结了浏览器也会把它送完。
+ *
+ * 不动水位：下一整轮还会再推一遍，服务端按 updated_at 挡掉没变的，重复推是幂等的。
+ */
+export async function pushPending(signal: AbortSignal): Promise<void> {
+  const payload = await collectPushPayload(await getSyncState());
+  for (const batch of splitPayload(payload)) {
+    if (!countPayload(batch)) continue;
+    await request("push", batch, signal, 30_000, true);
+  }
 }
 
 /** 跨页攒起来、等全部页拉完再处理的东西。 */
@@ -593,6 +623,7 @@ async function applyPullPage(
       await saveReadingPositions(positionWrites);
       changed = true;
       deps.onApplied?.("positions");
+      for (const write of positionWrites) deps.onRemotePosition?.(write.bookId, write.position);
     }
   }
 

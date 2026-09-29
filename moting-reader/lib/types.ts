@@ -185,6 +185,11 @@ export interface ReaderSettings {
   highlightStyle: HighlightStyle;
   speechRate: number;
   voiceURI: string;
+  /**
+   * 听读同步：听书时正文跟着朗读翻动，听到哪里阅读进度就记到哪里，开始听也从听读两者较新的那处起。
+   * 默认关：关着时听和读各记各的，正文在读者手底下不自己动。
+   */
+  followSpeech: boolean;
   /** 用户自带的 OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1。 */
   aiBaseUrl: string;
   /** 请求经我们的 Worker 转发（绕开跨域限制），密钥随请求过一次服务器，不落盘。 */
@@ -267,6 +272,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   highlightStyle: "underline",
   speechRate: 1,
   voiceURI: "",
+  followSpeech: false,
   aiBaseUrl: "",
   aiApiKey: "",
   aiModel: "",

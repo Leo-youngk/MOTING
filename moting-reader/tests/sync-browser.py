@@ -291,7 +291,7 @@ with sync_playwright() as playwright:
         "second_round_deleted_note": removed_id not in b_second["notes"],
         "second_round_note_count": len(b_second["notes"]) == BULK_NOTES + 1,
         "a_cursor_advances": a_second["pullCursor"] >= a_first["pullCursor"] > 0,
-        "upgrade_schema_bumped": a_upgraded["schema"] == 2,
+        "upgrade_schema_bumped": a_upgraded["schema"] == 3,
         "upgrade_legacy_settings_reach_b": b_upgraded["aiModel"] == "e2e-legacy-model",
         "upgrade_legacy_stats_reach_b": b_upgraded["statsDays"].get("2025-01-02") == 1234,
         "upgrade_listening_reaches_b": (b_upgraded["listening"] or {}).get("percent") == 37,
@@ -308,7 +308,8 @@ with sync_playwright() as playwright:
     page_b.goto(BASE)
     page_b.wait_for_load_state("networkidle")
     for _ in range(3):
-        if page_b.locator(".bottom-nav").count():
+        # 设置页开着时底栏还在 DOM 里（只是整层外壳被挂起、看不见），得看它是否可见。
+        if page_b.locator(".bottom-nav").is_visible():
             break
         page_b.get_by_role("button", name="返回").first.click()
         page_b.wait_for_timeout(300)

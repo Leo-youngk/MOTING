@@ -86,6 +86,19 @@ def menu_inside(page):
     assert b["y"] >= 11 and b["y"] + b["height"] <= v["height"] - 11, b
 
 
+SELECTION_ACTIONS = ["划线", "想法", "复制", "从这里听", "问 AI"]
+
+
+def all_actions_in_one_row(page):
+    """五个动作同时露出、排成一行，整条菜单不出屏。"""
+    menu = page.get_by_role("dialog", name="划线操作")
+    boxes = [menu.get_by_role("button", name=name, exact=True).bounding_box() for name in SELECTION_ACTIONS]
+    assert all(boxes), boxes
+    assert max(b["y"] for b in boxes) - min(b["y"] for b in boxes) < 1, boxes
+    menu_inside(page)
+    return menu.bounding_box()
+
+
 def body_renders(page):
     """ArticleBody 的渲染计数（写在起始哨兵的 data-body-renders 上）。memo 命中时不增。"""
     return page.evaluate("() => { const s = document.querySelector('.reader-sentinel'); return s ? parseInt(s.dataset.bodyRenders || '0', 10) : -1; }")
@@ -205,9 +218,8 @@ with sync_playwright() as p:
         select_word(page, cdp)
         menu_inside(page)
         assert body_renders(page) == renders_baseline, "选区变化触发了正文重渲染"
-        page.get_by_role("button", name="更多", exact=True).click()
-        menu_inside(page)
-        page.get_by_role("button", name="返回上一层").click()
+        menu_box = all_actions_in_one_row(page)
+        print(f"{width}px 屏上划线菜单 {menu_box['width']:.1f}×{menu_box['height']:.1f}", flush=True)
         # Denial must preserve the selected content for retry.
         page.evaluate("Object.defineProperty(navigator, 'clipboard', {configurable:true, value:undefined})")
         page.get_by_role("button", name="复制", exact=True).click()

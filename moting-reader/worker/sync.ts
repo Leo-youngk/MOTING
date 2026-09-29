@@ -1,3 +1,7 @@
+import { handleAudioStream } from "./audio-stream.ts";
+import { handleLiveHls } from "./live-hls.ts";
+import { handleHls } from "./hls.ts";
+import { synthesizeSpeech } from "./edge-tts.ts";
 // 云端同步服务端:登录会话 + 记录级 LWW 增量同步 + R2 正文/插图存取。
 // 合并语义:所有记录按客户端声明的 updated_at 比较,新者胜;删除走墓碑。
 // 没有任何「整库覆盖」路径——手机首次同步是上传,另一台设备首次同步是拉取合并。
@@ -9,6 +13,7 @@ type Json = Record<string, unknown>;
 export interface SyncEnv {
   DB?: D1Database;
   BOOKS_BUCKET?: R2Bucket;
+  AUDIO_QUEUE?: Queue<import("./live-hls.ts").LiveHlsJob>;
   SYNC_USERNAME?: string;
   SYNC_PASSWORD?: string;
   /** 测试注入;缺省时由 env.DB 生成 D1 store。 */
@@ -350,7 +355,7 @@ async function handleBookImage(
   return json({ error: "只支持 GET、HEAD 或 POST 请求" }, 405);
 }
 
-export async function handleSync(request: Request, env: SyncEnv): Promise<Response> {
+export async function handleSync(request: Request, env: SyncEnv, ctx?: ExecutionContext): Promise<Response> {
   try {
     if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "POST") {
       return json({ error: "只支持 GET、HEAD 或 POST 请求" }, 405);
@@ -379,6 +384,27 @@ export async function handleSync(request: Request, env: SyncEnv): Promise<Respon
       const token = sessionToken(request);
       if (TOKEN_PATTERN.test(token)) await resolved.store.dropSession(await sha256Hex(token));
       return json({ connected: false }, 200, sessionCookie(request, "", 0));
+    }
+    if (action.startsWith("audio-stream/")) {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先在设置里登录云端同步" }, 401);
+      const response = await handleAudioStream(request, resolved.bucket, ctx);
+      if (session.cookie) response.headers.set("set-cookie", session.cookie);
+      return response;
+    }
+    if (action.startsWith("live/")) {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先在设置里登录云端同步" }, 401);
+      const response = await handleLiveHls(request, resolved.bucket, env.AUDIO_QUEUE, ctx, env.DB);
+      if (session.cookie) response.headers.set("set-cookie", session.cookie);
+      return response;
+    }
+    if (action.startsWith("hls/")) {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先在设置里登录云端同步，再准备 HLS 音频" }, 401);
+      const response = await handleHls(request, resolved.bucket, synthesizeSpeech);
+      if (session.cookie) response.headers.set("set-cookie", session.cookie);
+      return response;
     }
     if (request.method === "POST" && action === "push") return await handlePush(request, resolved);
     if (request.method === "POST" && action === "pull") return await handlePull(request, resolved);

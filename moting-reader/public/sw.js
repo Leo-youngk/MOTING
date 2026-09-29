@@ -5,7 +5,7 @@
 // Workers 每次发版只留新版文件，缓存里的旧页面要是缺了自己那一版的脚本，就再也跑不起来。
 //
 // 图标、manifest 这些文件名不带内容哈希，改了它们要顺手把版本号加一，否则已装的 PWA 永远拿旧的。
-const CACHE_NAME = "moting-shell-v15";
+const CACHE_NAME = "moting-shell-v16";
 const SHELL_FILES = [
   "/manifest.webmanifest",
   "/icon-192.png",
@@ -138,6 +138,9 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/")) return;
+
+  // 应用只有 "/" 这一页；别的页面（诊断页）照常走网络，不能拿首页顶替，也不缓存。
+  if (request.mode === "navigate" && url.pathname !== "/") return;
 
   if (request.mode === "navigate") {
     // 后台取新版，打开这一下先用缓存里的；没有缓存（第一次打开）才等网络。

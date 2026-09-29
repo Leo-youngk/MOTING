@@ -467,6 +467,27 @@ export function SettingsScreen({
           </div>
         </Section>
 
+        <Section foot="打开后，在阅读页划词点「从这里听」会留在正文里，底栏多一个暂停键。手指一滑正文就不再跟，点右下角的小圆点接着跟。">
+          <label className="settings-card settings-toggle">
+            <span>
+              <strong>听读同步</strong>
+              <em>听书时正文跟着朗读翻动，听到哪里阅读进度就记到哪里</em>
+            </span>
+            <span className="ai-switch">
+              <input
+                type="checkbox"
+                checked={settings.followSpeech}
+                onChange={(event) =>
+                  onChange({ ...settings, followSpeech: event.target.checked })
+                }
+              />
+              <span className="ai-switch__track">
+                <span className="ai-switch__thumb" />
+              </span>
+            </span>
+          </label>
+        </Section>
+
         <Section
           title="助手与数据"
           foot={
@@ -505,6 +526,14 @@ export function SettingsScreen({
               label={update.status === "available" ? "更新到新版本" : "检查更新"}
               value={UPDATE_LABEL[update.status]}
               onClick={update.status === "available" ? update.apply : update.check}
+            />
+            {/* 临时的诊断页：在主屏幕打开的 PWA 里验证锁屏连续听书，定下播放方案后删掉。 */}
+            <LinkRow
+              icon={<Headphones size={24} strokeWidth={1.7} />}
+              label="后台听书测试"
+              detail="锁屏连续播放诊断"
+              value=""
+              onClick={() => window.location.assign("/mms-probe.html")}
             />
           </div>
         </Section>

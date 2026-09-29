@@ -12,8 +12,8 @@ import {
 /** iPhone 15 Pro 的竖屏尺寸，加上刘海和 Home 指示条。 */
 const IPHONE = { width: 393, height: 852 };
 const INSETS = { top: 59, bottom: 34 };
-/** 收敛成「划线 / 想法 / 复制 / 更多」之后量到的宽度量级。 */
-const MENU = { width: 288, height: 48 };
+/** 「划线 / 想法 / 复制 / 从这里听 / 问 AI」一排、图标在字上面，375～430px 屏上实测 278×62。 */
+const MENU = { width: 278, height: 62 };
 
 test("横屏刘海和视觉视口左右偏移都计入菜单安全区", () => {
   const placement = placePopover({
@@ -305,7 +305,7 @@ test("长选区翻到下方时，菜单摆在选区末尾之后，不压正文",
   );
 });
 
-test("上方放得下就照旧摆在选区上端", () => {
+test("下方放得下就摆在选区末行下面，给终点手柄留出位置", () => {
   const rects = [lineRect(0, 40, 340), lineRect(1, 20, 350)];
   const union = { top: rects[0].top, bottom: rects[1].bottom, left: 20, right: 350 };
 
@@ -316,6 +316,20 @@ test("上方放得下就照旧摆在选区上端", () => {
     viewport: IPHONE,
     insets: INSETS,
   });
+
+  assert.equal(placement.side, "below");
+  assert.ok(placement.top >= rects[1].bottom + 20, "菜单压到了终点手柄");
+});
+
+test("选区贴着屏幕底部时翻到上方，锚在首行之上不压正文", () => {
+  const low = IPHONE.height - INSETS.bottom - 60;
+  const rects = [
+    { top: low - 36, bottom: low, left: 40, right: 340 },
+    { top: low, bottom: low + 36, left: 20, right: 350 },
+  ];
+  const union = { top: rects[0].top, bottom: rects[1].bottom, left: 20, right: 350 };
+
+  const placement = placeForSelection({ rects, union, menu: MENU, viewport: IPHONE, insets: INSETS });
 
   assert.equal(placement.side, "above");
   assert.ok(placement.top + MENU.height <= rects[0].top);
