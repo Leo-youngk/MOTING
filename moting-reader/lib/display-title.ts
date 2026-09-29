@@ -70,3 +70,14 @@ export function tocIndexFor(indexes: readonly number[], index: number): number {
   }
   return found;
 }
+
+/** 第 index 章所在的目录项管到哪几章：从它自己到下一个目录项之前（闭区间）。 */
+export function tocRange(
+  indexes: readonly number[],
+  index: number,
+  chapterCount: number
+): { first: number; last: number } {
+  const first = tocIndexFor(indexes, index);
+  const next = indexes.find((candidate) => candidate > first);
+  return { first, last: (next ?? chapterCount) - 1 };
+}

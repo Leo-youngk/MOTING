@@ -4537,7 +4537,8 @@ html[data-keyboard-open] .modal-sheet {
   display: grid;
   width: 100%;
   min-height: 58px;
-  grid-template-columns: 36px 1fr 24px;
+  grid-template-columns: 36px minmax(0, 1fr) auto 24px;
+  column-gap: 10px;
   align-items: center;
   border-bottom: 1px solid var(--line-soft);
   background: transparent;
@@ -4555,8 +4556,24 @@ html[data-keyboard-open] .modal-sheet {
   font-weight: 500;
 }
 
+/* 这一章听完要多久，跟着当前倍速算。 */
+.chapter-list > button > small {
+  color: var(--subtle);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.chapter-list > button > svg {
+  grid-column: 4;
+  justify-self: end;
+}
+
 .chapter-list > button.is-active {
   color: var(--accent-deep);
+}
+
+.chapter-list > button.is-active > small {
+  color: inherit;
 }
 
 /* 阅读器目录：顶部书封 + 书名，下面章节列表，标题在左、起始进度在右，当前章高亮。 */
