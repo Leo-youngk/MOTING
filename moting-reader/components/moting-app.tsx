@@ -121,6 +121,7 @@ import {
   logoutSync,
   pushPending,
   runSync,
+  runProgressSync,
   SyncError,
   type SyncAppliedKind,
 } from "../lib/sync";
@@ -137,6 +138,10 @@ import {
   getSettings,
   getStats,
   getSyncState,
+  getProgressQueue,
+  recoverReadingBackups,
+  saveLocalListeningPosition,
+  resolveProgressConflict,
   onStorageUpgrade,
   saveSession,
   removeBook,
@@ -151,6 +156,7 @@ import {
   saveSettings,
   updateBookMeta,
 } from "../lib/storage";
+import type { QueuedProgress } from "../lib/sync-progress";
 import {
   DEFAULT_SETTINGS,
   DEFAULT_STATS,
@@ -3579,7 +3585,7 @@ const SNAPSHOT_INTERVAL_MS = 250;
 /**
  * 阅读位置的同步兜底。
  *
- * 正式的落盘走 IndexedDB，但那是攒 2.5 秒一批、而且是异步的：手机上把应用划掉、
+ * 正式的落盘走 IndexedDB，但它是异步的：手机上把应用划掉、
  * 或者系统回收 PWA 时，pagehide 里那次补写根本来不及完成，最近几秒读的就丢了，
  * 下次进来退回更早的位置——这正是「有时候进度有偏移」。localStorage 是同步写，
  * 拿它兜住最后一下；两边谁新用谁。
@@ -6211,7 +6217,7 @@ export default function MotingApp() {
       if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
       toastIdRef.current += 1;
       setToast({ id: toastIdRef.current, message, action });
-      toastTimerRef.current = window.setTimeout(hideToast, duration);
+      toastTimerRef.current = duration > 0 ? window.setTimeout(hideToast, duration) : null;
     },
     [hideToast]
   );
@@ -6298,6 +6304,21 @@ export default function MotingApp() {
   // 云端同步:登录后自动跑,不登录时应用行为与原来完全一致。
   const [syncEnabled, setSyncEnabled] = useState(true);
   const [syncConnected, setSyncConnected] = useState(false);
+  const [syncSessionKnown, setSyncSessionKnown] = useState(false);
+  const syncConnectedRef = useRef(false);
+  const sessionControllerRef = useRef<AbortController | null>(null);
+  const sessionGenerationRef = useRef(0);
+  const checkSessionRef = useRef<() => Promise<void>>(async () => {});
+  const autoSyncTimerRef = useRef<number | null>(null);
+  const flushProgressRef = useRef<() => Promise<void>>(async () => {});
+  const progressEventClockRef = useRef(0);
+  const [queuedProgress, setQueuedProgress] = useState<QueuedProgress[]>([]);
+  const [pendingResources, setPendingResources] = useState(0);
+  const progressControllerRef = useRef<AbortController | null>(null);
+  const progressAgainRef = useRef(false);
+  const fullSyncRunnerRef = useRef<(manual?: boolean) => Promise<void>>(async () => {});
+  const fullRetryTimerRef = useRef<number | null>(null);
+  const fullRetryAttemptRef = useRef(0);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState("");
   const [syncError, setSyncError] = useState("");
@@ -6308,7 +6329,7 @@ export default function MotingApp() {
   const syncReloadTimerRef = useRef<number | null>(null);
   /** 这一轮同步真正写进本地的数据类别；只重读这几类。 */
   const syncChangedRef = useRef(new Set<SyncAppliedKind>());
-  // 同步把云端数据刷回本地时置位,让下面的「写操作后 30s debounce」跳过这一轮,
+  // 同步把云端数据刷回本地时置位,让下面的普通记录自动同步跳过这一轮,
   // 免得「同步→重读→又排一个同步」空转。
   const syncQuietRef = useRef(false);
   /** 一轮同步进行中又被叫了一次：跑完接着再跑一轮，期间的改动、回前台要拉的都不丢。 */
@@ -6398,6 +6419,10 @@ export default function MotingApp() {
   // 没开着这本书的不用问，下次打开本来就落在较新的那处。
   const handleRemotePosition = useCallback(
     (bookId: string, position: BookPosition) => {
+      progressEventClockRef.current = Math.max(progressEventClockRef.current, position.updatedAt);
+      const trailing = readingUiTimerRef.current.get(bookId);
+      if (trailing !== undefined) window.clearTimeout(trailing);
+      readingUiTimerRef.current.delete(bookId);
       const current = viewRef.current;
       if (current.name !== "reader" || current.bookId !== bookId) return;
       const meta = booksRef.current.find((book) => book.id === bookId);
@@ -6423,7 +6448,7 @@ export default function MotingApp() {
             setReaderJump({ id: readerJumpIdRef.current, bookId, position });
           },
         },
-        8000
+        0
       );
     },
     [presentToast]
@@ -6431,12 +6456,14 @@ export default function MotingApp() {
 
   const triggerSync = useCallback(
     async (manual = false) => {
+      if (!manual && !syncConnectedRef.current) return;
       if (syncControllerRef.current) {
         syncAgainRef.current = true;
         if (manual) showToast("正在同步中…");
         return;
       }
       const controller = new AbortController();
+      if (fullRetryTimerRef.current !== null) { window.clearTimeout(fullRetryTimerRef.current); fullRetryTimerRef.current = null; }
       syncControllerRef.current = controller;
       syncSettledRef.current = new Promise<void>((resolve) => {
         settleSyncRef.current = resolve;
@@ -6445,12 +6472,19 @@ export default function MotingApp() {
       setSyncMessage("");
       setSyncError("");
       try {
-        const run = () => runSync({
+        const run = async () => {
+          await flushProgressRef.current();
+          return runSync({
           signal: controller.signal,
           onProgress: setSyncMessage,
           onApplied: scheduleSyncReload,
           onRemotePosition: handleRemotePosition,
-        });
+          onProgressSynced: () => {
+            lastSyncEndRef.current = Date.now();
+            setLastSyncAt(Date.now());
+            setSyncMessage("进度已同步，正在处理书籍资源…");
+          },
+        }); };
         let first = true;
         do {
           syncAgainRef.current = false;
@@ -6463,12 +6497,21 @@ export default function MotingApp() {
                 )
               : await run();
           setLastSyncAt(result.syncedAt);
+          lastSyncEndRef.current = Date.now();
+          setPendingResources(result.pendingResources);
+          setQueuedProgress(await getProgressQueue());
+          fullRetryAttemptRef.current = 0;
           if (result.failedContent.length) {
             showToast(`${result.failedContent.length} 本书超出云端大小上限,未能同步`);
           } else if (result.skipped) {
             showToast(`${result.skipped} 条记录超出云端上限或数据异常,未能同步`);
+          } else if (result.pendingResources) {
+            setSyncMessage(`进度已同步，${result.pendingResources} 项书籍资源等待重试`);
+            if (manual && first) showToast(`进度已同步，${result.pendingResources} 项资源待重试`);
+          } else if (result.conflicts) {
+            if (manual && first) showToast("有并发进度已保留，请在云端同步设置中选择");
           } else if (manual && first) {
-            showToast(result.changed ? "同步完成" : "云端没有新变更");
+            showToast("同步完成");
           }
           first = false;
         } while (syncAgainRef.current && !controller.signal.aborted);
@@ -6476,15 +6519,20 @@ export default function MotingApp() {
         if (!controller.signal.aborted) {
           if (error instanceof SyncError && error.status === 401) {
             setSyncConnected(false);
+            syncConnectedRef.current = false;
+            setSyncSessionKnown(true);
             setSyncError("同步登录已过期,请重新登录");
           } else {
             setSyncError(error instanceof Error ? error.message : "同步失败,请稍后重试");
+            if (fullRetryTimerRef.current !== null) window.clearTimeout(fullRetryTimerRef.current);
+            fullRetryTimerRef.current = window.setTimeout(() => {
+              fullRetryTimerRef.current = null;
+              if (syncConnectedRef.current) void fullSyncRunnerRef.current();
+            }, syncAgainRef.current ? 1000 : Math.min(1000 * 2 ** fullRetryAttemptRef.current++, 30_000));
           }
         }
       } finally {
         if (syncControllerRef.current === controller) syncControllerRef.current = null;
-        syncAgainRef.current = false;
-        lastSyncEndRef.current = Date.now();
         const settle = settleSyncRef.current;
         settle?.();
         settleSyncRef.current = null;
@@ -6494,6 +6542,41 @@ export default function MotingApp() {
     },
     [handleRemotePosition, scheduleSyncReload, showToast]
   );
+  useLayoutEffect(() => { fullSyncRunnerRef.current = triggerSync; }, [triggerSync]);
+
+  const triggerProgressSync = useCallback(async (pushOnly = false) => {
+    if (!syncConnectedRef.current) return;
+    if (progressControllerRef.current) { progressAgainRef.current = true; return; }
+    const controller = new AbortController();
+    progressControllerRef.current = controller;
+    try {
+      do {
+        progressAgainRef.current = false;
+        await flushProgressRef.current();
+        const deps = { signal: controller.signal, onApplied: scheduleSyncReload, onRemotePosition: handleRemotePosition };
+        if (pushOnly || document.visibilityState !== "visible") {
+          const count = await pushPending(controller.signal, deps);
+          if (!count) break;
+        }
+        else await runProgressSync(deps);
+        if (controller.signal.aborted) break;
+        setQueuedProgress(await getProgressQueue());
+        setLastSyncAt(Date.now());
+        setSyncError("");
+      } while (progressAgainRef.current && !controller.signal.aborted);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        if (error instanceof SyncError && error.status === 401) {
+          syncConnectedRef.current = false;
+          setSyncConnected(false);
+          setSyncSessionKnown(true);
+        }
+        setSyncError(error instanceof Error ? error.message : "进度待同步，联网后重试");
+      }
+    } finally {
+      if (progressControllerRef.current === controller) progressControllerRef.current = null;
+    }
+  }, [handleRemotePosition, scheduleSyncReload]);
 
   const handleSyncLogin = useCallback(
     async (username: string, password: string) => {
@@ -6506,13 +6589,22 @@ export default function MotingApp() {
         setSyncError(message);
         throw new Error(message);
       }
+      sessionGenerationRef.current += 1;
       setSyncConnected(true);
+      syncConnectedRef.current = true;
+      setSyncSessionKnown(true);
       void triggerSync(true);
     },
     [triggerSync]
   );
 
   const handleSyncLogout = useCallback(async () => {
+    sessionGenerationRef.current += 1;
+    sessionControllerRef.current?.abort();
+    progressControllerRef.current?.abort();
+    syncConnectedRef.current = false;
+    setSyncSessionKnown(true);
+    if (fullRetryTimerRef.current !== null) window.clearTimeout(fullRetryTimerRef.current);
     syncControllerRef.current?.abort();
     syncControllerRef.current = null;
     setSyncing(false);
@@ -6555,7 +6647,17 @@ export default function MotingApp() {
         storedMetadata,
       ]) => {
         if (cancelled) return;
-        let metas = storedBooks;
+        await recoverReadingBackups(storedBooks);
+        // 恢复阅读器前先获取进度；网络不通时限时回到本机数据，不阻塞启动。
+        const cold = new AbortController();
+        const coldTimer = window.setTimeout(() => cold.abort(), 2500);
+        try {
+          const session = await getSyncSession(cold.signal);
+          if (session.connected) await runProgressSync({ signal: cold.signal });
+        } catch {
+          if (!cancelled) setSyncMessage("先使用本机进度，联网后同步");
+        } finally { window.clearTimeout(coldTimer); }
+        let metas = await getAllBooks();
         if (!metas.length) {
           const demo = createDemoBook();
           await saveBook(demo);
@@ -6636,64 +6738,85 @@ export default function MotingApp() {
     return () => window.clearTimeout(timer);
   }, [ready]);
 
-  // 启动时读同步会话;已登录的设备开机就同步一轮。
+  // 无论当前是否已连接，联网/回前台都可重新检查有效 Cookie。
   useEffect(() => {
-    const controller = new AbortController();
-    getSyncState()
-      .then((state) => {
-        if (!controller.signal.aborted) setLastSyncAt(state.pushedAt);
-      })
-      .catch(() => undefined);
-    getSyncSession(controller.signal)
-      .then(({ connected, enabled }) => {
-        if (controller.signal.aborted) return;
+    if (!ready) return;
+    let stopped = false;
+    let checking = false;
+    let attempt = 0;
+    let retry: number | null = null;
+    getSyncState().then((state) => {
+      setLastSyncAt(state.lastProgressAt ?? state.pushedAt);
+      setPendingResources(state.pendingContent.length + (state.pendingDownloads?.length ?? 0) + state.pendingImages.length);
+    }).catch(() => undefined);
+    getProgressQueue().then(setQueuedProgress).catch(() => undefined);
+    const checkSession = async (force = false) => {
+      if (stopped || checking) return;
+      checking = true;
+      const generation = sessionGenerationRef.current;
+      const controller = new AbortController();
+      sessionControllerRef.current = controller;
+      try {
+        const { connected, enabled } = await getSyncSession(controller.signal);
+        if (stopped || controller.signal.aborted || generation !== sessionGenerationRef.current) return;
+        attempt = 0;
         setSyncEnabled(enabled);
+        setSyncSessionKnown(true);
         setSyncConnected(connected);
-        if (connected) void triggerSync();
-      })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, [triggerSync]);
-
-  // 在前台时每 5 分钟同步一轮。离开前台只推不拉，见下面的 pushProgress。
-  useEffect(() => {
-    if (!syncConnected) return;
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void triggerSync();
-    }, 5 * 60_000);
-    return () => window.clearInterval(timer);
-  }, [syncConnected, triggerSync]);
-
-  // 回到前台、网络恢复就拉一轮。iOS 上的 PWA 多半是从后台恢复而不是重新启动，
-  // 以前只在开机时同步，打开之后要等最多 5 分钟定时器才拿到别的设备的进度。
-  useEffect(() => {
-    if (!syncConnected) return;
-    const resume = () => {
-      if (document.visibilityState !== "visible") return;
-      if (Date.now() - lastSyncEndRef.current < RESUME_SYNC_GAP_MS) return;
-      void triggerSync();
+        syncConnectedRef.current = connected;
+        if (connected) {
+          void triggerProgressSync();
+          if (force || Date.now() - lastSyncEndRef.current >= RESUME_SYNC_GAP_MS) void triggerSync();
+        }
+      } catch {
+        if (!stopped && !controller.signal.aborted && generation === sessionGenerationRef.current) {
+          setSyncSessionKnown(false);
+          setSyncError("暂时无法连接云端，本机进度已保留，联网后自动重试");
+          retry = window.setTimeout(() => { retry = null; void checkSession(true); }, Math.min(1500 * 2 ** attempt++, 30_000));
+        }
+      } finally {
+        checking = false;
+        if (sessionControllerRef.current === controller) sessionControllerRef.current = null;
+      }
     };
+    const resume = (event: Event) => {
+      if (document.visibilityState !== "visible") return;
+      if (retry !== null) { window.clearTimeout(retry); retry = null; }
+      void checkSession(event.type === "online");
+    };
+    checkSessionRef.current = () => checkSession(true);
+    void checkSession();
     document.addEventListener("visibilitychange", resume);
     window.addEventListener("pageshow", resume);
     window.addEventListener("online", resume);
     return () => {
+      stopped = true;
+      sessionControllerRef.current?.abort();
+      if (retry !== null) window.clearTimeout(retry);
       document.removeEventListener("visibilitychange", resume);
       window.removeEventListener("pageshow", resume);
       window.removeEventListener("online", resume);
     };
-  }, [syncConnected, triggerSync]);
+  }, [ready, triggerProgressSync, triggerSync]);
 
-  // 写操作后 30s debounce 同步:读书进度、划线、改设置等让数据变化时,
-  // 推迟到「安静」满 30 秒再同步——读到哪里都实时写本地,但不会每翻一页都打云端。
-  // 一次真正的写最多换来一轮空同步,空同步不再改这些 state,链路自然停下。
+  // 常规记录/资源同步有固定兜底，连续操作不能无限重设计时器。
   useEffect(() => {
     if (!syncConnected) return;
-    if (syncQuietRef.current) {
-      syncQuietRef.current = false;
-      return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void triggerSync();
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [syncConnected, triggerSync]);
+
+  useEffect(() => {
+    if (!syncConnected) return;
+    if (syncQuietRef.current) { syncQuietRef.current = false; return; }
+    if (autoSyncTimerRef.current === null) {
+      autoSyncTimerRef.current = window.setTimeout(() => {
+        autoSyncTimerRef.current = null;
+        void triggerSync();
+      }, 30_000);
     }
-    const timer = window.setTimeout(() => void triggerSync(), 30_000);
-    return () => window.clearTimeout(timer);
   }, [books, notes, chats, settings, sessions, syncConnected, triggerSync]);
 
   // 配色只在读到真实设置之后才动。之前挂载那一刻就按默认设置把书架刷成「霜白」，
@@ -6721,7 +6844,7 @@ export default function MotingApp() {
   );
 
   // 听书每读一句就回调一次。内存里立刻更新（高亮要跟上），
-  // 落盘攒到 20 秒一次、只写书目里的听书位置，停止/切后台时补写。
+  // 每次位置变化立即异步落盘；停止/切后台时等待尚未完成的写入。
   const pendingListeningRef = useRef(new Map<string, BookPosition>());
   const flushTimerRef = useRef<number | null>(null);
 
@@ -6735,7 +6858,10 @@ export default function MotingApp() {
   /** 书架进度节流窗口里被压下的最后一次，到点补上。 */
   const readingUiTimerRef = useRef(new Map<string, number>());
   const readingProgressTimerRef = useRef<number | null>(null);
+  const readingWriteRef = useRef<Promise<void> | null>(null);
+  const listeningWriteRef = useRef<Promise<void> | null>(null);
   const flushReadingProgress = useCallback(async () => {
+    while (readingWriteRef.current) await readingWriteRef.current;
     if (readingProgressTimerRef.current !== null) {
       window.clearTimeout(readingProgressTimerRef.current);
       readingProgressTimerRef.current = null;
@@ -6745,14 +6871,16 @@ export default function MotingApp() {
     );
     pendingReadingProgressRef.current.clear();
     if (!entries.length) return;
+    const write = (async () => {
     try {
-      await saveReadingPositions(entries);
-      const byBookId = new Map(entries.map((entry) => [entry.bookId, entry]));
+      const saved = await saveReadingPositions(entries, { local: true });
+      for (const entry of saved) progressEventClockRef.current = Math.max(progressEventClockRef.current, entry.savedAt);
+      const byBookId = new Map(saved.map((entry) => [entry.bookId, entry]));
       setBooks((current) =>
         current
           .map((book) => {
             const entry = byBookId.get(book.id);
-            return entry
+            return entry && !pendingReadingProgressRef.current.has(book.id) && (book.readingPosition?.updatedAt ?? 0) <= entry.savedAt
               ? {
                   ...book,
                   readingPosition: entry.position,
@@ -6771,15 +6899,19 @@ export default function MotingApp() {
         }
       }
       reportStorageError("reading-position", error);
+      throw error;
     }
+    })();
+    readingWriteRef.current = write;
+    try { await write; } finally { if (readingWriteRef.current === write) readingWriteRef.current = null; }
   }, [reportStorageError]);
 
   const scheduleReadingProgressFlush = useCallback(() => {
     if (readingProgressTimerRef.current !== null) return;
     readingProgressTimerRef.current = window.setTimeout(() => {
       readingProgressTimerRef.current = null;
-      void flushReadingProgress();
-    }, 2500);
+      void flushReadingProgress().catch(() => undefined);
+    }, 0);
   }, [flushReadingProgress]);
 
   // 正在读书/听书时，后台的资料补全这类要在主线程解码图片的活儿一律不跑。
@@ -7027,16 +7159,29 @@ export default function MotingApp() {
     [buildMetadataPatch, commitMetadataPatch]
   );
 
-  /** 把攒着的听书位置写进书目；只写这两个字段，不碰正文。 */
+  /** 保存当前事件；失败保留待保存项，完整同步不能跨过失败。 */
   const writeListeningProgress = useCallback(async () => {
+    while (listeningWriteRef.current) await listeningWriteRef.current;
     const pending = [...pendingListeningRef.current];
     pendingListeningRef.current.clear();
-    await Promise.all(
-      pending.map(([bookId, position]) =>
-        updateBookMeta(bookId, { listeningPosition: position, updatedAt: position.updatedAt })
-          .catch((error) => reportStorageError("listening-position", error))
-      )
-    );
+    const write = (async () => {
+      const results = await Promise.allSettled(pending.map(async ([bookId, position]) => {
+        try {
+          const saved = await saveLocalListeningPosition(bookId, position);
+          progressEventClockRef.current = Math.max(progressEventClockRef.current, saved?.listeningPosition?.updatedAt ?? 0);
+        }
+        catch (error) {
+          const current = pendingListeningRef.current.get(bookId);
+          if (!current || current.updatedAt < position.updatedAt) pendingListeningRef.current.set(bookId, position);
+          reportStorageError("listening-position", error);
+          throw error;
+        }
+      }));
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+    })();
+    listeningWriteRef.current = write;
+    try { await write; } finally { if (listeningWriteRef.current === write) listeningWriteRef.current = null; }
   }, [reportStorageError]);
 
   const flushListeningProgress = useCallback(() => {
@@ -7054,6 +7199,10 @@ export default function MotingApp() {
 
   const updateListeningProgress = useCallback(
     (bookId: string, position: BookPosition) => {
+      const existing = booksRef.current.find((book) => book.id === bookId)?.listeningPosition;
+      position = { ...position, updatedAt: Math.max(Date.now(), progressEventClockRef.current + 1, position.updatedAt, (existing?.updatedAt ?? 0) + 1,
+        (pendingListeningRef.current.get(bookId)?.updatedAt ?? 0) + 1) };
+      progressEventClockRef.current = position.updatedAt;
       pendingListeningRef.current.set(bookId, position);
       // 听读同步：听到哪里阅读进度就记到哪里，别的设备打开这本书也落在这儿。
       // 阅读器正开着这本书时由它自己按正文滚到哪里来记，这里不插手。
@@ -7061,9 +7210,12 @@ export default function MotingApp() {
       const followReading =
         followSpeechRef.current &&
         !(current.name === "reader" && current.bookId === bookId);
-      const now = Date.now();
+      const now = Math.max(position.updatedAt, (booksRef.current.find((book) => book.id === bookId)?.readingPosition?.updatedAt ?? 0) + 1,
+        (pendingReadingProgressRef.current.get(bookId)?.savedAt ?? 0) + 1);
       const reading = followReading ? { ...position, updatedAt: now } : null;
       if (reading) {
+        progressEventClockRef.current = now;
+        rememberPosition(bookId, reading);
         pendingReadingProgressRef.current.set(bookId, {
           position: reading,
           lastOpenedAt: now,
@@ -7088,36 +7240,72 @@ export default function MotingApp() {
       if (flushTimerRef.current === null) {
         flushTimerRef.current = window.setTimeout(() => {
           flushTimerRef.current = null;
-          void writeListeningProgress();
-        }, 20000);
+          void writeListeningProgress().catch(() => undefined);
+        }, 0);
       }
     },
     [scheduleReadingProgressFlush, writeListeningProgress]
   );
 
-  const syncConnectedRef = useRef(syncConnected);
-  useEffect(() => {
-    syncConnectedRef.current = syncConnected;
-  }, [syncConnected]);
-  const pushInFlightRef = useRef(false);
-
-  /**
-   * 先把攒着的听读进度落盘，再只推不拉（pushPending）。
-   * 离开前台、停止播放、锁屏听书时用：这几个时刻都等不到一整轮同步跑完。
-   */
-  const pushProgress = useCallback(async () => {
-    await Promise.all([flushListeningProgress(), flushReadingProgress()]);
-    if (!syncConnectedRef.current || pushInFlightRef.current) return;
-    pushInFlightRef.current = true;
-    try {
-      await pushPending(new AbortController().signal);
-    } catch (error) {
-      // 断网或页面已被冻结：留给下次回到前台的那一轮整轮同步补上。
-      console.warn("sync_push_progress_failed", error);
-    } finally {
-      pushInFlightRef.current = false;
-    }
+  useLayoutEffect(() => {
+    flushProgressRef.current = async () => {
+      await Promise.all([flushListeningProgress(), flushReadingProgress()]);
+      if (pendingListeningRef.current.size || pendingReadingProgressRef.current.size) {
+        await Promise.all([flushListeningProgress(), flushReadingProgress()]);
+      }
+    };
   }, [flushListeningProgress, flushReadingProgress]);
+
+  useEffect(() => () => {
+    syncControllerRef.current?.abort();
+    progressControllerRef.current?.abort();
+    if (autoSyncTimerRef.current !== null) window.clearTimeout(autoSyncTimerRef.current);
+    if (fullRetryTimerRef.current !== null) window.clearTimeout(fullRetryTimerRef.current);
+  }, []);
+
+  const pushProgress = useCallback(() => triggerProgressSync(true), [triggerProgressSync]);
+
+  useEffect(() => {
+    if (!syncConnected) return;
+    let scheduled: number | null = null;
+    let retry: number | null = null;
+    let failures = 0;
+    let stopped = false;
+    const run = async () => {
+      scheduled = null;
+      await triggerProgressSync(document.visibilityState !== "visible");
+      if (stopped) return;
+      // 队列未确认时退避；online 会立即唤醒，不受成功同步去重窗口限制。
+      const pending = (await getProgressQueue()).some((entry) => entry.pending && !entry.rejection);
+      if (pending) {
+        if (retry !== null) window.clearTimeout(retry);
+        retry = window.setTimeout(() => { retry = null; void run(); }, Math.min(1000 * 2 ** failures++, 30_000));
+      } else failures = 0;
+    };
+    const schedule = () => {
+      if (scheduled === null) scheduled = window.setTimeout(() => void run(), 3000);
+    };
+    const wake = () => {
+      if (scheduled !== null) window.clearTimeout(scheduled);
+      if (retry !== null) window.clearTimeout(retry);
+      scheduled = retry = null;
+      failures = 0;
+      void run();
+    };
+    window.addEventListener("moting:progress-pending", schedule);
+    window.addEventListener("online", wake);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void run();
+    }, 8000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      if (scheduled !== null) window.clearTimeout(scheduled);
+      if (retry !== null) window.clearTimeout(retry);
+      window.removeEventListener("moting:progress-pending", schedule);
+      window.removeEventListener("online", wake);
+    };
+  }, [syncConnected, triggerProgressSync]);
 
   useEffect(() => {
     const onHide = () => {
@@ -7129,8 +7317,8 @@ export default function MotingApp() {
     return () => {
       document.removeEventListener("visibilitychange", onHide);
       window.removeEventListener("pagehide", onPageHide);
-      void flushListeningProgress();
-      void flushReadingProgress();
+      void flushListeningProgress().catch(() => undefined);
+      void flushReadingProgress().catch(() => undefined);
     };
   }, [flushListeningProgress, flushReadingProgress, pushProgress]);
 
@@ -7161,7 +7349,7 @@ export default function MotingApp() {
 
   // 一停下来就把攒着的听书进度补写掉，别等那 20 秒。
   useEffect(() => {
-    if (!player.isPlaying) flushListeningProgress();
+    if (!player.isPlaying) void flushListeningProgress().catch(() => undefined);
   }, [player.isPlaying, flushListeningProgress]);
 
   const activeBook = player.location
@@ -7392,8 +7580,19 @@ export default function MotingApp() {
   const openTokenRef = useRef(0);
 
   /** 先把这本书的正文读进来，再进页面；页面第一帧就是完整的。 */
-  const withContent = async (bookId: string): Promise<Book | null> => {
+  const withContent = async (bookId: string, refreshProgress = false): Promise<Book | null> => {
     const token = ++openTokenRef.current;
+    if (refreshProgress && syncConnectedRef.current) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 2500);
+      try {
+        await flushProgressRef.current();
+        await runProgressSync({ signal: controller.signal, onApplied: scheduleSyncReload });
+        const fresh = await getAllBooks();
+        if (token === openTokenRef.current) { booksRef.current = fresh; setBooks(fresh); }
+      } catch { setSyncMessage("先使用本机进度，联网后同步"); }
+      finally { window.clearTimeout(timer); }
+    }
     const chapters = await loadContent(bookId);
     if (token !== openTokenRef.current) return null;
     const meta = booksRef.current.find((book) => book.id === bookId);
@@ -7405,7 +7604,7 @@ export default function MotingApp() {
   };
 
   const openReader = async (meta: BookMeta, position?: BookPosition) => {
-    const book = await withContent(meta.id);
+    const book = await withContent(meta.id, !position);
     if (!book) return;
     const now = Date.now();
     const nextPosition =
@@ -7418,7 +7617,7 @@ export default function MotingApp() {
   };
 
   const openPlayer = async (meta: BookMeta, startPlaying = false) => {
-    const book = await withContent(meta.id);
+    const book = await withContent(meta.id, true);
     if (!book) return;
     navigate({ name: "player", bookId: book.id });
     if (startPlaying) {
@@ -7537,8 +7736,11 @@ export default function MotingApp() {
 
   const handleReadProgress = useCallback(
     (book: BookMeta, position: BookPosition) => {
-      const now = Date.now();
+      const now = Math.max(Date.now(), progressEventClockRef.current + 1, (booksRef.current.find((item) => item.id === book.id)?.readingPosition?.updatedAt ?? 0) + 1,
+        (pendingReadingProgressRef.current.get(book.id)?.savedAt ?? 0) + 1);
+      progressEventClockRef.current = now;
       const nextPosition = { ...position, updatedAt: now };
+      rememberPosition(book.id, nextPosition);
       pendingReadingProgressRef.current.set(book.id, {
         position: nextPosition,
         lastOpenedAt: now,
@@ -7553,7 +7755,7 @@ export default function MotingApp() {
         readingUiProgressRef.current.set(book.id, Date.now());
         setBooks((current) =>
           current.map((item) =>
-            item.id === book.id
+            item.id === book.id && (item.readingPosition?.updatedAt ?? 0) <= nextPosition.updatedAt
               ? {
                   ...item,
                   readingPosition: nextPosition,
@@ -7801,6 +8003,18 @@ export default function MotingApp() {
           sync={{
             enabled: syncEnabled,
             connected: syncConnected,
+            checkingSession: !syncSessionKnown,
+            pendingProgress: queuedProgress.filter((entry) => entry.pending && !entry.rejection).length,
+            blockedProgress: queuedProgress.filter((entry) => entry.rejection).length,
+            pendingResources,
+            conflicts: queuedProgress.filter((entry) => entry.conflict),
+            bookTitles: Object.fromEntries(books.map((book) => [book.id, book.title])),
+            onResolveConflict: async (id, useLocal) => {
+              await resolveProgressConflict(id, useLocal);
+              setQueuedProgress(await getProgressQueue());
+              await reloadFromStorage(new Set(["positions", "books"]));
+              if (useLocal) void triggerProgressSync();
+            },
             syncing,
             message: syncMessage,
             error: syncError,
@@ -7810,7 +8024,7 @@ export default function MotingApp() {
           onClear={() => setConfirmClear(true)}
           onSyncLogin={handleSyncLogin}
           onSyncLogout={() => void handleSyncLogout()}
-          onSyncNow={() => void triggerSync(true)}
+          onSyncNow={() => void (syncSessionKnown ? triggerSync(true) : checkSessionRef.current())}
           update={appUpdate}
           onOpen={(section) => navigate({ name: "settings", section })}
           onBack={() => goBack(view.section ? { name: "settings" } : { name: "home" })}

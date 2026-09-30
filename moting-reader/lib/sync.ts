@@ -2,11 +2,11 @@
 // 按 syncReadyAt 下载完整正文。绝不整库覆盖——每条记录单独比时间,新者胜。
 import { recoverPendingImage } from "./sync-images";
 import { fetchWithTimeout } from "./fetch-utils";
+import type { ProgressReceipt, ProgressRecord } from "./sync-progress";
 import {
   getAllBookMetadata,
   getAllChats,
   getAllNotes,
-  getAllReadingPositions,
   getAllSessions,
   getBook,
   getBookImage,
@@ -16,6 +16,11 @@ import {
   getSettings,
   getSettingsMtime,
   getSyncState,
+  getProgressQueue,
+  applyProgressReceipt,
+  rejectProgress,
+  applySyncedProgress,
+  commitProgressCursor,
   commitSyncState,
   applySyncedNotes,
   mergeLegacyStats,
@@ -26,11 +31,9 @@ import {
   saveBookMetadataIfNewer,
   saveChat,
   saveImportedBookIfMissing,
-  saveReadingPositions,
   saveSessionsIfNewer,
   saveSettingsIfNewer,
   updateBookMeta,
-  updateListeningIfNewer,
   type SyncState,
   type SyncPushKind,
 } from "./storage";
@@ -55,8 +58,6 @@ import {
   mergeChatTurns,
   mergeBookMeta,
   mergeNote,
-  mergePosition,
-  newerListening,
   splitPayload,
   toSyncBookMeta,
   toSyncPatch,
@@ -70,7 +71,7 @@ import {
  * 它的 pushedAt 已经越过了那些旧记录的修改时间,不整体补传一轮就永远传不上去。
  * 3:为被服务端逐条拒收的数据保留重试队列，并重试下载失败的插图。
  */
-export const SYNC_SCHEMA = 3;
+export const SYNC_SCHEMA = 4;
 
 /** 插图/封面同时在路上的请求数。 */
 const IMAGE_CONCURRENCY = 4;
@@ -102,6 +103,7 @@ interface SyncResponse {
   patches?: SyncRecord[];
   listening?: SyncRecord[];
   error?: string;
+  receipts?: ProgressReceipt[];
 }
 
 /** keepalive 请求体的上限（浏览器规定同时在路上的 keepalive 请求合计不超过 64 KB，留点余量）。 */
@@ -183,16 +185,7 @@ export async function collectPushPayload(state: SyncState): Promise<PushPayload>
   }
   if (books.length) payload.books = books;
 
-  const listening: PushItem[] = [];
-  const retryListening = pending("listening");
-  for (const meta of metas) {
-    const position = meta.listeningPosition;
-    if (localOnly.has(meta.id) || !position) continue;
-    const updatedAt = Math.floor(position.updatedAt);
-    if (!(updatedAt > since) && !retryListening.has(meta.id)) continue;
-    listening.push({ key: meta.id, data: JSON.stringify(position), updatedAt });
-  }
-  if (listening.length) payload.listening = listening;
+  Object.assign(payload, await collectProgressPayload());
 
   const notes: PushItem[] = [];
   const retryNotes = pending("notes");
@@ -206,17 +199,6 @@ export async function collectPushPayload(state: SyncState): Promise<PushPayload>
   }
   if (notes.length) payload.notes = notes;
 
-  const positions: PushItem[] = [];
-  const retryPositions = pending("positions");
-  for (const entry of await getAllReadingPositions()) {
-    if (localOnly.has(entry.bookId) || (entry.savedAt <= since && !retryPositions.has(entry.bookId))) continue;
-    positions.push({
-      key: entry.bookId,
-      data: JSON.stringify({ position: entry.position, lastOpenedAt: entry.lastOpenedAt, savedAt: entry.savedAt }),
-      updatedAt: entry.savedAt,
-    });
-  }
-  if (positions.length) payload.positions = positions;
 
   const sessions: PushItem[] = [];
   const retrySessions = pending("sessions");
@@ -450,6 +432,8 @@ export interface SyncRunResult {
   failedContent: string[];
   /** 被服务端跳过的记录数(单条超过上限,或数据异常);调用方应提示用户。 */
   skipped: number;
+  pendingResources: number;
+  conflicts: number;
 }
 
 export type SyncAppliedKind =
@@ -462,9 +446,10 @@ export interface SyncDeps {
   onApplied?: (kind: SyncAppliedKind) => void;
   /**
    * 别的设备存的阅读位置比本机新、刚写进本地。本机自己推上去再拉回来的不算
-   * （时间相同，合并时就挡掉了）。正开着这本书时界面据此问一句要不要跳过去。
+   * （已知服务端版本，合并时就挡掉了）。正开着这本书时界面据此提示跳转。
    */
   onRemotePosition?: (bookId: string, position: BookPosition) => void;
+  onProgressSynced?: () => void;
 }
 
 interface PushResult {
@@ -472,17 +457,30 @@ interface PushResult {
   rejected: Partial<Record<SyncPushKind, string[]>>;
 }
 
-async function pushAll(payload: PushPayload, signal: AbortSignal): Promise<PushResult> {
+async function pushAll(payload: PushPayload, signal: AbortSignal, deps?: SyncDeps, keepalive = false): Promise<PushResult> {
   let skipped = 0;
   const rejected: Partial<Record<SyncPushKind, string[]>> = {};
-  for (const batch of splitPayload(payload)) {
+  for (const batch of splitPayload(payload, 400, keepalive ? 45_000 : undefined)) {
     if (!countPayload(batch)) continue;
     const response = await request<{ tooLarge?: Record<string, string[]>; rejected?: Record<string, string[]> }>(
       "push",
       batch,
       signal,
-      120_000
+      keepalive ? 30_000 : 120_000,
+      keepalive
     );
+    for (const kind of ["positions", "listening"] as const) {
+      for (const item of batch[kind] ?? []) {
+        const receipt = response.receipts?.find((value) => value.kind === kind && value.key === item.key && value.mutationId === item.mutationId);
+        const rejectedItem = response.rejected?.[kind]?.includes(item.key) || response.tooLarge?.[kind]?.includes(item.key);
+        if (rejectedItem && item.mutationId) await rejectProgress(kind, item.key, item.mutationId);
+        if (!receipt && !rejectedItem) throw new SyncError("云端尚未启用进度确认协议，请稍后重试", 502);
+        if (receipt && await applyProgressReceipt(receipt)) {
+          deps?.onApplied?.(kind === "positions" ? "positions" : "books");
+          if (kind === "positions") deps?.onRemotePosition?.(item.key, (receipt.record?.data as { position: BookPosition }).position);
+        }
+      }
+    }
     for (const groups of [response.tooLarge, response.rejected]) {
       for (const [table, keys] of Object.entries(groups ?? {})) {
         skipped += keys.length;
@@ -504,15 +502,58 @@ async function pushAll(payload: PushPayload, signal: AbortSignal): Promise<PushR
  *
  * 一整轮同步（推 → 传正文 → 分页拉 → 下书）在 iOS 切后台后跑不完：页面几秒内就被冻结，
  * 锁屏听书时更是一轮都不会发起，最后那段进度要等下次打开 App 才传上去（实测晚过 70 分钟、6 小时）。
- * 这里只发推送，请求体够小就带 keepalive，页面冻结了浏览器也会把它送完。
+ * 这里只发小体积的 keepalive 推送，页面冻结前尽力提交；未确认条目保留到下次重试。
  *
- * 不动水位：下一整轮还会再推一遍，服务端按 updated_at 挡掉没变的，重复推是幂等的。
+ * 不动拉取水位；逐条确认成功才清理待传状态，重复 mutation 幂等。
  */
-export async function pushPending(signal: AbortSignal): Promise<void> {
-  const payload = await collectPushPayload(await getSyncState());
-  for (const batch of splitPayload(payload)) {
-    if (!countPayload(batch)) continue;
-    await request("push", batch, signal, 30_000, true);
+async function collectProgressPayload(): Promise<PushPayload> {
+  const payload: PushPayload = {};
+  const localOnly = new Set((await getBookMetas()).filter((meta) => meta.format === "demo").map((meta) => meta.id));
+  for (const entry of await getProgressQueue()) {
+    if (!entry.pending || entry.rejection || localOnly.has(entry.key)) continue;
+    (payload[entry.kind] ??= []).push({ key: entry.key, data: entry.data, updatedAt: entry.updatedAt,
+      mutationId: entry.mutationId, baseServerRev: entry.baseServerRev, bootstrap: entry.bootstrap });
+  }
+  return payload;
+}
+
+async function withProgressLock<T>(signal: AbortSignal, run: () => Promise<T>): Promise<T> {
+  return typeof navigator !== "undefined" && navigator.locks
+    ? navigator.locks.request("moting-reader-progress", { mode: "exclusive", signal }, run)
+    : run();
+}
+
+export async function pushPending(signal: AbortSignal, deps?: SyncDeps): Promise<number> {
+  return withProgressLock(signal, async () => {
+    const payload = await collectProgressPayload();
+    const result = await pushAll(payload, signal, deps, true);
+    return countPayload(payload) - result.skipped;
+  });
+}
+
+/** 前台进度通道独立于资源同步；先检查版本，没有变更时不扫八张 D1 表。 */
+export async function runProgressSync(deps: SyncDeps): Promise<void> {
+  await pushPending(deps.signal, deps);
+  const state = await getSyncState();
+  const version = await request<{ version: number }>("version", null, deps.signal, 20_000);
+  let cursor = state.progressCursor ?? 0;
+  if (version.version + 1 <= cursor) { await commitProgressCursor(cursor); return; }
+  for (;;) {
+    const page = await request<SyncResponse>("pull", { since: cursor, progressOnly: true }, deps.signal, 30_000);
+    for (const kind of ["positions", "listening"] as const) {
+      for (const record of page[kind] ?? []) {
+        if (!record.data || !Number.isSafeInteger(record.serverAt)) continue;
+        if (await applySyncedProgress(kind, record as ProgressRecord)) {
+          deps.onApplied?.(kind === "positions" ? "positions" : "books");
+          if (kind === "positions") deps.onRemotePosition?.(record.key, (record.data as { position: BookPosition }).position);
+        }
+      }
+    }
+    const next = Number(page.cursor);
+    if (!Number.isSafeInteger(next) || next < cursor || (page.hasMore && next === cursor)) throw new SyncError("同步服务返回了无效的水位", 502);
+    cursor = next;
+    await commitProgressCursor(cursor);
+    if (!page.hasMore) break;
   }
 }
 
@@ -522,8 +563,6 @@ interface PullAccumulator {
   downloads: Map<string, BookMeta>;
   /** 本轮见到的删书墓碑:拉完后按书清掉划线、位置、对话,不留孤儿。 */
   deadBooks: Map<string, number>;
-  /** 听书进度;书可能在后面的页甚至本轮下载后才落地,所以最后统一套。 */
-  listening: Map<string, BookPosition>;
 }
 
 /** 把一页 pull 结果逐条合并进本地。 */
@@ -586,10 +625,15 @@ async function applyPullPage(
     }
   }
 
-  for (const record of page.listening ?? []) {
-    const position = record.data as BookPosition | undefined;
-    const newer = newerListening(acc.listening.get(record.key), position);
-    if (newer) acc.listening.set(record.key, newer);
+  for (const kind of ["positions", "listening"] as const) {
+    for (const record of page[kind] ?? []) {
+      if (!record.data || !Number.isSafeInteger(record.serverAt)) continue;
+      if (await applySyncedProgress(kind, record as ProgressRecord)) {
+        changed = true;
+        deps.onApplied?.(kind === "positions" ? "positions" : "books");
+        if (kind === "positions") deps.onRemotePosition?.(record.key, (record.data as { position: BookPosition }).position);
+      }
+    }
   }
 
   if (page.notes?.length) {
@@ -609,23 +653,6 @@ async function applyPullPage(
     }
   }
 
-  if (page.positions?.length) {
-    const localPositions = new Map((await getAllReadingPositions()).map((entry) => [entry.bookId, entry.savedAt]));
-    const positionWrites: Array<{ bookId: string; position: BookPosition; lastOpenedAt: number; savedAt: number }> = [];
-    for (const record of page.positions) {
-      const action = mergePosition<{ position: BookPosition; lastOpenedAt: number; savedAt: number }>(
-        localPositions.get(record.key),
-        record
-      );
-      if (action.op === "write") positionWrites.push({ bookId: record.key, ...action.value });
-    }
-    if (positionWrites.length) {
-      await saveReadingPositions(positionWrites);
-      changed = true;
-      deps.onApplied?.("positions");
-      for (const write of positionWrites) deps.onRemotePosition?.(write.bookId, write.position);
-    }
-  }
 
   if (page.sessions?.length) {
     const incoming = page.sessions.filter((record) => record.data).map((record) => record.data as ReadingSession);
@@ -701,9 +728,9 @@ async function applyPullPage(
 }
 
 /**
- * 一轮同步 = push 脏记录 → 逐本上传待传正文、传完一本立刻标 ready → 分页 pull 增量逐条 LWW 合并 →
- * 下载缺失书籍 → 套听书进度、清删书孤儿 → 推进两个水位并清掉已确认的墓碑。
- * 任何一步抛错整轮中止,水位不动;重跑时重复的 push/pull 都是幂等的。
+ * 一轮同步 = 确认进度队列 → push 普通记录 → 分页 pull 并落盘进度、游标和资源队列 →
+ * 上传/下载正文和图片 → 清理删书孤儿并保存剩余资源任务。
+ * 进度和资源分别确认；资源失败不撤销进度，也不会丢掉跨页面重启的重试任务。
  */
 export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
   const { signal, onProgress = () => {} } = deps;
@@ -712,7 +739,10 @@ export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
   const startedAt = Date.now();
 
   // 1. push 本地脏记录。
+  await pushPending(signal, deps);
   const payload = await collectPushPayload(state);
+  delete payload.positions;
+  delete payload.listening;
   const pushedBookIds = new Set((payload.books ?? []).filter((item) => !item.deletedAt).map((item) => item.key));
   let skipped = 0;
   const rejectedPush: Partial<Record<SyncPushKind, string[]>> = {};
@@ -727,9 +757,49 @@ export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
     recordPushResult(await pushAll(payload, signal));
   }
 
-  // 2. 上传待传正文(meta 已 push 但还没标 ready 的书 + 之前没传完的)。
-  // 传完一本就标一本:中途被系统杀掉,下次只会从没传完的那本接着来。
+  // 2. 分页 pull 远端增量,逐页合并。
+  onProgress("正在拉取云端变更…");
+  let changed = !!countPayload(payload);
+  let cursor = state.pullCursor;
+  const localMetaById = new Map((await getBookMetas()).map((meta) => [meta.id, meta]));
+  const acc: PullAccumulator = { downloads: new Map(), deadBooks: new Map() };
+  for (;;) {
+    const page = await request<SyncResponse>("pull", { since: cursor }, signal, 120_000);
+    if (await applyPullPage(page, localMetaById, acc, deps)) changed = true;
+    const next = Number(page.cursor);
+    if (!Number.isSafeInteger(next) || next < cursor) throw new SyncError("同步服务返回了无效的水位", 502);
+    cursor = next;
+    if (!page.hasMore) break;
+    if (signal.aborted) throw new DOMException("同步已取消", "AbortError");
+  }
+
+  // 游标提交前清理整轮见到的删书，资源中断或页面回收后也不能留下孤儿记录。
+  for (const [bookId, deletedAt] of acc.deadBooks) {
+    const removed = await removeBookIfOlder(bookId, deletedAt);
+    const local = await getBookMeta(bookId);
+    if (local) localMetaById.set(bookId, local);
+    else localMetaById.delete(bookId);
+    if (removed) changed = true;
+    deps.onApplied?.("books");
+    deps.onApplied?.("notes");
+    deps.onApplied?.("positions");
+    deps.onApplied?.("chats");
+    deps.onApplied?.("patches");
+  }
+
   const pending = [...new Set([...state.pendingContent, ...pushedBookIds])];
+  const downloads = new Map((state.pendingDownloads ?? []).map((meta) => [meta.id, meta]));
+  for (const [id, meta] of acc.downloads) downloads.set(id, meta);
+  for (const id of acc.deadBooks.keys()) downloads.delete(id);
+  // 先落盘资源队列和拉取游标；资源失败或页面被回收不能丢掉已见过的新书。
+  await commitSyncState({ ...state, schema: SYNC_SCHEMA, pushedAt: startedAt,
+    pullCursor: cursor, progressCursor: cursor, lastProgressAt: Date.now(), pendingContent: pending,
+    pendingDownloads: [...downloads.values()], pendingPush: rejectedPush }, state,
+    { books: rejectedPush.books, notes: rejectedPush.notes });
+  deps.onProgressSynced?.();
+
+  // 3. 上传待传正文(meta 已 push 但还没标 ready 的书 + 之前没传完的)。
+  // 传完一本就标一本:中途被系统杀掉,下次只会从没传完的那本接着来。
   const failedContent: string[] = [];
   const stillPending: string[] = [];
   for (const bookId of pending) {
@@ -741,7 +811,7 @@ export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
       const book = await getBook(bookId);
       if (!book) continue;
       await uploadBookBody(bookId, book, signal);
-      // 只改这一个字段:上传期间这本书可能又被写过(听书进度每 20 秒落一次盘)。
+      // 只改这一个字段，保留上传期间产生的新听书位置等本地变化。
       const ready = await updateBookMeta(bookId, { syncReadyAt: Date.now() });
       if (!ready) continue;
       recordPushResult(await pushAll(
@@ -760,37 +830,29 @@ export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
   }
   if (signal.aborted) throw new DOMException("同步已取消", "AbortError");
 
-  // 3. 分页 pull 远端增量,逐页合并。
-  onProgress("正在拉取云端变更…");
-  let changed = !!countPayload(payload);
-  let cursor = state.pullCursor;
-  const localMetaById = new Map((await getBookMetas()).map((meta) => [meta.id, meta]));
-  const acc: PullAccumulator = { downloads: new Map(), deadBooks: new Map(), listening: new Map() };
-  for (;;) {
-    const page = await request<SyncResponse>("pull", { since: cursor }, signal, 120_000);
-    if (await applyPullPage(page, localMetaById, acc, deps)) changed = true;
-    const next = Number(page.cursor);
-    if (!Number.isSafeInteger(next) || next < cursor) throw new SyncError("同步服务返回了无效的水位", 502);
-    cursor = next;
-    if (!page.hasMore) break;
-    if (signal.aborted) throw new DOMException("同步已取消", "AbortError");
-  }
-
   // 4. 下载缺失书籍(只有对端标记过 syncReadyAt 的)。
   const pendingImages = new Map(
     state.pendingImages.map((entry) => [`${entry.bookId}\u0000${entry.imageId}`, entry] as const)
   );
   const refreshedBooks = new Set<string>();
-  for (const meta of acc.downloads.values()) {
+  for (const meta of downloads.values()) {
     if (signal.aborted) break;
-    const downloaded = await downloadBook(meta, signal, onProgress);
+    if (await getBookMeta(meta.id)) { downloads.delete(meta.id); continue; }
+    let downloaded: Awaited<ReturnType<typeof downloadBook>>;
+    try { downloaded = await downloadBook(meta, signal, onProgress); }
+    catch (error) {
+      if (signal.aborted) throw error;
+      console.warn("sync_download_pending", { bookId: meta.id });
+      continue;
+    }
     if (!downloaded) continue;
     const imported = await saveImportedBookIfMissing(downloaded.book, downloaded.images);
     if (!imported) {
       const current = await getBookMeta(meta.id);
-      if (current) localMetaById.set(meta.id, current);
+      if (current) { localMetaById.set(meta.id, current); downloads.delete(meta.id); }
       continue;
     }
+    downloads.delete(meta.id);
     refreshedBooks.add(meta.id);
     for (const [key, entry] of pendingImages) if (entry.bookId === meta.id) pendingImages.delete(key);
     for (const imageId of downloaded.pendingImages) {
@@ -831,33 +893,7 @@ export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
     }
   }
 
-  // 6. 听书进度:远端比本地新才写。不动书的 updatedAt,免得这本书的 meta 下一轮又被推回去。
-  for (const [bookId, position] of acc.listening) {
-    if (acc.deadBooks.has(bookId)) continue;
-    const updated = await updateListeningIfNewer(bookId, position);
-    if (!updated) continue;
-    localMetaById.set(bookId, updated);
-    changed = true;
-    deps.onApplied?.("books");
-  }
-
-  // 7. 删书连带清理:划线、位置、对话、资料补丁可能排在墓碑后面的页里才落地,
-  // 全新设备还可能从没见过这本书,只收到了它的划线。拉完再按书清一遍。
-  for (const [bookId, deletedAt] of acc.deadBooks) {
-    const removed = await removeBookIfOlder(bookId, deletedAt);
-    const local = await getBookMeta(bookId);
-    if (local) localMetaById.set(bookId, local);
-    else localMetaById.delete(bookId);
-    if (removed) changed = true;
-    // 删书会一并清理相关记录，内存中的笔记/聊天/位置也要同步重读。
-    deps.onApplied?.("books");
-    deps.onApplied?.("notes");
-    deps.onApplied?.("positions");
-    deps.onApplied?.("chats");
-    deps.onApplied?.("patches");
-  }
-
-  // 8. 推进水位。已成功 push 的墓碑使命完成(生效或被服务端新值否决),清除;
+  // 6. 保存剩余任务。已成功 push 的墓碑使命完成(生效或被服务端新值否决),清除;
   // 同步期间新增或改写的墓碑要从最新 state 里保住。
   const retryPush = Object.fromEntries(
     Object.entries(rejectedPush).map(([kind, keys]) => [kind, [...new Set(keys)]])
@@ -868,9 +904,14 @@ export async function runSync(deps: SyncDeps): Promise<SyncRunResult> {
     pullCursor: cursor,
     tombstones: state.tombstones,
     pendingContent: stillPending,
+    pendingDownloads: [...downloads.values()],
+    progressCursor: cursor,
     pendingImages: [...pendingImages.values()],
     pendingPush: retryPush,
   }, state, { books: rejectedPush.books, notes: rejectedPush.notes });
 
-  return { syncedAt: startedAt, changed, failedContent, skipped };
+  const progress = await getProgressQueue();
+  return { syncedAt: Date.now(), changed, failedContent, skipped: skipped + progress.filter((entry) => entry.rejection).length,
+    pendingResources: stillPending.length + downloads.size + pendingImages.size,
+    conflicts: progress.filter((entry) => entry.conflict).length };
 }

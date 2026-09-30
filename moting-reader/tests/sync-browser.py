@@ -71,7 +71,8 @@ def note(note_id, created_at, book_id=BOOK_ID):
 
 SEED_NOTES = [note(f"n-{RUN}-{i}", NOW - 50_000 + i) for i in range(BULK_NOTES + 1)]
 DOOMED_NOTES = [note(f"d-{RUN}-{i}", NOW - 50_000 + i, DOOMED_ID) for i in range(2)]
-POSITION = {"position": {"chapterId": "c1", "sentenceId": "s1"}, "lastOpenedAt": NOW - 40_000, "savedAt": NOW - 40_000}
+POSITION = {"position": {"chapterId": "c1", "chapterIndex": 0, "sentenceId": "s1", "sentenceIndex": 0,
+                         "percent": 0, "updatedAt": NOW - 40_000}, "lastOpenedAt": NOW - 40_000, "savedAt": NOW - 40_000}
 
 OPEN_DB = "const db = await new Promise((res, rej) => { const r = indexedDB.open('moting-reader'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });"
 # 本地库里书目和正文分两张表(books / contents),照 storage.putBook 的写法拆开写。
@@ -291,7 +292,7 @@ with sync_playwright() as playwright:
         "second_round_deleted_note": removed_id not in b_second["notes"],
         "second_round_note_count": len(b_second["notes"]) == BULK_NOTES + 1,
         "a_cursor_advances": a_second["pullCursor"] >= a_first["pullCursor"] > 0,
-        "upgrade_schema_bumped": a_upgraded["schema"] == 3,
+        "upgrade_schema_bumped": a_upgraded["schema"] == 4,
         "upgrade_legacy_settings_reach_b": b_upgraded["aiModel"] == "e2e-legacy-model",
         "upgrade_legacy_stats_reach_b": b_upgraded["statsDays"].get("2025-01-02") == 1234,
         "upgrade_listening_reaches_b": (b_upgraded["listening"] or {}).get("percent") == 37,

@@ -51,14 +51,26 @@ function createMemoryStore(): SyncStore & { rows: Map<SyncTable, Map<string, Syn
       return clockValue;
     },
     async applyPush(batch) {
-      if (!batch.length) return;
+      if (!batch.length) return [];
       clockValue = Math.max(clockValue, Date.now() * 1000) + batch.length;
       const base = clockValue - batch.length;
       batch.forEach(({ table: name, row }, index) => {
         const store = table(name);
         const existing = store.get(row.key);
-        if (existing && row.updatedAt <= existing.updatedAt) return; // 新者胜:旧的被拒
-        store.set(row.key, { ...row, bookId: row.bookId ?? existing?.bookId ?? null, serverAt: base + index });
+        if (name === "positions" || name === "listening") {
+          if (existing && row.mutationId) {
+            if (row.mutationId === existing.mutationId) return;
+            if (row.bootstrap ? (existing.mutationId || row.updatedAt < existing.updatedAt) : existing.serverAt !== row.baseServerRev) return;
+          } else if (existing && (existing.mutationId || row.updatedAt <= existing.updatedAt)) return;
+        } else if (existing && row.updatedAt <= existing.updatedAt) return;
+        store.set(row.key, { ...row, bookId: row.bookId ?? existing?.bookId ?? null, serverAt: base + index + 1 });
+      });
+      return batch.filter(({ table: name }) => name === "positions" || name === "listening").map(({ table: name, row }) => {
+        const saved = table(name).get(row.key)!;
+        return { kind: name as "positions" | "listening", key: row.key, mutationId: row.mutationId,
+          status: !row.mutationId && saved.mutationId ? "upgrade" as const
+            : row.mutationId && saved.mutationId !== row.mutationId && !(row.bootstrap && saved.data === row.data) ? "conflict" as const : "accepted" as const,
+          record: { key: saved.key, data: JSON.parse(saved.data), updatedAt: saved.updatedAt, serverAt: saved.serverAt, mutationId: saved.mutationId } };
       });
     },
     async since(name, watermark, through, limit) {

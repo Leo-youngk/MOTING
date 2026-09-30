@@ -1,5 +1,6 @@
 // 同步持久化层:D1 表操作收敛到这个接口,生产用 createD1Store,
 // 单元测试用内存实现,让 LWW/墓碑/号段逻辑不经真 D1 也能跑。
+import type { ProgressReceipt } from "../lib/sync-progress.ts";
 export type SyncTable =
   | "books"
   | "notes"
@@ -17,9 +18,10 @@ export interface SyncRow {
   serverAt: number;
   deletedAt: number | null;
   bookId: string | null;
+  mutationId?: string;
 }
 
-export type PushRow = Omit<SyncRow, "serverAt">;
+export type PushRow = Omit<SyncRow, "serverAt"> & { baseServerRev?: number; bootstrap?: boolean };
 
 export interface SyncStore {
   /** 写入一条会话 token 的哈希与过期时刻。 */
@@ -35,9 +37,9 @@ export interface SyncStore {
   /**
    * 原子写入一批记录:预占 server_at 号段与全部 upsert 在同一事务里完成,
    * 并发的 pull 要么看到整批、要么一条都看不到,游标永远不会跳过还没落库的号。
-   * 每条按 LWW 只在 updatedAt 更新时生效。
+   * 普通记录按时间合并；阅读/听书按已知服务端版本确认。
    */
-  applyPush(rows: Array<{ table: SyncTable; row: PushRow }>): Promise<void>;
+  applyPush(rows: Array<{ table: SyncTable; row: PushRow }>): Promise<ProgressReceipt[]>;
   /** watermark <= server_at <= through 的记录,按 server_at 升序,最多 limit 条。 */
   since(table: SyncTable, watermark: number, through: number, limit: number): Promise<SyncRow[]>;
 }
@@ -97,6 +99,9 @@ interface PackedRow {
   u: number;
   x: number | null;
   b: string | null;
+  m?: string;
+  r?: number;
+  l?: boolean;
 }
 
 export function packedRowBytes(row: PackedRow): number {
@@ -149,12 +154,25 @@ function upsertSql(table: SyncTable): string {
     values.push("COALESCE(json_extract(value, '$.b'), '')");
     updates.push(`book_id = COALESCE(NULLIF(excluded.book_id, ''), ${table}.book_id)`);
   }
+  let condition = `excluded.updated_at > ${table}.updated_at`;
+  if (table === "positions" || table === "listening") {
+    columns.push("mutation_id");
+    values.push("json_extract(value, '$.m')");
+    updates.push("mutation_id = excluded.mutation_id");
+    const incoming = `(SELECT value FROM json_each(?1) WHERE json_extract(value, '$.k') = excluded.${keyColumn} LIMIT 1)`;
+    condition = `(` +
+      `(excluded.mutation_id IS NULL AND ${table}.mutation_id IS NULL AND excluded.updated_at > ${table}.updated_at) OR ` +
+      `(excluded.mutation_id IS NOT NULL AND ${table}.mutation_id IS NOT excluded.mutation_id AND (` +
+      `(${table}.server_at = json_extract(${incoming}, '$.r') AND json_extract(${incoming}, '$.l') IS NOT 1) OR ` +
+      `(json_extract(${incoming}, '$.l') = 1 AND ${table}.mutation_id IS NULL AND excluded.updated_at >= ${table}.updated_at)` +
+      `)))`;
+  }
   // SELECT 后的 WHERE true 是 SQLite 的语法要求:否则 ON CONFLICT 会被解析成 JOIN 约束。
   return (
     `INSERT INTO ${table} (${columns.join(", ")}) ` +
     `SELECT ${values.join(", ")} FROM json_each(?1) WHERE true ` +
     `ON CONFLICT(${keyColumn}) DO UPDATE SET ${updates.join(", ")} ` +
-    `WHERE excluded.updated_at > ${table}.updated_at`
+    `WHERE ${condition}`
   );
 }
 
@@ -181,16 +199,17 @@ export function createD1Store(db: D1Database): SyncStore {
       return row ? Number(row.value) : 0;
     },
     async applyPush(rows) {
-      if (!rows.length) return;
+      if (!rows.length) return [];
       const count = rows.length;
       const byTable = new Map<SyncTable, PackedRow[]>();
       rows.forEach(({ table, row }, index) => {
         let list = byTable.get(table);
         if (!list) byTable.set(table, (list = []));
-        list.push({ i: index, k: row.key, d: row.data, u: row.updatedAt, x: row.deletedAt, b: row.bookId });
+        list.push({ i: index + 1, k: row.key, d: row.data, u: row.updatedAt, x: row.deletedAt, b: row.bookId,
+          m: row.mutationId, r: row.baseServerRev, l: row.bootstrap });
       });
       // D1 的 batch 是一个事务:占号段 + 全部 upsert 要么全成、要么全不成。
-      // 免费档每次调用限 50 条查询,这里无论多少记录都只有 1 + 表数(×分包)条。
+      // 免费档每次调用限 50 条查询；按表分包写入，进度另加对应批次的确认读取。
       const statements = [
         db
           .prepare(
@@ -205,7 +224,39 @@ export function createD1Store(db: D1Database): SyncStore {
           statements.push(db.prepare(sql).bind(JSON.stringify(chunk), count));
         }
       }
-      await db.batch(statements);
+      const progressQueries: Array<{ table: "positions" | "listening"; rows: PackedRow[] }> = [];
+      for (const [table, list] of byTable) {
+        if (table !== "positions" && table !== "listening") continue;
+        for (const chunk of chunkPacked(list)) {
+          progressQueries.push({ table, rows: chunk });
+          statements.push(db.prepare(
+            `SELECT book_id AS key, data, updated_at, server_at, mutation_id FROM ${table} ` +
+            `WHERE book_id IN (SELECT json_extract(value, '$.k') FROM json_each(?))`
+          ).bind(JSON.stringify(chunk)));
+        }
+      }
+      // 逐条确认读取也在同一个 batch 事务中，不把另一请求的后续写误认成自己的确认。
+      const results = await db.batch<Record<string, unknown>>(statements);
+      const receipts: ProgressReceipt[] = [];
+      for (let i = 0; i < progressQueries.length; i += 1) {
+        const { table, rows: sent } = progressQueries[i];
+        const result = results[results.length - progressQueries.length + i];
+        const saved = new Map(result.results.map((value) => [String(value.key), value]));
+        for (const item of sent) {
+          const value = saved.get(item.k);
+          const mutationId = value?.mutation_id ? String(value.mutation_id) : undefined;
+          const accepted = item.m
+            ? mutationId === item.m || (item.l && value?.data === item.d)
+            : !mutationId;
+          receipts.push({
+            kind: table, key: item.k, mutationId: item.m,
+            status: !item.m && mutationId ? "upgrade" : accepted ? "accepted" : "conflict",
+            record: value ? { key: item.k, data: JSON.parse(String(value.data)),
+              updatedAt: Number(value.updated_at), serverAt: Number(value.server_at), mutationId } : undefined,
+          });
+        }
+      }
+      return receipts;
     },
     async since(table, watermark, through, limit) {
       const valueColumn = VALUE_COLUMN[table];
@@ -213,6 +264,7 @@ export function createD1Store(db: D1Database): SyncStore {
       const { results } = await db
         .prepare(
           `SELECT ${keyColumn} AS key, ${valueColumn} AS data, updated_at, server_at` +
+            `${table === "positions" || table === "listening" ? ", mutation_id" : ""}` +
             `${HAS_TOMBSTONE[table] ? ", deleted_at" : ""}${HAS_BOOK_ID[table] ? ", book_id" : ""} ` +
             `FROM ${table} WHERE server_at >= ? AND server_at <= ? ORDER BY server_at LIMIT ${limit}`
         )
@@ -225,6 +277,7 @@ export function createD1Store(db: D1Database): SyncStore {
         serverAt: Number(raw.server_at),
         deletedAt: raw.deleted_at ? Number(raw.deleted_at) : null,
         bookId: raw.book_id ? String(raw.book_id) : null,
+        mutationId: raw.mutation_id ? String(raw.mutation_id) : undefined,
       }));
     },
   };

@@ -61,12 +61,10 @@ def write_position(page, chapter, paragraph):
     position = {"chapterId": f"c{chapter}", "chapterIndex": chapter, "sentenceId": sentence,
                 "sentenceIndex": paragraph * 3, "percent": round((chapter * 90 + paragraph * 3) / 270 * 100),
                 "updatedAt": int(time.time() * 1000)}
-    page.evaluate("async ([bookId, position]) => {" + OPEN_DB + """
-        await new Promise((res, rej) => { const t = db.transaction('settings', 'readwrite');
-            t.objectStore('settings').put({ position, lastOpenedAt: position.updatedAt, savedAt: position.updatedAt },
-                'reading-position:' + bookId);
-            t.oncomplete = res; t.onerror = () => rej(t.error); });
-        db.close(); }""", [BOOK_ID, position])
+    page.evaluate("""async ([bookId, position]) => {
+        const storage = await import('/lib/storage.ts');
+        await storage.saveReadingPositions([{bookId, position, lastOpenedAt: position.updatedAt, savedAt: position.updatedAt}], {local:true});
+    }""", [BOOK_ID, position])
     return sentence
 
 

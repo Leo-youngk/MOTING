@@ -5,6 +5,8 @@ export interface SyncRecord {
   data?: unknown;
   updatedAt: number;
   deletedAt?: number;
+  serverAt?: number;
+  mutationId?: string;
 }
 
 export interface PushItem {
@@ -13,6 +15,9 @@ export interface PushItem {
   updatedAt: number;
   deletedAt?: number;
   bookId?: string;
+  mutationId?: string;
+  baseServerRev?: number;
+  bootstrap?: boolean;
 }
 
 export interface PushPayload {
@@ -75,7 +80,7 @@ export function splitPayload(
   for (const [name, list] of Object.entries(payload) as Array<[keyof PushPayload, PushItem[] | undefined]>) {
     if (!list) continue;
     for (const item of list) {
-      const size = item.data.length + item.key.length + 64;
+      const size = new TextEncoder().encode(JSON.stringify(item)).byteLength + name.length + 16;
       if (count && (count >= limit || bytes + size > byteLimit)) {
         batches.push(current);
         current = {};

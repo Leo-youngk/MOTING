@@ -43,6 +43,7 @@ import type {
 import { Modal } from "./sheet";
 import { SoftRange } from "./soft-range";
 import "./settings-screen.css";
+import type { QueuedProgress } from "../lib/sync-progress";
 
 export interface SyncSummary {
   enabled: boolean;
@@ -51,6 +52,13 @@ export interface SyncSummary {
   message: string;
   error: string;
   lastSyncAt: number;
+  checkingSession?: boolean;
+  pendingProgress?: number;
+  pendingResources?: number;
+  blockedProgress?: number;
+  conflicts?: QueuedProgress[];
+  bookTitles?: Record<string, string>;
+  onResolveConflict?: (id: string, useLocal: boolean) => Promise<void>;
 }
 
 const SPEED_PRESETS = [0.8, 1, 1.2, 1.5, 2];
@@ -587,7 +595,7 @@ function SyncPage({
           <>
             <Section
               title="状态"
-              foot="每条记录单独比时间，新的留下；任何一台设备的数据都不会被整库覆盖。"
+              foot="进度收到云端确认后才清理待上传项；并发位置保留供你选择。"
             >
               <div className="settings-card settings-card--padded" aria-live="polite">
                 <p className="settings-status">
@@ -597,7 +605,7 @@ function SyncPage({
                       {sync.message || "正在同步…"}
                     </>
                   ) : sync.lastSyncAt ? (
-                    `上次同步 ${formatSyncTime(sync.lastSyncAt)}`
+                    `上次检查云端 ${formatSyncTime(sync.lastSyncAt)}`
                   ) : (
                     "尚未同步"
                   )}
@@ -607,6 +615,9 @@ function SyncPage({
                     {sync.error}
                   </p>
                 ) : null}
+                {sync.pendingProgress ? <p className="settings-note">{sync.pendingProgress} 条进度待上传</p> : null}
+                {sync.blockedProgress ? <p role="alert" className="settings-error">{sync.blockedProgress} 条进度内容异常；打开对应书籍重新定位后可恢复同步</p> : null}
+                {sync.pendingResources ? <p className="settings-note">进度独立同步；{sync.pendingResources} 项书籍资源等待重试</p> : null}
                 <div className="settings-actions">
                   <button
                     type="button"
@@ -628,7 +639,33 @@ function SyncPage({
                 </div>
               </div>
             </Section>
+            {sync.conflicts?.map((entry) => {
+              const local = JSON.parse(entry.conflict!.data);
+              const remote = JSON.parse(entry.data);
+              const label = (value: typeof local) => {
+                const position = entry.kind === "positions" ? value.position : value;
+                return `第 ${position.chapterIndex + 1} 章 · ${Math.round(position.percent)}%`;
+              };
+              return <Section key={entry.id} title={`${sync.bookTitles?.[entry.key] ?? "书籍"} · ${entry.kind === "positions" ? "阅读" : "听书"}`}>
+                <div className="settings-card settings-card--padded">
+                  <p className="settings-note">两台设备修改了位置，当前保留云端位置，本机候选仍可恢复。</p>
+                  <p className="settings-note">本机：{label(local)}；云端：{label(remote)}</p>
+                  <div className="settings-actions">
+                    <button type="button" className="primary-button" onClick={() => void sync.onResolveConflict?.(entry.id, true)}>使用本机位置</button>
+                    <button type="button" className="text-button" onClick={() => void sync.onResolveConflict?.(entry.id, false)}>保留云端位置</button>
+                  </div>
+                </div>
+              </Section>;
+            })}
           </>
+        ) : sync.checkingSession ? (
+          <Section title="连接状态">
+            <div className="settings-card settings-card--padded" aria-live="polite">
+              <p className="settings-note">正在恢复同步连接，本机进度已保留。</p>
+              {sync.error ? <p role="alert" className="settings-error">{sync.error}</p> : null}
+              <button type="button" className="primary-button" onClick={onSyncNow}>重试连接</button>
+            </div>
+          </Section>
         ) : (
           <Section title="登录" foot="不登录也照常用，只是数据只存在这台设备上。">
             <form className="settings-card settings-card--form sync-login" onSubmit={submit}>

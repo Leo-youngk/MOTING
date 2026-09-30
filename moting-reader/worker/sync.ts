@@ -1,4 +1,5 @@
 import { handleAudioStream } from "./audio-stream.ts";
+import { APP_BUILD, SYNC_PROTOCOL } from "../lib/build-info.ts";
 import { handleLiveHls } from "./live-hls.ts";
 import { handleHls } from "./hls.ts";
 import { synthesizeSpeech } from "./edge-tts.ts";
@@ -164,7 +165,9 @@ function parsePushItem(raw: unknown, config: (typeof TABLES)[string], now: numbe
   const key = typeof item.key === "string" ? item.key : "";
   if (!key || !config.keyPattern.test(key)) throw new SyncError("记录键无效");
   const updatedAt = Number(item.updatedAt);
-  if (!Number.isInteger(updatedAt) || updatedAt <= 0 || updatedAt > now + MAX_CLOCK_SKEW_MS) {
+  const isProgress = config.table === "positions" || config.table === "listening";
+  const modern = isProgress && typeof item.mutationId === "string";
+  if (!Number.isSafeInteger(updatedAt) || updatedAt <= 0 || (!modern && updatedAt > now + MAX_CLOCK_SKEW_MS)) {
     throw new SyncError("记录时间戳无效");
   }
   let deletedAt: number | null = null;
@@ -183,9 +186,28 @@ function parsePushItem(raw: unknown, config: (typeof TABLES)[string], now: numbe
     if (!rawBookId || !SYNC_KEY_PATTERN.test(rawBookId)) throw new SyncError("记录缺少有效的书籍编号");
     bookId = rawBookId;
   }
+  if (modern) {
+    if (!TOKEN_PATTERN.test(String(item.mutationId)) || !Number.isSafeInteger(item.baseServerRev) || Number(item.baseServerRev) < 0) {
+      throw new SyncError("进度确认版本无效");
+    }
+    let value: Json;
+    try { value = JSON.parse(data) as Json; } catch { throw new SyncError("进度内容无效"); }
+    const position = config.table === "positions" ? value?.position as Json : value;
+    if (!position || typeof position.sentenceId !== "string" || typeof position.chapterId !== "string" ||
+        !Number.isInteger(position.chapterIndex) || Number(position.chapterIndex) < 0 ||
+        !Number.isInteger(position.sentenceIndex) || Number(position.sentenceIndex) < 0 ||
+        typeof position.percent !== "number" || !Number.isFinite(position.percent) ||
+        typeof position.updatedAt !== "number" || !Number.isFinite(position.updatedAt)) {
+      throw new SyncError("进度位置无效");
+    }
+    if (config.table === "positions" && (!Number.isFinite(value.savedAt) || !Number.isFinite(value.lastOpenedAt))) {
+      throw new SyncError("阅读位置无效");
+    }
+  }
   return {
     table: config.table,
-    row: { key, data, updatedAt, deletedAt: config.tombstones ? deletedAt : null, bookId },
+    row: { key, data, updatedAt, deletedAt: config.tombstones ? deletedAt : null, bookId,
+      ...(modern ? { mutationId: String(item.mutationId), baseServerRev: Number(item.baseServerRev), bootstrap: item.bootstrap === true } : {}) },
   };
 }
 
@@ -223,10 +245,13 @@ async function handlePush(request: Request, { store }: Resolved): Promise<Respon
     }
   }
   if (accepted.length > PUSH_ITEM_LIMIT) throw new SyncError("单次上传记录过多");
-  await store.applyPush(accepted);
+  const receipts = await store.applyPush(accepted);
+  if (receipts.some((receipt) => receipt.status === "upgrade")) {
+    return json({ error: "同步协议已升级，请更新应用后重试；本机进度仍保留", upgradeRequired: true }, 426, session.cookie);
+  }
   const skipped = Object.values(rejected).reduce((sum, keys) => sum + keys.length, 0);
   if (skipped) console.warn("sync_push_rejected", { count: skipped });
-  return json({ tooLarge, rejected }, 200, session.cookie);
+  return json({ tooLarge, rejected, receipts }, 200, session.cookie);
 }
 
 /**
@@ -243,6 +268,7 @@ async function handlePull(request: Request, { store }: Resolved): Promise<Respon
 
   const candidates: Array<{ name: string; row: SyncRow }> = [];
   for (const [name, config] of Object.entries(TABLES)) {
+    if (body.progressOnly === true && name !== "positions" && name !== "listening") continue;
     for (const row of await store.since(config.table, since, through, PULL_PAGE_ROWS + 1)) candidates.push({ name, row });
   }
   candidates.sort((a, b) => a.row.serverAt - b.row.serverAt);
@@ -262,7 +288,8 @@ async function handlePull(request: Request, { store }: Resolved): Promise<Respon
         data = null;
       }
     }
-    const item: Json = { key: row.key, updatedAt: row.updatedAt };
+    const item: Json = { key: row.key, updatedAt: row.updatedAt, serverAt: row.serverAt };
+    if (row.mutationId) item.mutationId = row.mutationId;
     if (data !== null) item.data = data;
     if (row.deletedAt) item.deletedAt = row.deletedAt;
     (result[name] as Json[]).push(item);
@@ -270,8 +297,8 @@ async function handlePull(request: Request, { store }: Resolved): Promise<Respon
     bytes += row.data.length;
     cursor = row.serverAt + 1;
   }
-  result.cursor = cursor;
   result.hasMore = taken < candidates.length;
+  result.cursor = result.hasMore ? cursor : Math.max(cursor, through + 1);
   return json(result, 200, session.cookie);
 }
 
@@ -375,10 +402,15 @@ export async function handleSync(request: Request, env: SyncEnv, ctx?: Execution
       }
       if (!resolved) return json({ connected: false, enabled: false });
       const session = await checkSession(request, resolved.store);
-      return json({ connected: session.ok, enabled: true }, 200, session.cookie);
+      return json({ connected: session.ok, enabled: true, protocol: SYNC_PROTOCOL, build: APP_BUILD, backend: "moting-sync" }, 200, session.cookie);
     }
 
     const resolved = resolve(env);
+    if (request.method === "GET" && action === "version") {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先登录同步账号" }, 401);
+      return json({ version: await resolved.store.latestServerAt(), protocol: SYNC_PROTOCOL, build: APP_BUILD }, 200, session.cookie);
+    }
     if (request.method === "POST" && action === "login") return await handleLogin(request, env, resolved);
     if (request.method === "POST" && action === "logout") {
       const token = sessionToken(request);

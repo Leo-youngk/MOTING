@@ -87,7 +87,10 @@ test("service worker keeps one prior lazy bundle generation, then prunes it and 
   };
   vm.runInNewContext(source, context);
 
-  const active = await caches.open("moting-shell-v16");
+  const cacheName = /const CACHE_NAME = "([^"]+)"/.exec(source)?.[1];
+  assert.ok(cacheName, "service worker declares its cache name");
+  const version = Number(/-v(\d+)$/.exec(cacheName)?.[1]);
+  const active = await caches.open(cacheName);
   await active.put("/__shell-assets.json", new Response(JSON.stringify(["/assets/old.abc.js"])));
   await active.put("/assets/old.abc.js", new Response("old bundle"));
   await active.put("/", new Response('<script src="/assets/old.abc.js"></script>'));
@@ -129,11 +132,11 @@ test("service worker keeps one prior lazy bundle generation, then prunes it and 
   await checkUpdate();
   assert.ok(await active.match("/assets/current-lazy.js"), "mismatched manifests cannot prune working assets");
 
-  await caches.open("moting-shell-v14");
-  await caches.open("moting-shell-v15");
+  await caches.open(`moting-shell-v${version - 2}`);
+  await caches.open(`moting-shell-v${version - 1}`);
   await caches.open("unrelated-cache");
   let activation;
   handlers.get("activate")({ waitUntil(promise) { activation = promise; } });
   await activation;
-  assert.deepEqual(await caches.keys(), ["moting-shell-v16", "moting-shell-v15", "unrelated-cache"]);
+  assert.deepEqual(await caches.keys(), [cacheName, `moting-shell-v${version - 1}`, "unrelated-cache"]);
 });

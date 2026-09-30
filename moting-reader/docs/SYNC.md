@@ -1,95 +1,100 @@
-# 云端同步(R2 + D1)
+# 云端同步
 
-在本地优先的基础上增加可选的多设备同步。不登录时应用行为与原来完全一致;登录后书籍、进度、划线、统计、设置、AI 对话在各设备间自动合并。
+单用户跨设备书库：PC、手机和 PWA 登录同一个同步账号后，书籍、划线、阅读/听书位置、阅读统计、AI 对话和资料补全逐条合并。本机仍可离线使用。
 
-## 存储分工
+## 存储
 
-- **R2 桶 `moting-books`**:大对象、低频——每本书解析后的正文 `books/{bookId}/content.json`(chapters JSON)、插图 `books/{bookId}/images/{imageId}`、封面 `books/{bookId}/images/_cover`。免费 10 GB。
-- 封面不进 D1:它是整张图的 data URL,会顶破 D1 单行 2 MB 上限。书籍 meta 推送前去掉 `coverDataUrl`,资料补丁去掉 `original.coverDataUrl`(对端书里已有一份)。
-- **D1 库 `moting-sync`**:小记录、高频——书籍元数据(不含正文)、阅读位置、听书进度、划线、阅读时长、设置(含早期阅读统计)、AI 对话、资料补丁。免费 5 GB。
-- 听书进度单独一张 `listening` 表,按位置自己的 `updatedAt` 比新旧。它在客户端存在 Book 记录里,跟 meta 一起走会被 meta 的 LWW 连带覆盖(另一台设备改个书名就能把刚听的进度盖掉)。
-- 表结构见 `worker/sync-schema.sql`。每张同步表带 `updated_at`(客户端声明的修改时间,LWW 依据)、`server_at`(服务端单调号段,pull 水位);书和划线另有 `deleted_at` 墓碑。`sync_meta` 表存单调时钟号段。
-- **客户端本地库**(IndexedDB v5):书目和正文分两张表——`books` 只存书目(含从正文算出来的目录 `chapterOutline`),正文在 `contents`(主键 bookId),打开某本书时才读。本地库没法只读一条记录的一部分,以前两者存在同一条记录里,开机和每轮同步都要把几十本书的全文整个读一遍。书籍 meta 推送前同时去掉 `chapterOutline`(每台设备拿到正文后自己算),接收端合并远端 meta 时保留本地的目录。
+- R2 `moting-books` 存正文与插图，路径为 `books/{bookId}/content.json`、`books/{bookId}/images/{imageId}`；封面编号为 `_cover`。
+- D1 `moting-sync` 存同步记录、删除墓碑与会话。`updated_at` 是设备时间，`server_at` 是服务端单调版本。普通记录沿用时间比较；阅读与听书使用版本确认。
+- IndexedDB v6 保留原表，新增 `sync-progress`。旧 v4 正文拆表迁移仍在同一升级事务内完成；失败回滚，不清库。
 
-## 合并语义(核心:绝不整库覆盖)
+## 阅读与听书位置：逐条确认
 
-所有合并都在记录级别进行,逐条比时间,新者胜:
+`positions`、`listening` 分开保存。“听读同步”开关保留原语义，打开时把听书位置也记为阅读位置。
 
-- **书籍/划线**:远端 `updated_at` 更大才覆盖本地;删除墓碑也要比本地记录新才生效。本地正文永不被 meta 覆盖;阅读位置走独立的 `positions` 表，写入时再按 `savedAt` 原子比较，不能被更晚到达的旧请求回退。
-- **删除**:走墓碑(`deleted_at`)。设备删除一本书/一条划线时记墓碑,push 后由云端传播到其他设备。`clearLibrary`(清空本地)不写墓碑,只清这台设备。
-- **正文完整性**:一本书的 meta 带 `syncReadyAt` 标记,正文上传成功后其他设备才会下载。封面/插图可独立恢复：网络或服务端暂时失败的图片记在本地重试队列，404 则当作云端确实没有该图。
-- **AI 对话**:每轮有稳定 ID，多设备同时追加的问题按轮次顺序合并并再次推送并集，避免一整条聊天按更新时间覆盖另一设备的新对话。
-- **首次同步**:手机数据先上传到云端(记录级 upsert),另一台设备首次登录时按 `since=0` 拉取全部并合并。两端同时有数据时取并集,任何一侧都不丢。
-- **内置示例书不同步**:每台设备书库为空时各生成一本、编号随机,它和挂在上面的划线/位置/对话只留本机。
-- **删书连带清理**:删书只推书的墓碑,它的划线等记录在云端仍是活的。客户端每轮把见到的删书墓碑攒起来,拉完再按书清一遍本地的划线、位置、对话、资料补丁——全新设备首次同步也不会留下孤儿划线。
-- **旧设置与早期统计**:同步上线前保存的设置没有修改时间,按 1 处理(能推上去,但任何真实改动都比它新);早期版本的每日阅读时长基数存在 settings 表的 `stats` 键,各设备按天取大合并,幂等。
-- **只在真写进本地时通知界面**:本机刚推上去的记录,下一轮 pull 会原样拉回来一遍。阅读记录只在本地没有、或远端那条更晚结束时才写;AI 对话、资料补丁只在更新时才写。`onApplied(kind)` 只为真正写了的类别触发,界面也只重读这几类——以前每轮同步都会因为这些「回声」把整个书库重读一遍,读书时每 5 分钟卡一下。
+1. 每次真实本地操作立即异步写 IndexedDB，位置与待上传条目在同一事务内提交。阅读另有 localStorage 兜底。同步先等待尚未完成的写入。
+2. 条目含 `mutationId`、本地序号、`baseServerRev` 和 `pending`。进度不再通过整轮的 `pushedAt` 筛选。
+3. 服务端只在已知版本与当前版本一致时接受现代写入，并在同一 D1 batch 事务内读取逐条确认。重复 mutation 幂等。
+4. 确认只能清除对应 mutation；上传期间继续读产生的新条目仍待上传，并接续自己刚确认的服务端版本。
+5. 并发冲突应用云端权威值，同时保留本机候选。“云端同步”设置中可选择“使用本机位置”或“保留云端位置”。显式选择本机才生成新修改。
+6. 接收按服务端版本比较。设备时钟回拨不影响新协议的胜负；显式重读可以向前面的章节移动，不取最大章节/百分比。
+
+旧库只为尚无确认条目的位置做一次对账，保留原修改时间。较新的旧版嵌入位置先收敛到独立位置表；后续应用权威位置会移除书目里的旧副本，防止复活。旧位置仅在云端仍为旧格式且本机时间不早于云端时接管。现代进度拒绝旧客户端覆盖，返回 426，要求更新页面。
+
+单条无效进度保留并提示重新定位；其他书和拉取继续工作。下次有效本地操作替换该条目并重新上传。
 
 ## 同步时机
 
-- 已登录的设备开机同步一轮；在前台时每 5 分钟一轮；改了数据、安静满 30 秒后一轮。
-- **回到前台、网络恢复就拉一轮**（上一轮结束不到 10 秒的不拉，桌面上来回切窗口很频繁）。iOS 上的 PWA 多半是从后台恢复而不是重新启动，以前要等 5 分钟定时器才拿到别的设备的进度。
-- **离开前台（hidden / pagehide）、停止或暂停播放、锁屏听书期间每 2 分钟：只推不拉**（`pushPending`）。先把攒着的听读进度落盘，再发 push；请求体不超过 60 KB 时带 `keepalive`，页面被冻结浏览器也会把它送完。不动水位，下一整轮还会再推一遍，服务端按 `updated_at` 挡掉没变的。
-  - 以前离开前台跑的是一整轮（推 → 传正文 → 分页拉），iOS 几秒内就冻结页面，跑不完；锁屏听书时页面本来就在后台，没有「切到后台」这一下，一次都不推。最后一段进度要等下次打开 App 才上云——2026-09-29 线上日志实测晚过 70 分钟、6 小时。
-- 一轮进行中又被叫到（回到前台、改了数据）：跑完接着补一轮，不再直接丢掉。
-- 拉到别的设备存的、比本机新的阅读位置（`onRemotePosition`），而这本书正开在阅读器里：不擅自挪正文，出提示条「另一台设备读到了「章名」· 跳转」。没开着的书下次打开本来就落在较新的那处。
-- 听读同步（设置里的开关，默认关）打开时，不在阅读器里听书也会把阅读位置记到朗读处，所以另一台设备打开这本书就落在听到的地方。
+- 冷启动先恢复本机兜底位置，尝试恢复会话并获取进度，再恢复阅读/播放器；网络等待最多 2.5 秒，超时仍可离线打开。
+- 打开阅读器/播放器前也做一次最多 2.5 秒的进度检查，随后重读本地位置。
+- 位置变化后首次安排约 3 秒的进度同步，持续操作不会重设期限；前台每 8 秒检查云端版本，有变化才拉进度。
+- `online`、`pageshow`、回到可见页面时重查会话并同步。会话请求失败显示“恢复连接”，不会误显示为退出登录；网络错误退避重试，最长 30 秒。
+- 离开前台、`pagehide`、暂停或停止播放时先落盘、只推位置。后台听书保留周期推送。进度请求按约 45 KB 拆包，使用 `keepalive`。
+- 普通记录的变化安排首次 30 秒同步，持续写入不重设；前台另有每分钟兜底。整轮忙时的新请求完成后补跑。
+- 阅读器打开时收到另一设备的位置，显示持续的“跳转”提示，不直接挪动正在阅读的正文。
 
-## 两个水位(不能混用)
+进度和正文分别使用同步锁。大书、封面或插图上传慢，不会占住进度通道。iOS 页面被系统冻结时不能保证计时器或网络继续运行；保证冻结前落盘、未确认条目保留、重新打开/联网后补传。
 
-客户端 `sync:state` 里有两把不同时钟的尺子:
+## 普通记录与资源
 
-- `pushedAt`:本机毫秒。上一轮成功同步**开始**的时刻,本地记录修改时间比它新才上传。
-- `pullCursor`:服务端 `server_at`。下一轮 pull 从这里接着拉。
-- 服务端每页 pull 先固定已提交的 `server_at` 上界再扫描所有表；被单条校验拒收的键和失败插图保留在本地队列，不会随全局水位一起丢掉。
+- 书目、划线、设置、阅读记录和资料补丁保留记录级时间比较；正文不会被书目覆盖。AI 对话按稳定轮次 ID 合并并集。
+- 删除使用墓碑；拉完全部页后清理被删书的本地关联数据。清空本机书库不传播删除。示例书及其关联数据只留本机。
+- `syncReadyAt` 表示正文已上传，其他设备收到后才下载；封面/插图失败独立重试，404 视为源端缺图。
+- 整轮先推普通记录、拉增量并持久化进度/游标/资源任务，再传正文和图片。`pendingDownloads` 保留缺失书的下载任务，跨页面重启继续重试。
+- 资源尚未完成显示待重试数量，不报告“全部完成”；正文超上限/无效另行提示。
 
-历史教训:曾经只有一个 `lastSyncAt`,存的是服务端号段(毫秒×1000),却拿去和本地毫秒时间比,首轮之后所有本地改动都被判为「没改过」,再也传不上去。
+`sync:state` 的 `pushedAt` 只服务普通记录；`pullCursor` 是完整拉取游标，`progressCursor` 是快通道游标，提交时取当前最大值并保留同步期间新增的墓碑。`lastProgressAt` 记录成功检查进度的时刻。`SYNC_SCHEMA=4`，旧版普通记录进行一次全量补传。
 
-`sync:state` 里还有 `schema`(客户端同步数据版本,`lib/sync.ts` 的 `SYNC_SCHEMA`)。**新增同步类别时必须加一**:按旧版本同步过的设备 `pushedAt` 已经越过了那些旧记录的时间,不整体补传一轮就永远传不上去。版本落后时这一轮按 `since=0` 全量推,服务端 LWW 会把没变的挡掉。
+## API
 
-## 协议(`worker/sync.ts`)
+同源请求使用 HttpOnly / SameSite=Strict / Secure 会话 Cookie。
 
-同源 POST,凭据在 HttpOnly / SameSite=Strict / Secure Cookie 里,与在线找书一致。
+- `session` GET/POST：`{ connected, enabled, protocol, build, backend }`。
+- `login`：校验固定同步账号，签发 30 天会话；成功会话检查按日滑动续期。`logout` 清会话。
+- `version` GET：经鉴权返回全局服务端版本、协议和构建标识，供轻量检查。
+- `push`：普通记录逐条合并；现代进度带 `mutationId`、`baseServerRev`、`bootstrap`，返回 `receipts`、`rejected` 和 `tooLarge`。现代进度要求完整合法的位置，不依赖设备和服务器时间一致。
+- `pull`：`{ since, progressOnly? }`。跨表按服务端版本分页，每页最多 300 条/8 MB；`progressOnly:true` 仅取阅读/听书。每条带 `serverAt`，现代进度另带 `mutationId`。
+- `book/:id/content` 和 `book/:id/images/:imageId` GET/HEAD/POST：上传先 HEAD 检查已有对象，完成后推送 ready 标记。
 
-- `session`(GET/POST)→ `{ connected, enabled }`;未配资源时 `enabled:false`
-- `login` {username,password} → 校验(哈希后比较)→ 30 天会话 Cookie。**滑动续期**:session/push/pull 校验会话时,距上次续期超过一天就把服务端过期时刻和浏览器 Cookie 一起推回 30 天后(Cookie 不续的话浏览器照样 30 天后丢掉它)。30 天内同步过一次就永远不用重新登录。
-- `logout` → 清会话
-- `push` {books,notes,positions,sessions,settings,chats,patches,listening} → 逐条 LWW,返回 `{ tooLarge, rejected }`:超过 D1 单行上限的、以及单条数据异常的(键不合法、时间戳比服务端快一天以上等)都只跳过这一条并回报,客户端提示用户。只有整体格式不对才 400——一条坏记录不能让之后每一轮同步都失败。
-  - 整批在一个 D1 batch(事务)里完成:先占 `server_at` 号段,再每表一条 `INSERT … SELECT FROM json_each(?)` 批量 upsert。免费档每次调用限 50 条 D1 查询,逐条 upsert 会在首轮上传时直接失败。
-  - 占号段与写入同事务,并发 pull 要么看到整批、要么一条都看不到,游标不会越过尚未落库的号。
-- `pull` {since} → 跨表按 `server_at` 统一分页(每页 300 条 / 8 MB)，固定本页扫描上界后返回 `{ cursor, hasMore, …各表 }`。客户端循环拉到 `hasMore:false`,拉完才推进 `pullCursor`。
-- `book/:id/content` GET/HEAD/POST(R2 正文)、`book/:id/images/:imageId` GET/HEAD/POST(R2 插图,封面固定编号 `_cover`)
-- 上传一本书:先 HEAD 问正文在不在——在就说明上次传到一半被打断,只补缺的插图(插图也先 HEAD);传完一本立刻标 `syncReadyAt` 并推 meta,中途被杀掉下次只从没传完的那本接着来。插图上传/下载都是 4 路并发。
+D1 占号段、批量 upsert 和确认读取在同一事务完成。下一批最小版本严格大于上一批上界，空拉取游标不会跳过未来写入；每页固定已提交上界后扫描全部表。
 
-## 双部署与旧域名迁移
+## 双部署与升级
 
-Worker 绑定必须同账户,故同步后端整体部署在持有 R2/D1 的账户(下称“主部署”)。旧域名账户没有 R2/D1,但手机端现有数据都在旧域名的 IndexedDB 里。迁移路径:
+- 主站 `https://moting-reader.if5v.workers.dev`：完整应用、D1、R2 和音频 Queue。
+- 旧站 `https://moting-reader.yk2958374240.workers.dev`：同一构建前端；`scripts/legacy-config.mjs` 去掉 D1/R2/Queue，设置 `SYNC_UPSTREAM`，同源代理 `/api/sync/*` 到主站。
+- 两个入口都要部署。只更新后端不能更新旧入口的客户端。
+- 两个入口的浏览器存储隔离。旧站完成同步后，可在主站登录拉回书库；升级不要清除原站点数据。
 
-- **主部署**(新域名):完整应用 + R2/D1 bindings + 同步服务端。
-- **旧域名部署**:同一套代码,构建后由 `scripts/legacy-config.mjs` 去掉 R2/D1 bindings、加 `SYNC_UPSTREAM` 变量。运行时 `worker/index.ts` 见到 `SYNC_UPSTREAM` 就把 `/api/sync/*` 反向代理(`forwardSync`)到主部署。客户端始终同源,旧域名上的手机登录即上传全部数据。
-- 手机流程:旧域名登录 → 数据上传主部署 → 改用新域名(重新添加到主屏幕)→ 登录 → 全部拉回。
+凭据仅从忽略的配置读入子进程环境：主账户 `.env.main.local`，旧账户 `.env`。固定账号由平台 `SYNC_USERNAME`、`SYNC_PASSWORD` 提供，书城还需 `WEREAD_API_KEY`。
+
+新 D1 先执行 `worker/sync-schema.sql`，再应用迁移；已有数据库只运行增量迁移。先导出私有备份：
+
+```sh
+npx wrangler d1 export moting-sync --remote --output /private/path/moting-sync-backup.sql
+npx wrangler d1 migrations apply moting-sync --remote --config wrangler.jsonc
+npm run deploy
+npm run deploy:legacy
+```
+
+迁移 `0001_progress_confirmation.sql` 只为两张位置表增加 nullable `mutation_id`，保留历史记录。Token 需要对应账户的 Workers、D1、R2 权限。旧域名代理超时 330 秒，大于正文上传最长 300 秒。
 
 ## 验证
 
-- `node --experimental-strip-types --test tests/sync.test.ts`:协议与合并逻辑(内存 store)。
-- `python tests/sync-browser.py http://localhost:5173`:三台设备经本地 miniflare 真 D1/R2 同步,覆盖 651 条划线跨批跨页、封面、第二轮增删、旧版本升级补传(设置/统计/听书进度)、续传不重发正文、删书后全新设备无孤儿划线、示例书不外传。
-- `python tests/sync-timing-browser.py http://localhost:5173`:两台设备，离开前台只发一个 push 且不动水位、另一台拉得到；回到前台当场拉；正开着的书被另一台读到别处时出「跳转」、点了落在锚点线上。
-- 按设备看线上同步时间线：Workers Logs 的查询接口（`POST /accounts/{id}/workers/observability/telemetry/query`），按 `$workers.event.request.url` 含 `/api/sync/p`、`$workers.event.request.headers.user-agent` 含 `iPhone` / `Windows` 过滤。时间范围大时结果会抽样（对比返回的 `series` 总数），缩到几小时内才完整。
-- **线上有真实数据之后,不要再往生产推探针数据**(哪怕测完就删):设备可能在删之前就把它拉走,而删服务器上的行不会传播到设备。生产只做不写入的验证——只推会被拒收的坏记录、HEAD 一个不存在的对象、读 pull;非写不可的,只写设备一定会忽略的记录(比如挂在不存在的书上的听书进度),再按主键精确删。
+- `npm test`：生产构建、全部单测。HLS 测试依赖本机 `ffmpeg`，不调用生产 TTS。
+- `npm run typecheck` 与修改文件的 ESLint。
+- `python tests/sync-browser.py http://127.0.0.1:5183`：本地 D1/R2 三设备回归，含 651 条划线跨批跨页、升级、删除、正文续传与图片恢复。
+- `python tests/sync-progress-browser.py http://127.0.0.1:5183`：确认队列、旧确认、时钟回拨、并发冲突、离线重开、旧客户端保护、异常条目和资源阻塞。
+- `python tests/sync-regressions-browser.py http://127.0.0.1:5183`：真实连续阅读、迟到落盘与联网恢复。
+- `python tests/sync-boot-browser.py http://127.0.0.1:5183`：启动会话暂时失败后的自动恢复。
+- `python tests/sync-timing-browser.py http://127.0.0.1:5183`：后台仅推、回前台拉取、远端跳转与阅读锚点。
+- `python tests/storage-migration-browser.py http://127.0.0.1:5183`：v4 到 v6，保留正文、划线、设置和位置。
 
-## 凭据与部署
+开发服务用 `MOTING_DEV_STATE` 指向临时目录，先初始化本地 schema 并应用迁移。旧升级回归需要全新本地 D1 状态，避免之前测试的新设置影响历史设置场景。只写隔离测试服务；生产仅检查部署、资源、协议和结构，不推探针书或位置。
 
-- 单用户固定账号:`wrangler secret put SYNC_USERNAME` / `SYNC_PASSWORD`(仅主部署需要)。
-- 主部署:`npm run deploy`(需 `CLOUDFLARE_ACCOUNT_ID` 为 R2/D1 所在账户,凭据在 `.env.main.local`)。另需 `WEREAD_API_KEY` 密钥,否则书城 503。
-- 旧域名:`npm run deploy:legacy`(需 `CLOUDFLARE_ACCOUNT_ID` 为旧账户,凭据在 `.env`)。
-- D1 初始化:`npx wrangler d1 execute moting-sync --file worker/sync-schema.sql --remote`。
-- 部署用的 API Token 需要 `Workers Scripts: Edit`、`D1:Edit`、`Workers R2 Storage:Edit` 权限;`wrangler` 会用会话环境变量里的 token,注意别让 shell 里残留的旧账户 token 覆盖。
+## 边界
 
-## 已知边界
-
-- 时钟偏差:客户端 `updated_at` 用本机时间,LWW 允许 1 天偏差;系统时钟严重不准的设备可能被判为“更旧”。个人设备可接受。
-- `aiApiKey` 随设置同步,以明文存 D1(按用户要求)。
-- R2 对象删除后不清理(个人用量远低于 10 GB;墓碑永久保留,体积极小)。
-- 部署在 Workers 免费档:D1 每次调用最多 50 条查询。新增接口前先数一下单次请求的查询条数。
-- 旧域名反代的超时(330 秒)必须比客户端最长等待(正文上传 300 秒)宽,否则慢网上传大书会被中间这一层先掐断。
-- 单本正文上限沿用 `MAX_BOOK_FILE_BYTES`(50 MB);超出的书 `runSync` 会跳过并计入 `failedContent`,提示用户。
+- 普通记录仍使用设备时间；本次取消时钟依赖的范围是阅读/听书。
+- 按现有约定，`aiApiKey` 随设置存入 D1。
+- R2 删除对象暂不物理清理，墓碑持续保留。
+- Workers 免费档单次 D1 查询数上限 50，批量协议避免逐条 SQL。
+- 单本正文沿用 50 MB 上限。
