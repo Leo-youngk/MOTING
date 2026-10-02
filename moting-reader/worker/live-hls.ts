@@ -5,7 +5,9 @@ import { packedAudio } from "./hls.ts";
 
 const PREFIX = "live-hls-v1/";
 const TTL = 48 * 3600_000;
-const GROUP_SIZE = 5;
+// Short jobs let a newly started session get audio before long background preparation.
+const GROUP_SIZE = 2;
+const LEGACY_GROUP_SIZE = 5;
 const MAX_TEXT = 120_000;
 const TARGET_DURATION = 60;
 // Only prepare the opening minute until the user actually starts listening.
@@ -28,6 +30,7 @@ type State = {
   id: string;
   created: number;
   group: number;
+  groupSize?: number;
   duration: number;
   complete: boolean;
   updated: number;
@@ -85,6 +88,8 @@ export async function processLiveHlsJob(
   if (!state || !source || state.complete) return;
   const session = await source.json<Session>();
   const chunks = splitSpeechText(session.text, 120);
+  // Existing queued sessions retain their original segment numbering.
+  const groupSize = state.groupSize === GROUP_SIZE ? GROUP_SIZE : LEGACY_GROUP_SIZE;
   if (job.group !== state.group) {
     // A duplicate message is harmless; a newer target still extends the producer.
     if (job.group < state.group && state.duration < job.target) {
@@ -92,7 +97,7 @@ export async function processLiveHlsJob(
     }
     return;
   }
-  const group = chunks.slice(job.group * GROUP_SIZE, (job.group + 1) * GROUP_SIZE);
+  const group = chunks.slice(job.group * groupSize, (job.group + 1) * groupSize);
   if (!group.length) return;
   try {
     const results: Awaited<ReturnType<Synth>>[] = [];
@@ -105,7 +110,7 @@ export async function processLiveHlsJob(
       const duration = mp3DurationSeconds(results[index].audio);
       if (!(duration > 0 && duration <= TARGET_DURATION)) throw new Error("无效或过长的 HLS 分片");
       return {
-        number: job.group * GROUP_SIZE + index,
+        number: job.group * groupSize + index,
         start: part.start,
         end: part.start + part.text.length,
         duration,
@@ -127,7 +132,7 @@ export async function processLiveHlsJob(
     state.group++;
     state.updated = Date.now();
     delete state.error;
-    state.complete = state.group * GROUP_SIZE >= chunks.length;
+    state.complete = state.group * groupSize >= chunks.length;
     await bucket.put(base + "state.json", JSON.stringify(state));
     console.log("live_hls_ready", { id: job.id, group: job.group, duration: state.duration });
     await record(db, job.id, "prepared", { group: job.group, duration: state.duration, complete: state.complete });
@@ -195,7 +200,7 @@ export async function handleLiveHls(
         typeof body.voice !== "string" || !VOICE.test(body.voice)) return json({ error: "正文或音色无效" }, 400);
     const id = `${Date.now()}-${crypto.randomUUID().replaceAll("-", "")}`;
     const base = root(id);
-    const state: State = { id, created: Date.now(), updated: Date.now(), group: 0, duration: 0, complete: false, segments: [] };
+    const state: State = { id, created: Date.now(), updated: Date.now(), group: 0, groupSize: GROUP_SIZE, duration: 0, complete: false, segments: [] };
     await Promise.all([
       bucket.put(base + "session.json", JSON.stringify({ text: body.text, voice: body.voice })),
       bucket.put(base + "state.json", JSON.stringify(state)),

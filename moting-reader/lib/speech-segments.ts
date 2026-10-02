@@ -2,10 +2,61 @@ import {
   buildEdgeSpeechBatches,
   buildSpeechBlocks,
   sliceSpeechBlock,
+  flattenChapter,
+  MAX_EDGE_SPEECH_BATCH_LENGTH,
 } from "./content.ts";
-import type { Chapter, SpeechBlock, SpeechSpan } from "./types.ts";
+import type { Book, Chapter, SpeechBlock, SpeechSpan } from "./types.ts";
 
 export type SpeechEngine = "edge" | "system";
+
+export interface BookSpeechSpan extends SpeechSpan { chapterIndex: number }
+export interface BookSpeechBlock extends SpeechBlock { spans: BookSpeechSpan[] }
+
+/** One media resource may contain several chapters; chapter boundaries only move the highlight. */
+export function segmentFromBook(
+  book: Book, chapterIndex: number, sentenceIndex: number,
+  engine: SpeechEngine, quick: boolean, crossChapter = true
+): BookSpeechBlock | null {
+  const chapter = book.chapters[chapterIndex];
+  if (!chapter) return null;
+  if (engine === "system" || !crossChapter) {
+    const part = segmentFromChapter(chapter, sentenceIndex, engine, quick);
+    return part ? { ...part, spans: part.spans.map(span => ({ ...span, chapterIndex })) } : null;
+  }
+  const limit = quick ? QUICK_SPEECH_LENGTH : MAX_EDGE_SPEECH_BATCH_LENGTH;
+  let text = "";
+  const spans: BookSpeechSpan[] = [];
+  outer: for (let ci = chapterIndex; ci < book.chapters.length; ci++) {
+    const sentences = flattenChapter(book.chapters[ci]);
+    for (let si = ci === chapterIndex ? Math.max(0, sentenceIndex) : 0; si < sentences.length; si++) {
+      const sentence = sentences[si];
+      const spoken = (sentence.speakableText || sentence.text).trim();
+      if (!spoken) continue;
+      const separator = text ? "\n" : "";
+      // Keep sentences whole, including a single sentence longer than the normal budget.
+      if (text && text.length + separator.length + spoken.length > limit) break outer;
+      const start = text.length + separator.length;
+      text += separator + spoken;
+      spans.push({ chapterIndex: ci, sentenceIndex: si, sentenceId: sentence.id, start, end: text.length });
+    }
+  }
+  return spans.length ? { text, spans } : null;
+}
+
+export function spanForBookSentence(part: BookSpeechBlock, chapterIndex: number, sentenceIndex: number): BookSpeechSpan | null {
+  return part.spans.find(span => span.chapterIndex === chapterIndex && span.sentenceIndex === sentenceIndex) ?? null;
+}
+
+/** Find the next real sentence without recursion through image-only / empty chapters. */
+export function nextBookSentence(book: Book, chapterIndex: number, sentenceIndex: number): { chapterIndex: number; sentenceIndex: number } | null {
+  for (let ci = Math.max(0, chapterIndex); ci < book.chapters.length; ci++) {
+    const sentences = flattenChapter(book.chapters[ci]);
+    for (let si = ci === chapterIndex ? Math.max(0, sentenceIndex) : 0; si < sentences.length; si++) {
+      if ((sentences[si].speakableText || sentences[si].text).trim()) return { chapterIndex: ci, sentenceIndex: si };
+    }
+  }
+  return null;
+}
 
 /**
  * 点击后的首段刻意短：云端合成耗时基本跟字数走，360 字通常一轮分片就回来了。

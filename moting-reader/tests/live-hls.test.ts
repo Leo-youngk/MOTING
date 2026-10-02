@@ -51,7 +51,7 @@ test("independent Queue creates a growing EVENT playlist with valid packed MP3 a
   assert.doesNotMatch(before, /#EXT-X-ENDLIST/);
   const state = await (await run(`${session.id}/status`)).json() as { ready: boolean; segments: unknown[] };
   assert.equal(state.ready, false, "a short opening must not advertise an unsafe HLS buffer");
-  assert.equal(state.segments.length, 5);
+  assert.equal(state.segments.length, 2);
   const clip = await run(`${session.id}/segment-0.mp3`, { headers: { range: "bytes=0-63" } });
   assert.equal(clip.status, 206);
   assert.equal((await clip.arrayBuffer()).byteLength, 64);
@@ -79,4 +79,21 @@ test("unready and malformed sessions do not expose media or enqueue synthesis", 
   const status = await (await run(`${session.id}/status`)).json() as { ready: boolean };
   assert.equal(status.ready, false);
   assert.equal((await run(`${session.id}/segment-0.mp3`)).status, 404);
+});
+
+test("already queued sessions retain five-segment numbering after the producer is upgraded", async () => {
+  const { bucket, queue, jobs, run } = fixture();
+  const session = await (await run("session", { method: "POST", body: JSON.stringify({ text: "兼容。".repeat(300), voice: "zh-CN-YunjianNeural" }) })).json() as { id: string };
+  const key = `live-hls-v1/${session.id}/state.json`;
+  const stored = JSON.parse(new TextDecoder().decode(bucket.objects.get(key)!));
+  delete stored.groupSize; // The deployed v2 producer did not persist this field.
+  await bucket.put(key, JSON.stringify(stored));
+  const synth = async () => ({ audio, boundaries: [] });
+  await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
+  const first = await (await run(`${session.id}/status`)).json() as { segments: { number: number }[] };
+  assert.deepEqual(first.segments.map(part => part.number), [0, 1, 2, 3, 4]);
+  while (jobs.length) await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
+  const last = await (await run(`${session.id}/status`)).json() as { complete: boolean; segments: { number: number }[] };
+  assert.ok(last.complete);
+  assert.deepEqual(last.segments.map(part => part.number), last.segments.map((_part, index) => index));
 });

@@ -36,7 +36,7 @@ export function makeLivePlan(book: Book, position: BookPosition, maxChars = 120_
     const first = chapterIndex === position.chapterIndex ? position.sentenceIndex : 0;
     for (let sentenceIndex = first; sentenceIndex < lines.length; sentenceIndex++) {
       const line = lines[sentenceIndex];
-      const spoken = line.text.trim();
+      const spoken = (line.speakableText || line.text).trim();
       if (!spoken) continue;
       if (text.length + spoken.length + 1 > maxChars) break outer;
       const start = text.length;
@@ -70,9 +70,13 @@ export function liveLocationAt(plan: LivePlan, status: LiveStatus, time: number)
 export function liveTimeFor(plan: LivePlan, status: LiveStatus, chapterIndex: number, sentenceIndex: number): number | null {
   const sentence = plan.sentences.find(part => part.chapterIndex === chapterIndex && part.sentenceIndex === sentenceIndex);
   if (!sentence) return null;
-  const segment = status.segments.find(part => part.start <= sentence.start && sentence.start < part.end);
+  return liveTimeAtChar(status, sentence.start);
+}
+
+export function liveTimeAtChar(status: LiveStatus, charIndex: number): number | null {
+  const segment = status.segments.find(part => part.start <= charIndex && charIndex < part.end);
   if (!segment) return null;
   return segment.time + (segment.timeline.length
-    ? timeAt(segment.timeline, sentence.start - segment.start)
-    : segment.duration * (sentence.start - segment.start) / (segment.end - segment.start));
+    ? timeAt(segment.timeline, charIndex - segment.start)
+    : segment.duration * (charIndex - segment.start) / (segment.end - segment.start));
 }

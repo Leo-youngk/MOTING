@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createChapter, flattenChapter, positionFor } from "../lib/content.ts";
-import { liveLocationAt, liveTimeFor, makeLivePlan, type LiveStatus } from "../lib/live-speech.ts";
+import { liveLocationAt, liveTimeFor, liveTimeAtChar, makeLivePlan, type LiveStatus } from "../lib/live-speech.ts";
 import type { Book } from "../lib/types.ts";
 
 test("a listening session starts at the saved sentence and tracks across chapters", () => {
@@ -26,4 +26,13 @@ test("a listening session starts at the saved sentence and tracks across chapter
   assert.equal(liveLocationAt(plan, status, 12)?.chapterIndex, 1);
   assert.equal(liveTimeFor(plan, status, 1, 0), 10);
   assert.equal(liveTimeFor(plan, status, 0, 0), null);
+});
+
+test("HLS handover locates the current character, including a sentence split between native segments", () => {
+  const status = { segments: [
+    { start: 0, end: 100, time: 0, duration: 20, timeline: [{ time: 0, charIndex: 0 }, { time: 20, charIndex: 100 }] },
+    { start: 100, end: 200, time: 20, duration: 20, timeline: [{ time: 0, charIndex: 0 }, { time: 5, charIndex: 25 }, { time: 20, charIndex: 100 }] },
+  ] } as LiveStatus;
+  assert.equal(liveTimeAtChar(status, 125), 25);
+  assert.equal(liveTimeAtChar(status, 250), null, "do not hand over to an unprepared section");
 });
