@@ -1,5 +1,7 @@
 "use client";
 
+import { RECORD_LABELS, type PushFailure } from "../lib/sync-record";
+
 import {
   BookOpen,
   Check,
@@ -55,6 +57,10 @@ export interface SyncSummary {
   checkingSession?: boolean;
   pendingProgress?: number;
   pendingResources?: number;
+  blockedBooks?: Array<{ bookId: string; reason: string }>;
+  recordFailures?: PushFailure[];
+  pendingRecords?: number;
+  lastCompleteAt?: number;
   blockedProgress?: number;
   conflicts?: QueuedProgress[];
   bookTitles?: Record<string, string>;
@@ -615,9 +621,27 @@ function SyncPage({
                     {sync.error}
                   </p>
                 ) : null}
+                {!sync.syncing && sync.message ? <p className="settings-note">{sync.message}</p> : null}
+                {sync.lastCompleteAt ? <p className="settings-note">上次全部同步 {formatSyncTime(sync.lastCompleteAt)}</p> : null}
+                {sync.recordFailures?.length ? (
+                  <div role="status">
+                    <p className="settings-error">{sync.recordFailures.length} 条记录尚未同步，本机内容已保留</p>
+                    {sync.recordFailures.map((failure) => (
+                      <p className="settings-note" key={`${failure.kind}:${failure.key}`}>
+                        {RECORD_LABELS[failure.kind]} · {sync.bookTitles?.[failure.key] ?? failure.key.slice(0, 8)}
+                        {failure.bytes > 0 ? ` · ${(failure.bytes / 1024 / 1024).toFixed(2)} MB` : ""}
+                        {`：${failure.reason}。${failure.retryable ? "稍后自动重试" : "修改对应记录后自动重试，也可点击立即同步"}`}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+                {(sync.pendingRecords ?? 0) > (sync.recordFailures?.length ?? 0) ? <p className="settings-note">{sync.pendingRecords} 条记录待同步</p> : null}
                 {sync.pendingProgress ? <p className="settings-note">{sync.pendingProgress} 条进度待上传</p> : null}
                 {sync.blockedProgress ? <p role="alert" className="settings-error">{sync.blockedProgress} 条进度内容异常；打开对应书籍重新定位后可恢复同步</p> : null}
-                {sync.pendingResources ? <p className="settings-note">进度独立同步；{sync.pendingResources} 项书籍资源等待重试</p> : null}
+                {sync.blockedBooks?.map((entry) => <p className="settings-error" key={entry.bookId}>
+                  {sync.bookTitles?.[entry.bookId] ?? "书籍正文"}：{entry.reason}。本机正文保留，可点击立即同步重试。
+                </p>)}
+                {sync.pendingResources ? <p className="settings-note">进度独立同步；{sync.pendingResources} 项书籍资源尚未同步</p> : null}
                 <div className="settings-actions">
                   <button
                     type="button"

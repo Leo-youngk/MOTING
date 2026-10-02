@@ -2,6 +2,7 @@
 
 import "./book-metadata.css";
 
+import { retryDelay, type PushFailure } from "../lib/sync-record";
 import {
   ArrowDown,
   ArrowUp,
@@ -6313,7 +6314,13 @@ export default function MotingApp() {
   const flushProgressRef = useRef<() => Promise<void>>(async () => {});
   const progressEventClockRef = useRef(0);
   const [queuedProgress, setQueuedProgress] = useState<QueuedProgress[]>([]);
+  const [blockedBooks, setBlockedBooks] = useState<Array<{ bookId: string; reason: string }>>([]);
   const [pendingResources, setPendingResources] = useState(0);
+  const [pendingRecords, setPendingRecords] = useState(0);
+  const [recordFailures, setRecordFailures] = useState<PushFailure[]>([]);
+  const [lastCompleteAt, setLastCompleteAt] = useState(0);
+  const lastFailureNoticeRef = useRef("");
+  const fullRetryAtRef = useRef(0);
   const progressControllerRef = useRef<AbortController | null>(null);
   const progressAgainRef = useRef(false);
   const fullSyncRunnerRef = useRef<(manual?: boolean) => Promise<void>>(async () => {});
@@ -6456,12 +6463,13 @@ export default function MotingApp() {
 
   const triggerSync = useCallback(
     async (manual = false) => {
-      if (!manual && !syncConnectedRef.current) return;
+      if (!manual && (!syncConnectedRef.current || Date.now() < fullRetryAtRef.current)) return;
       if (syncControllerRef.current) {
         syncAgainRef.current = true;
         if (manual) showToast("正在同步中…");
         return;
       }
+      fullRetryAtRef.current = 0;
       const controller = new AbortController();
       if (fullRetryTimerRef.current !== null) { window.clearTimeout(fullRetryTimerRef.current); fullRetryTimerRef.current = null; }
       syncControllerRef.current = controller;
@@ -6476,6 +6484,7 @@ export default function MotingApp() {
           await flushProgressRef.current();
           return runSync({
           signal: controller.signal,
+          manual,
           onProgress: setSyncMessage,
           onApplied: scheduleSyncReload,
           onRemotePosition: handleRemotePosition,
@@ -6499,19 +6508,34 @@ export default function MotingApp() {
           setLastSyncAt(result.syncedAt);
           lastSyncEndRef.current = Date.now();
           setPendingResources(result.pendingResources);
+          setBlockedBooks(result.blockedContent);
           setQueuedProgress(await getProgressQueue());
           fullRetryAttemptRef.current = 0;
-          if (result.failedContent.length) {
-            showToast(`${result.failedContent.length} 本书超出云端大小上限,未能同步`);
-          } else if (result.skipped) {
-            showToast(`${result.skipped} 条记录超出云端上限或数据异常,未能同步`);
+          setRecordFailures(result.failures);
+          setPendingRecords(result.pendingRecords);
+          if (result.complete) setLastCompleteAt(result.syncedAt);
+          const issueMessage = result.failedContent.length
+            ? `${result.failedContent.length} 本书正文尚未同步，请查看云端同步设置`
+            : result.skipped ? `${result.skipped} 条记录尚未同步，请查看云端同步设置` : "";
+          const notice = issueMessage + result.failures.map((failure) => failure.kind + failure.key + failure.fingerprint + failure.code).sort().join("|");
+          if (issueMessage) {
+            setSyncMessage(issueMessage);
+            if (manual && first || notice !== lastFailureNoticeRef.current) showToast(issueMessage);
+            lastFailureNoticeRef.current = notice;
+            try { localStorage.setItem("moting:sync-issue", notice); } catch { /* 存储受限不影响同步 */ }
+          } else if (result.pendingRecords) {
+            setSyncMessage(`${result.pendingRecords} 条新修改等待同步`);
+            syncAgainRef.current = true;
           } else if (result.pendingResources) {
             setSyncMessage(`进度已同步，${result.pendingResources} 项书籍资源等待重试`);
             if (manual && first) showToast(`进度已同步，${result.pendingResources} 项资源待重试`);
           } else if (result.conflicts) {
             if (manual && first) showToast("有并发进度已保留，请在云端同步设置中选择");
-          } else if (manual && first) {
-            showToast("同步完成");
+          } else {
+            setSyncMessage(result.complete ? "全部同步完成" : "进度等待云端确认");
+            lastFailureNoticeRef.current = "";
+            try { localStorage.removeItem("moting:sync-issue"); } catch { /* 存储受限不影响同步 */ }
+            if (manual && first) showToast(result.complete ? "同步完成" : "仍有进度待同步，稍后自动重试");
           }
           first = false;
         } while (syncAgainRef.current && !controller.signal.aborted);
@@ -6525,10 +6549,12 @@ export default function MotingApp() {
           } else {
             setSyncError(error instanceof Error ? error.message : "同步失败,请稍后重试");
             if (fullRetryTimerRef.current !== null) window.clearTimeout(fullRetryTimerRef.current);
+            const delay = retryDelay(++fullRetryAttemptRef.current);
+            fullRetryAtRef.current = Date.now() + delay;
             fullRetryTimerRef.current = window.setTimeout(() => {
               fullRetryTimerRef.current = null;
               if (syncConnectedRef.current) void fullSyncRunnerRef.current();
-            }, syncAgainRef.current ? 1000 : Math.min(1000 * 2 ** fullRetryAttemptRef.current++, 30_000));
+            }, delay);
           }
         }
       } finally {
@@ -6747,6 +6773,11 @@ export default function MotingApp() {
     let retry: number | null = null;
     getSyncState().then((state) => {
       setLastSyncAt(state.lastProgressAt ?? state.pushedAt);
+      setLastCompleteAt(state.lastCompleteAt ?? 0);
+      try { lastFailureNoticeRef.current = localStorage.getItem("moting:sync-issue") ?? ""; } catch { /* 存储受限 */ }
+      setRecordFailures(state.pushFailures ?? []);
+      setPendingRecords((state.pushFailures ?? []).length);
+      setBlockedBooks(state.blockedContent ?? []);
       setPendingResources(state.pendingContent.length + (state.pendingDownloads?.length ?? 0) + state.pendingImages.length);
     }).catch(() => undefined);
     getProgressQueue().then(setQueuedProgress).catch(() => undefined);
@@ -6782,6 +6813,7 @@ export default function MotingApp() {
     const resume = (event: Event) => {
       if (document.visibilityState !== "visible") return;
       if (retry !== null) { window.clearTimeout(retry); retry = null; }
+      if (event.type === "online") fullRetryAtRef.current = 0;
       void checkSession(event.type === "online");
     };
     checkSessionRef.current = () => checkSession(true);
@@ -8007,6 +8039,10 @@ export default function MotingApp() {
             pendingProgress: queuedProgress.filter((entry) => entry.pending && !entry.rejection).length,
             blockedProgress: queuedProgress.filter((entry) => entry.rejection).length,
             pendingResources,
+            blockedBooks,
+            recordFailures,
+            pendingRecords,
+            lastCompleteAt,
             conflicts: queuedProgress.filter((entry) => entry.conflict),
             bookTitles: Object.fromEntries(books.map((book) => [book.id, book.title])),
             onResolveConflict: async (id, useLocal) => {
