@@ -1,3 +1,4 @@
+import type { PushFailure } from "./sync-record";
 import { normalizeVoiceURI } from "./edge-voices";
 import type { BookMetadataPatch } from "./book-metadata-types";
 import { outlineOf } from "./content";
@@ -70,8 +71,11 @@ export interface SyncState {
   tombstones: SyncTombstones;
   pendingContent: string[];
   pendingDownloads?: BookMeta[];
+  blockedContent?: Array<{ bookId: string; reason: string }>;
   pendingImages: Array<{ bookId: string; imageId: string }>;
   pendingPush: Partial<Record<SyncPushKind, string[]>>;
+  pushFailures?: PushFailure[];
+  lastCompleteAt?: number;
 }
 
 export type SyncPushKind =
@@ -795,11 +799,14 @@ export async function getSyncState(): Promise<SyncState> {
     },
     pendingContent: Array.isArray(stored.pendingContent) ? stored.pendingContent : [],
     pendingDownloads: Array.isArray(stored.pendingDownloads) ? stored.pendingDownloads : [],
+    blockedContent: Array.isArray(stored.blockedContent) ? stored.blockedContent : [],
     pendingImages: Array.isArray(stored.pendingImages)
       ? stored.pendingImages.filter((entry): entry is { bookId: string; imageId: string } =>
           Boolean(entry && typeof entry.bookId === "string" && typeof entry.imageId === "string")
         )
       : [],
+    pushFailures: Array.isArray(stored.pushFailures) ? stored.pushFailures : [],
+    lastCompleteAt: typeof stored.lastCompleteAt === "number" ? stored.lastCompleteAt : 0,
     pendingPush: Object.fromEntries(
       (["books", "notes", "positions", "sessions", "settings", "chats", "patches", "listening"] as const)
         .flatMap((kind) => {
@@ -842,6 +849,7 @@ export async function commitSyncState(
     store.put(
       {
         ...next,
+        lastCompleteAt: Math.max(current.lastCompleteAt ?? 0, next.lastCompleteAt ?? 0),
         pullCursor: Math.max(current.pullCursor, next.pullCursor),
         lastProgressAt: Math.max(current.lastProgressAt ?? 0, next.lastProgressAt ?? 0),
         progressCursor: Math.max(current.progressCursor ?? 0, next.progressCursor ?? 0),

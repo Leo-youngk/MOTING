@@ -1,6 +1,7 @@
 // 同步持久化层:D1 表操作收敛到这个接口,生产用 createD1Store,
 // 单元测试用内存实现,让 LWW/墓碑/号段逻辑不经真 D1 也能跑。
 import type { ProgressReceipt } from "../lib/sync-progress.ts";
+import type { RecordReceipt, RecordKind } from "../lib/sync-record.ts";
 export type SyncTable =
   | "books"
   | "notes"
@@ -39,7 +40,7 @@ export interface SyncStore {
    * 并发的 pull 要么看到整批、要么一条都看不到,游标永远不会跳过还没落库的号。
    * 普通记录按时间合并；阅读/听书按已知服务端版本确认。
    */
-  applyPush(rows: Array<{ table: SyncTable; row: PushRow }>): Promise<ProgressReceipt[]>;
+  applyPush(rows: Array<{ table: SyncTable; row: PushRow }>): Promise<Array<ProgressReceipt | RecordReceipt>>;
   /** watermark <= server_at <= through 的记录,按 server_at 升序,最多 limit 条。 */
   since(table: SyncTable, watermark: number, through: number, limit: number): Promise<SyncRow[]>;
 }
@@ -88,7 +89,7 @@ const HAS_BOOK_ID: Record<SyncTable, boolean> = {
 
 /**
  * D1 单个字符串参数上限 2 MB。一批记录按表打包成 JSON 数组、经 json_each 一条语句写完,
- * 数组超过这个字节数就拆成多条语句。单条记录的上限由 sync.ts 在入口挡住。
+ * 数组超过这个字节数就拆成多条语句。大记录由 sync.ts 转存 R2，入库的引用始终小于参数上限。
  */
 export const D1_PARAM_BYTES = 1_900_000;
 
@@ -224,23 +225,36 @@ export function createD1Store(db: D1Database): SyncStore {
           statements.push(db.prepare(sql).bind(JSON.stringify(chunk), count));
         }
       }
-      const progressQueries: Array<{ table: "positions" | "listening"; rows: PackedRow[] }> = [];
+      const receiptQueries: Array<{ table: SyncTable; rows: PackedRow[] }> = [];
       for (const [table, list] of byTable) {
-        if (table !== "positions" && table !== "listening") continue;
         for (const chunk of chunkPacked(list)) {
-          progressQueries.push({ table, rows: chunk });
-          statements.push(db.prepare(
-            `SELECT book_id AS key, data, updated_at, server_at, mutation_id FROM ${table} ` +
-            `WHERE book_id IN (SELECT json_extract(value, '$.k') FROM json_each(?))`
+          receiptQueries.push({ table, rows: chunk });
+          const progress = table === "positions" || table === "listening";
+          const keyColumn = KEY_COLUMN[table];
+          const valueColumn = VALUE_COLUMN[table];
+          statements.push(db.prepare(progress
+            ? `SELECT book_id AS key, data, updated_at, server_at, mutation_id FROM ${table} ` +
+              `WHERE book_id IN (SELECT json_extract(value, '$.k') FROM json_each(?))`
+            : `SELECT t.${keyColumn} AS key, t.updated_at, t.server_at, ` +
+              `json_extract(j.value, '$.u') AS sent_at, ` +
+              `(t.updated_at = json_extract(j.value, '$.u') AND t.${valueColumn} = json_extract(j.value, '$.d')) AS matches ` +
+              `FROM ${table} t JOIN json_each(?) j ON t.${keyColumn} = json_extract(j.value, '$.k')`
           ).bind(JSON.stringify(chunk)));
         }
       }
-      // 逐条确认读取也在同一个 batch 事务中，不把另一请求的后续写误认成自己的确认。
+      // 确认读取与写入在同一事务内，不把另一个请求的后续写误认成自己的确认。
       const results = await db.batch<Record<string, unknown>>(statements);
-      const receipts: ProgressReceipt[] = [];
-      for (let i = 0; i < progressQueries.length; i += 1) {
-        const { table, rows: sent } = progressQueries[i];
-        const result = results[results.length - progressQueries.length + i];
+      const receipts: Array<ProgressReceipt | RecordReceipt> = [];
+      for (let i = 0; i < receiptQueries.length; i += 1) {
+        const { table, rows: sent } = receiptQueries[i];
+        const result = results[results.length - receiptQueries.length + i];
+        if (table !== "positions" && table !== "listening") {
+          for (const value of result.results) receipts.push({
+            kind: table as RecordKind, key: String(value.key), updatedAt: Number(value.sent_at),
+            status: value.matches ? "accepted" : "stale", serverAt: Number(value.server_at),
+          });
+          continue;
+        }
         const saved = new Map(result.results.map((value) => [String(value.key), value]));
         for (const item of sent) {
           const value = saved.get(item.k);
