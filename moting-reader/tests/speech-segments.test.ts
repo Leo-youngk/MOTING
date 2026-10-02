@@ -8,8 +8,11 @@ import {
   sentenceAfter,
   spanForSentence,
   speechSegmentAt,
+  segmentFromBook,
+  spanForBookSentence,
+  nextBookSentence,
 } from "../lib/speech-segments.ts";
-import type { Chapter } from "../lib/types.ts";
+import type { Book, Chapter } from "../lib/types.ts";
 
 function chapterOf(sentenceCount: number, length = 30): Chapter {
   const text = Array.from(
@@ -98,4 +101,46 @@ test("系统朗读用的小块远小于云端长批次", () => {
     system.text.length < edge.text.length,
     "几千字塞不进 SpeechSynthesisUtterance"
   );
+});
+
+test("a short chapter tail and the next chapter share one clip without losing chapter-local sentence indexes", () => {
+  const chapters = [
+    createChapter("一", [{ text: "已经听过。章末剩余一句。" }], 0)!,
+    { id: "images", paragraphs: [], sentenceCount: 0 } as unknown as Chapter,
+    createChapter("二", [{ text: "下一章第一句。下一章第二句。" }], 2)!,
+  ];
+  const book = { id: "book", chapters } as Book;
+  const part = segmentFromBook(book, 0, 1, "edge", true)!;
+  assert.equal(part.text, "章末剩余一句。\n下一章第一句。\n下一章第二句。");
+  assert.deepEqual(part.spans.map(span => [span.chapterIndex, span.sentenceIndex]), [[0, 1], [2, 0], [2, 1]]);
+  assert.equal(spanForBookSentence(part, 2, 0)?.sentenceId, chapters[2].paragraphs[0].sentences[0].id);
+  assert.equal(spanForBookSentence(part, 0, 0), null);
+  assert.deepEqual(nextBookSentence(book, 0, 2), { chapterIndex: 2, sentenceIndex: 0 });
+  assert.equal(nextBookSentence(book, 2, 2), null);
+});
+
+test("the prefetched continuation starts at the exact next sentence across chapters, within the audio budget", () => {
+  const chapters = [chapterOf(5), chapterOf(120), chapterOf(120)];
+  const book = { id: "book", chapters } as Book;
+  let at: { chapterIndex: number; sentenceIndex: number } | null = { chapterIndex: 0, sentenceIndex: 3 };
+  const heard: string[] = [];
+  let first = true;
+  while (at) {
+    const part = segmentFromBook(book, at.chapterIndex, at.sentenceIndex, "edge", first)!;
+    assert.ok(part.text.length <= (first ? QUICK_SPEECH_LENGTH : 4800));
+    heard.push(...part.spans.map(span => `${span.chapterIndex}:${span.sentenceIndex}`));
+    const last = part.spans.at(-1)!;
+    at = nextBookSentence(book, last.chapterIndex, last.sentenceIndex + 1);
+    first = false;
+  }
+  const expected = chapters.flatMap((chapter, ci) => Array.from({ length: chapter.sentenceCount }, (_, si) => `${ci}:${si}`)).slice(3);
+  assert.deepEqual(heard, expected, "no repeated or skipped sentences when clips end in later chapters");
+});
+
+test("chapter sleep mode and system fallback keep clips confined to one chapter", () => {
+  const book = { id: "book", chapters: [chapterOf(2), chapterOf(10)] } as Book;
+  assert.ok(segmentFromBook(book, 0, 1, "edge", false)!.spans.some(span => span.chapterIndex === 1));
+  for (const engine of ["edge", "system"] as const) {
+    assert.ok(segmentFromBook(book, 0, 1, engine, false, false)!.spans.every(span => span.chapterIndex === 0));
+  }
 });
