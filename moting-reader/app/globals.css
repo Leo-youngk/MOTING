@@ -4968,6 +4968,15 @@ html[data-keyboard-open] .modal-sheet {
   font-weight: 600;
 }
 
+/* 标签下面的一行小字说明（英文模式），不加粗、淡一档。 */
+.rset-row__hint {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+
 /* 字号：一对 A，小 A 减、大 A 加。 */
 .rset-stepper {
   display: grid;

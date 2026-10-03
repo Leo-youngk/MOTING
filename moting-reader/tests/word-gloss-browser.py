@@ -1,15 +1,19 @@
-"""英文书点词释义的浏览器回归（Chromium 移动端模拟，不是 iPhone 真机）。
+"""英文模式（点词释义、问 AI 英文提问）的浏览器回归（Chromium 移动端模拟，不是 iPhone 真机）。
 
 Run against a running server: python tests/word-gloss-browser.py [base-url]
 Requires the existing Playwright Python installation and Microsoft Edge
 (or set BROWSER_PATH to a Chromium executable).
 
-导入一本中英混排的 TXT，模拟手指点词，确认：英文词出释义卡、变形词还原原形、
-连字符复合词整体查；而原有的单击行为一样不变——点空白切沉浸、中文段落照旧、
-长按还是划线菜单、点已有划线还是划线菜单。释义卡开关不重渲染正文。
+导入一本中英混排的 TXT，模拟手指点词，确认：
+- 英文模式默认关：点英文词跟以前一样只切沉浸，问 AI 还是原来那三个提问；
+- 在「主题与设置」里打开后：英文词出释义卡、变形词还原原形、连字符复合词整体查；
+  原有的单击行为不变——点空白切沉浸、中文段落照旧、长按和点已有划线还是划线菜单；
+  释义卡开关不重渲染正文；刷新后开关还记得；问 AI 换成翻译、拆句的提问；
+- 英文句子之间的空格在正文里保留着。
 """
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -19,7 +23,9 @@ BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:5173"
 OUT = Path(__file__).resolve().parents[1] / ".wrangler/word-gloss/output/playwright"
 OUT.mkdir(parents=True, exist_ok=True)
 
-BOOK = """Chapter 1
+DIALOGUE = "“Is he married or single?” “Oh! Single, my dear, to be sure!” She was pleased; he was not."
+
+BOOK = f"""Chapter 1
 
 It is a truth universally acknowledged, that a single man in possession of a good fortune, must be in want of a wife.
 
@@ -29,8 +35,13 @@ However little known the feelings or views of such a man may be on his first ent
 
 Mr. Bennet replied that he had not. The well-known house was taken by a young man of large fortune from the north of England.
 
+{DIALOGUE}
+
 这是一段中文注释，用来确认中文段落里单击照旧切换沉浸模式，即使里面夹着 iPhone 这样的英文词。
 """
+
+ENGLISH_STARTERS = ["翻译成中文", "拆解句子结构", "这段在说什么"]
+DEFAULT_STARTERS = ["这段在说什么", "举个例子", "和前后文什么关系"]
 
 
 def launch(p):
@@ -45,6 +56,12 @@ def touch(cdp, kind, point=None):
 
 def tap(cdp, point):
     touch(cdp, "touchStart", point)
+    touch(cdp, "touchEnd")
+
+
+def long_press(page, cdp, point):
+    touch(cdp, "touchStart", point)
+    page.wait_for_timeout(550)
     touch(cdp, "touchEnd")
 
 
@@ -88,22 +105,84 @@ def body_renders(page):
     return page.evaluate("() => parseInt(document.querySelector('.reader-sentinel')?.dataset.bodyRenders || '0', 10)")
 
 
+def settled_renders(page):
+    """
+    滚动停下后会先后存两次阅读进度（实测约 0.4s、1.6s），那两下的正文重渲染是正常的；
+    等计数连续 1.8s 不变再开始数。
+    """
+    count, still = body_renders(page), 0
+    for _ in range(40):
+        page.wait_for_timeout(300)
+        latest = body_renders(page)
+        still = still + 1 if latest == count else 0
+        count = latest
+        if still >= 6:
+            break
+    return count
+
+
 def gloss_text(page):
     card = page.locator(".word-gloss")
     expect(card).to_be_visible()
     return card.inner_text()
 
 
-def open_book(page, book_file):
-    page.goto(BASE)
+def set_ai_config(page):
+    """问 AI 的建议提问只在配过模型时出现；这里只看按钮，不真的发请求。"""
+    page.evaluate("""() => new Promise((resolve, reject) => {
+      const open = indexedDB.open('moting-reader');
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result, tx = db.transaction('settings', 'readwrite'), store = tx.objectStore('settings');
+        const read = store.get('reader');
+        read.onsuccess = () => store.put({...(read.result || {}), aiBaseUrl: 'https://example.invalid/v1', aiModel: 'test-model'}, 'reader');
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => reject(tx.error);
+      };
+    })""")
+
+
+def reload_to_shelf(page):
+    """应用会记住所在页面，刷新前清掉，保证每次都从书架点进去（设置存在 IndexedDB，不受影响）。"""
+    page.evaluate(
+        "() => { for (const k of Object.keys(localStorage)) "
+        "if (k.startsWith('moting:')) localStorage.removeItem(k); }"
+    )
+    page.reload()
     page.get_by_role("button", name="书库", exact=True).wait_for(timeout=60000)
-    page.locator('input[type="file"]').set_input_files(book_file)
-    page.wait_for_timeout(300)
-    page.locator(".import-overlay").wait_for(state="detached", timeout=60000)
+
+
+def open_book(page):
     page.get_by_role("button", name="书库", exact=True).click()
     page.get_by_role("button", name="阅读Chapter 1").click()
     page.locator(".reader-article").wait_for()
     page.wait_for_timeout(500)
+
+
+def set_english_mode(page, cdp, on):
+    if chrome_hidden(page):
+        tap(cdp, blank_point(page))
+        page.wait_for_timeout(200)
+    page.get_by_role("button", name="阅读菜单").click()
+    page.get_by_role("menu").get_by_text("主题与设置").click()
+    switch = page.get_by_role("checkbox", name=re.compile("英文模式"))
+    switch.set_checked(on)
+    expect(switch).to_be_checked(checked=on)
+    page.keyboard.press("Escape")
+    expect(page.locator(".modal-sheet--reader")).to_have_count(0)
+
+
+def inline_starters(page, cdp, word):
+    """长按选词 → 更多 → 问 AI，读出正文批注里的建议提问，再收起批注。"""
+    long_press(page, cdp, word_point(page, word))
+    page.get_by_role("button", name="更多", exact=True).click()
+    page.get_by_role("button", name="问 AI", exact=True).click()
+    starters = page.locator(".ai-inline__starter")
+    expect(starters.first).to_be_visible()
+    texts = starters.all_inner_texts()
+    page.get_by_role("button", name="收起批注").click()
+    expect(page.locator(".ai-inline")).to_have_count(0)
+    return texts
 
 
 with tempfile.TemporaryDirectory() as folder, sync_playwright() as p:
@@ -117,11 +196,36 @@ with tempfile.TemporaryDirectory() as folder, sync_playwright() as p:
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         cdp = context.new_cdp_session(page)
-        open_book(page, book_file)
+        page.goto(BASE)
+        page.get_by_role("button", name="书库", exact=True).wait_for(timeout=60000)
+        set_ai_config(page)
+        reload_to_shelf(page)
+        page.locator('input[type="file"]').set_input_files(book_file)
+        page.wait_for_timeout(300)
+        page.locator(".import-overlay").wait_for(state="detached", timeout=60000)
+        open_book(page)
+
+        # 英文句子之间的空格留着：「Oh! Single」「pleased; he」不会连成一个词。
+        paragraph = page.locator(".reader-block").filter(has_text="married or single").first
+        assert paragraph.text_content() == DIALOGUE, paragraph.text_content()
+
+        # 英文模式默认关：点英文词就是以前的切沉浸，问 AI 还是原来的提问。
+        hidden = chrome_hidden(page)
+        tap(cdp, word_point(page, "acknowledged", center=False))
+        page.wait_for_timeout(300)
+        expect(page.locator(".word-gloss")).to_have_count(0)
+        assert chrome_hidden(page) != hidden, "英文模式关着时点英文词不再切沉浸"
+        tap(cdp, blank_point(page))
+        page.wait_for_timeout(150)
+        assert inline_starters(page, cdp, "fortune") == DEFAULT_STARTERS
+
+        set_english_mode(page, cdp, True)
+        page.evaluate("scrollTo(0, 0)")
+        page.wait_for_timeout(250)
 
         # 点词出卡，再点同一个词收起；开关释义卡都不重渲染正文。
-        renders = body_renders(page)
-        tap(cdp, word_point(page, "acknowledged"))
+        renders = settled_renders(page)
+        tap(cdp, word_point(page, "acknowledged", center=False))
         text = gloss_text(page)
         assert "公认" in text and "acknowledge 的过去式" in text, text
         page.screenshot(path=str(OUT / f"gloss-{width}.png"))
@@ -168,10 +272,7 @@ with tempfile.TemporaryDirectory() as folder, sync_playwright() as p:
         # 长按英文词还是划线菜单；划好线后点它还是划线菜单，不是释义卡。
         page.evaluate("scrollTo(0, 0)")
         page.wait_for_timeout(250)
-        point = word_point(page, "truth", center=False)
-        touch(cdp, "touchStart", point)
-        page.wait_for_timeout(550)
-        touch(cdp, "touchEnd")
+        long_press(page, cdp, word_point(page, "truth", center=False))
         expect(page.get_by_role("dialog", name="划线操作")).to_be_visible()
         expect(page.locator(".word-gloss")).to_have_count(0)
         page.get_by_role("button", name="划线", exact=True).click()
@@ -196,6 +297,34 @@ with tempfile.TemporaryDirectory() as folder, sync_playwright() as p:
         page.wait_for_timeout(300)
         assert page.evaluate("scrollY") > 20, "没滑动起来"
         expect(page.locator(".word-gloss")).to_have_count(0)
+
+        # 英文模式下问 AI：英文句子换成翻译、拆句的提问。
+        page.evaluate("scrollTo(0, 0)")
+        page.wait_for_timeout(250)
+        assert inline_starters(page, cdp, "fortune") == ENGLISH_STARTERS
+
+        # 刷新之后英文模式还开着。
+        reload_to_shelf(page)
+        open_book(page)
+        page.evaluate("scrollTo(0, 0)")
+        page.wait_for_timeout(250)
+        tap(cdp, word_point(page, "fortune", center=False))
+        assert "财富" in gloss_text(page)
+        tap(cdp, blank_point(page))
+        expect(page.locator(".word-gloss")).to_have_count(0)
+
+        # 关掉英文模式：点英文词、问 AI 都回到原来的样子。
+        set_english_mode(page, cdp, False)
+        page.evaluate("scrollTo(0, 0)")
+        page.wait_for_timeout(250)
+        hidden = chrome_hidden(page)
+        tap(cdp, word_point(page, "fortune", center=False))
+        page.wait_for_timeout(300)
+        expect(page.locator(".word-gloss")).to_have_count(0)
+        assert chrome_hidden(page) != hidden, "关掉英文模式后点英文词不再切沉浸"
+        tap(cdp, blank_point(page))
+        page.wait_for_timeout(150)
+        assert inline_starters(page, cdp, "fortune") == DEFAULT_STARTERS
 
         assert not errors, errors
         reports.append({"width": width, "errors": errors})
