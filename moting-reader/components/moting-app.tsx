@@ -188,8 +188,10 @@ import {
 } from "../lib/reader-options";
 import { wereadCoverDisplayUrl } from "../lib/weread";
 import { useSafeInsets, type SafeInsets } from "../hooks/use-safe-insets";
-import { useTextSelection } from "../hooks/use-text-selection";
+import { useTextSelection, wordAtPoint } from "../hooks/use-text-selection";
+import { isEnglishText, isMidSentence, lookupSpans } from "../lib/dictionary";
 import { SelectionLayer } from "./selection-layer";
+import { WordGlossCard, glossKey, type GlossTarget } from "./word-gloss";
 import { Modal, SheetCancelButton, scrollWhenUnlocked, useScrollLock } from "./sheet";
 import { SoftRange } from "./soft-range";
 import { SettingsScreen } from "./settings-screen";
@@ -3674,6 +3676,9 @@ function ReaderScreen({
     sentenceIds: string[];
     anchorId: string;
   } | null>(null);
+  // 英文段落里点中的那个词，有值时浮出释义卡。
+  const [glossTarget, setGlossTarget] = useState<GlossTarget | null>(null);
+  const closeGloss = useCallback(() => setGlossTarget(null), []);
   const articleRef = useRef<HTMLElement>(null);
   const insets = useSafeInsets();
   // iPhone 上由应用接管正文选择，桌面和拿不到 caret 定位的浏览器退回系统选择。
@@ -3712,6 +3717,7 @@ function ReaderScreen({
     pageIndexRef.current = next;
     setPageIndex(next);
     setPopup(null);
+    setGlossTarget(null);
   }, []);
   const chapter = book.chapters[chapterIndex];
   const tocList = useMemo(() => tocIndexes(book.chapters), [book.chapters]);
@@ -4594,6 +4600,26 @@ function ReaderScreen({
     setPopup({ kind: "mark", anchor, note: created });
   };
 
+  /**
+   * 这一下点在英文段落的哪个词上。先看段落是不是英文：中文书每次单击只多一次
+   * closest 和一遍字数统计，不去按坐标找字。
+   */
+  const glossTargetAt = (event: MouseEvent<HTMLElement>): GlossTarget | null => {
+    const article = articleRef.current;
+    const block =
+      event.target instanceof Element ? event.target.closest(".reader-block") : null;
+    if (!article || !block || !isEnglishText(block.textContent ?? "")) return null;
+    const word = wordAtPoint(article, event.clientX, event.clientY);
+    if (!word) return null;
+    const spans = lookupSpans(word.text, word.start, word.end);
+    if (!spans.length) return null;
+    return {
+      sentenceId: word.sentenceId,
+      spans,
+      midSentence: isMidSentence(word.text, spans[spans.length - 1].start),
+    };
+  };
+
   const handleArticleClick = (event: MouseEvent<HTMLElement>) => {
     // 刚翻过页就别再顺手把那一下当成选句子。
     if (turnedRef.current) {
@@ -4622,6 +4648,20 @@ function ReaderScreen({
         openMarkPopup(mark, note);
         return;
       }
+    }
+    // 英文段落里点中一个词：弹释义卡，再点同一个词收起。中文段落、空白、行尾照旧往下走。
+    const target = glossTargetAt(event);
+    if (target) {
+      setPopup(null);
+      setGlossTarget((current) =>
+        current && glossKey(current) === glossKey(target) ? null : target
+      );
+      return;
+    }
+    // 释义卡开着时点空白只是收起它，不顺手切沉浸。
+    if (glossTarget) {
+      setGlossTarget(null);
+      return;
     }
     // 单击一律只切沉浸模式。想从某处开始听要先划词，再用浮条上的「从这里听」。
     setPopup(null);
@@ -4917,6 +4957,13 @@ function ReaderScreen({
   // 不然浮层的呼吸缺口里会露出还在显示、还能点的浮条，看着像一条横杠。
   // 不改 chromeVisible 本身：浮层关掉后 chrome 要精确回到用户手动切换前的显隐状态。
   const overlayOpen = showChapters || showSettings || Boolean(thoughtDraft) || askAiText !== null;
+  // 菜单、浮层、选区、划线浮条一出来，或者手指开始拖着翻页，释义卡就让位。
+  if (
+    glossTarget &&
+    (overlayOpen || showReaderMenu || textSelection.active || activePopup || isDragging)
+  ) {
+    setGlossTarget(null);
+  }
   // 进度条的实时页码：分页模式用手指翻页时立刻变的 pageIndex，跟底栏原来那行文字
   // 同一个算法；滚动模式没有 pageIndex，退回 currentPage（阅读位置驱动，锚点线
   // 停稳后 400ms 内更新，跟 TOC 里「第 X 页」用的是同一个近似值）。
@@ -5068,6 +5115,16 @@ function ReaderScreen({
         onHandleDown={textSelection.beginHandleDrag}
         dragging={textSelection.dragging}
       />
+
+      {glossTarget ? (
+        <WordGlossCard
+          key={glossKey(glossTarget)}
+          target={glossTarget}
+          articleRef={articleRef}
+          insets={insets}
+          onClose={closeGloss}
+        />
+      ) : null}
 
       {activePopup ? (
         <ReaderPopover

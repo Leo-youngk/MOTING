@@ -81,3 +81,10 @@ npm run deploy:dry-run
 - 回答的 Markdown 按块渲染（`lib/markdown-blocks.ts`，只在切开和不切渲染结果一样的地方切），流式时只重新解析最后一块，最后一块先过 `remend` 补齐没写完的加粗、链接；`lib/markdown-plugins.ts` 里的 `remark-cjk-friendly` 让紧挨中文标点的 `**` 也能加粗。
 - 发给模型的历史走 `modelHistory`（`lib/ai.ts`）：去掉空回答、合并连着的提问、只带最近 30 条 / 6 万字。Worker 转发的条数字数上限是同一个 `AI_REQUEST_LIMITS`，改一处两边都生效。流里夹的错误、一个字都没给的回答都当失败，显示在那一问下面并给「重试」，不写进对话记录。
 - 上游忙（503、429、5xx）时 Worker 自动重试并换备用模型（`worker/ai-upstream.ts`）：主模型 2 次 → 备用模型 2 次 → 主模型最后 1 次，间隔带抖动，总共最多等 30 秒；只在回答开始流出之前重试。备用模型是设置「AI 助手」里的 `aiFallbackModel`，从接口返回的模型列表里选，不在代码里写死；用到它的那条回答下面注明（响应头 `x-ai-model`）。每次重试、换模型、最终失败都写进 Workers 日志。上游的报错（Gemini 兼容接口外面包一层数组）由 Worker 解开并翻成中文。
+
+## 英文点词释义
+
+- 英文段落里单击一个词，词上方浮出释义卡（`components/word-gloss.tsx`）；只在段落是英文时生效（`isEnglishText`），中文段落、空白、行尾的单击照旧切沉浸。点已有划线、长按、分页模式左右两成翻页区的行为都不变。卡开着时点空白只收卡。
+- 词典是本地的，不走 AI：`scripts/build-dictionary.mjs` 从 ECDICT（MIT）裁出常用词，按首字母拆成 `public/dict/<版本>/a.json … z.json`，查词逻辑和变形还原在 `lib/dictionary.ts`。规则还原不对的变形由生成脚本核对后写进 `forms`，所以**改了 `stemCandidates` 要重新生成数据**。
+- 数据有变化要把 `DICTIONARY_PATH` 的版本号加一：service worker 对静态文件缓存优先，同一路径永远读旧的。
+- 改这块跑 `tests/dictionary.test.ts` 和 `tests/word-gloss-browser.py`。
