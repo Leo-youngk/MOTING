@@ -3,6 +3,13 @@ import { dayKey } from "./types.ts";
 
 /** 一轮心跳最多认这么多秒。页面切后台后定时器会被压到几分钟一跳，超出的当没在读。 */
 export const MAX_TICK_SECONDS = 90;
+/**
+ * 听书那一跳的上限。锁屏后台放着本来就该算，可系统会让 JS 一睡就是一整段音频
+ * （播放器特意用长批次，最长 4800 字，0.6× 下将近半小时），醒来那一跳要是也按 90 秒钳位，
+ * 后台听的时长几乎全丢。暂停、停止都会让目标变掉、当场结账（见 use-reading-session），
+ * 所以两跳之间一直在放，照实算；这个上限只防系统打断了播放却没报暂停时多记。
+ */
+export const MAX_LISTEN_TICK_SECONDS = 30 * 60;
 /** 短于这个数的段落不落账，翻两下就退出来的不算一次阅读。 */
 export const MIN_SESSION_SECONDS = 20;
 
@@ -77,7 +84,8 @@ export function advanceSession(
   }
 
   const elapsed = Math.round((input.now - state.lastTickAt) / 1000);
-  const gain = elapsed > 0 ? Math.min(elapsed, MAX_TICK_SECONDS) : 0;
+  const cap = input.kind === "listen" ? MAX_LISTEN_TICK_SECONDS : MAX_TICK_SECONDS;
+  const gain = elapsed > 0 ? Math.min(elapsed, cap) : 0;
 
   return {
     state: {

@@ -21,7 +21,11 @@ import {
 // ---------------------------------------------------------------------------
 // 内存 SyncStore:复刻 D1 的号段分配 + ON CONFLICT ... WHERE excluded.updated_at > 现值语义。
 
-function createMemoryStore(): SyncStore & { rows: Map<SyncTable, Map<string, SyncRow>>; sessions: Map<string, number> } {
+function createMemoryStore(): SyncStore & {
+  rows: Map<SyncTable, Map<string, SyncRow>>;
+  sessions: Map<string, number>;
+  loginAttempts: Map<string, { count: number; at: number }>;
+} {
   const rows = new Map<SyncTable, Map<string, SyncRow>>();
   const table = (name: SyncTable) => {
     let map = rows.get(name);
@@ -32,6 +36,7 @@ function createMemoryStore(): SyncStore & { rows: Map<SyncTable, Map<string, Syn
   return {
     rows,
     sessions: new Map(),
+    loginAttempts: new Map(),
     async addSession(hash, expiresAt) {
       this.sessions.set(hash, expiresAt);
     },
@@ -46,6 +51,15 @@ function createMemoryStore(): SyncStore & { rows: Map<SyncTable, Map<string, Syn
     },
     async renewSession(hash, expiresAt) {
       if (this.sessions.has(hash)) this.sessions.set(hash, expiresAt);
+    },
+    async noteLoginAttempt(client, now, windowMs) {
+      const previous = this.loginAttempts.get(client);
+      const count = previous && previous.at >= now - windowMs ? Math.min(previous.count + 1, 15) : 1;
+      this.loginAttempts.set(client, { count, at: now });
+      return count;
+    },
+    async clearLoginAttempts(client) {
+      this.loginAttempts.delete(client);
     },
     async latestServerAt() {
       return clockValue;
@@ -152,6 +166,26 @@ test("login issues an HttpOnly cookie; wrong password is rejected without a sess
   const bad = await handleSync(syncRequest("login", { username: USERNAME, password: "nope" }), e);
   assert.equal(bad.status, 401);
   assert.equal(bad.headers.getSetCookie().length, 0);
+});
+
+test("repeated wrong passwords lock that client out, even with the right password, until the window passes", async () => {
+  const { e, store } = env();
+  const attempt = (password: string, ip = "203.0.113.7") =>
+    handleSync(syncRequest("login", { username: USERNAME, password }, { "cf-connecting-ip": ip }), e);
+
+  for (let i = 0; i < 5; i += 1) assert.equal((await attempt("nope")).status, 401);
+  const locked = await attempt(PASSWORD);
+  assert.equal(locked.status, 429);
+  assert.equal(locked.headers.getSetCookie().length, 0);
+  assert.match((await jsonOf<{ error: string }>(locked)).error, /15 分钟/);
+
+  // 别的来源不受连累。
+  assert.equal((await attempt(PASSWORD, "198.51.100.9")).status, 200);
+
+  // 窗口过去之后从头数,登录成功清掉计数。
+  store.loginAttempts.set("203.0.113.7", { count: 15, at: Date.now() - 16 * 60 * 1000 });
+  assert.equal((await attempt(PASSWORD)).status, 200);
+  assert.equal(store.loginAttempts.has("203.0.113.7"), false);
 });
 
 test("session probe reports enabled:false when the deployment has no store", async () => {

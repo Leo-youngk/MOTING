@@ -110,29 +110,36 @@ async function request<T extends object>(
   signal: AbortSignal,
   timeoutMs = 60_000
 ): Promise<T & SyncResponse> {
-  let response: Response;
   try {
-    response = await fetchWithTimeout(`/api/sync/${path}`, {
+    return await fetchWithTimeout(`/api/sync/${path}`, {
       method: body === null ? "GET" : "POST",
       headers: body === null ? undefined : { "content-type": "application/json" },
       credentials: "same-origin",
       cache: "no-store",
       body: body === null ? undefined : JSON.stringify(body),
       signal,
-    }, timeoutMs);
+    }, timeoutMs, async (response) => {
+      // 先把正文读完再解析：读到一半断掉（超时、断网）要按连不上报，不能当成「数据读不出来」。
+      const text = await response.text();
+      let data: (T & SyncResponse) | null = null;
+      try {
+        data = JSON.parse(text) as T & SyncResponse;
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        throw new SyncError(
+          data && typeof data.error === "string" ? data.error : `同步服务返回 ${response.status}`,
+          response.status
+        );
+      }
+      if (!data) throw new SyncError("同步服务返回了无法读取的数据", 502);
+      return data;
+    });
   } catch (error) {
-    if (signal.aborted) throw error;
+    if (error instanceof SyncError || signal.aborted) throw error;
     throw new SyncError("连接超时或网络不可用,请稍后重试", 503);
   }
-  const data = (await response.json().catch(() => null)) as (T & SyncResponse) | null;
-  if (!response.ok) {
-    throw new SyncError(
-      data && typeof data.error === "string" ? data.error : `同步服务返回 ${response.status}`,
-      response.status
-    );
-  }
-  if (!data) throw new SyncError("同步服务返回了无法读取的数据", 502);
-  return data;
 }
 
 export async function getSyncSession(signal: AbortSignal): Promise<{ connected: boolean; enabled: boolean }> {
@@ -299,15 +306,20 @@ function imagePath(bookId: string, imageId: string): string {
 
 /** 云端是否已有这个对象。续传时先问一声,省得把几 MB 的正文再发一遍才收到 409。 */
 async function existsInCloud(path: string, signal: AbortSignal): Promise<boolean> {
-  let response: Response;
+  let status: number;
   try {
-    response = await fetchWithTimeout(path, { method: "HEAD", credentials: "same-origin", cache: "no-store", signal }, 30_000);
+    status = await fetchWithTimeout(
+      path,
+      { method: "HEAD", credentials: "same-origin", cache: "no-store", signal },
+      30_000,
+      async (response) => response.status
+    );
   } catch (error) {
     if (signal.aborted) throw error;
     throw new SyncError("连接超时或网络不可用,稍后会自动重试", 503);
   }
-  if (response.status === 404) return false;
-  if (!response.ok) throw new SyncError(`同步服务返回 ${response.status}`, response.status);
+  if (status === 404) return false;
+  if (status < 200 || status >= 300) throw new SyncError(`同步服务返回 ${status}`, status);
   return true;
 }
 
@@ -320,9 +332,8 @@ async function uploadImage(
 ): Promise<void> {
   const path = imagePath(bookId, imageId);
   if (resuming && (await existsInCloud(path, signal))) return;
-  let response: Response;
   try {
-    response = await fetchWithTimeout(
+    await fetchWithTimeout(
       path,
       {
         method: "POST",
@@ -332,35 +343,37 @@ async function uploadImage(
         body: blob,
         signal,
       },
-      120_000
+      120_000,
+      async (response) => {
+        if (!response.ok) throw await readError(response);
+      }
     );
   } catch (error) {
-    if (signal.aborted) throw error;
+    if (error instanceof SyncError || signal.aborted) throw error;
     throw new SyncError("插图上传中断,稍后会自动重试", 503);
   }
-  if (!response.ok) throw await readError(response);
 }
 
 async function uploadBookBody(bookId: string, book: Book, signal: AbortSignal): Promise<void> {
   // 正文已在云端 = 上次传到一半被打断(App 被杀、断网)。那就只补缺的插图。
   const resuming = await existsInCloud(contentPath(bookId), signal);
   if (!resuming) {
-    let response: Response;
     try {
-      response = await fetchWithTimeout(contentPath(bookId), {
+      await fetchWithTimeout(contentPath(bookId), {
         method: "POST",
         credentials: "same-origin",
         cache: "no-store",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(book.chapters),
         signal,
-      }, 300_000);
+      }, 300_000, async (response) => {
+        // 409 = 另一台设备刚好抢先传完,当作成功继续插图。
+        if (!response.ok && response.status !== 409) throw await readError(response);
+      });
     } catch (error) {
-      if (signal.aborted) throw error;
+      if (error instanceof SyncError || signal.aborted) throw error;
       throw new SyncError("正文上传中断,稍后会自动重试", 503);
     }
-    // 409 = 另一台设备刚好抢先传完,当作成功继续插图。
-    if (!response.ok && response.status !== 409) throw await readError(response);
   }
 
   // 封面不进 D1 的 meta(见 toSyncBookMeta),随正文一起放 R2。
@@ -379,14 +392,16 @@ async function uploadBookBody(bookId: string, book: Book, signal: AbortSignal): 
 }
 
 async function downloadImage(bookId: string, imageId: string, signal: AbortSignal): Promise<Blob | null> {
-  const response = await fetchWithTimeout(
+  return fetchWithTimeout(
     imagePath(bookId, imageId),
     { credentials: "same-origin", cache: "no-store", signal },
-    120_000
+    120_000,
+    async (response) => {
+      if (response.status === 404) return null;
+      if (!response.ok) throw await readError(response);
+      return response.blob();
+    }
   );
-  if (response.status === 404) return null;
-  if (!response.ok) throw await readError(response);
-  return response.blob();
 }
 
 /** 下载一本书:正文 + 封面 + 插图。封面/插图缺失跳过,阅读器显示占位。 */
@@ -396,16 +411,28 @@ async function downloadBook(
   onProgress: (label: string) => void
 ): Promise<{ book: Book; images: BookImage[]; pendingImages: string[] } | null> {
   onProgress(`正在同步《${meta.title}》…`);
-  let response: Response;
+  let chapters: Chapter[] | null;
   try {
-    response = await fetchWithTimeout(contentPath(meta.id), { credentials: "same-origin", cache: "no-store", signal }, 300_000);
+    chapters = await fetchWithTimeout(
+      contentPath(meta.id),
+      { credentials: "same-origin", cache: "no-store", signal },
+      300_000,
+      async (response) => {
+        if (response.status === 404) return null;
+        if (!response.ok) throw await readError(response);
+        const text = await response.text();
+        try {
+          return JSON.parse(text) as Chapter[];
+        } catch {
+          throw new SyncError(`《${meta.title}》的云端正文无效`, 502);
+        }
+      }
+    );
   } catch (error) {
-    if (signal.aborted) throw error;
+    if (error instanceof SyncError || signal.aborted) throw error;
     throw new SyncError("正文下载中断,请稍后重试", 503);
   }
-  if (response.status === 404) return null;
-  if (!response.ok) throw await readError(response);
-  const chapters = (await response.json()) as Chapter[];
+  if (chapters === null) return null;
   if (!Array.isArray(chapters) || !chapters.length) throw new SyncError(`《${meta.title}》的云端正文无效`, 502);
 
   const wanted = [COVER_IMAGE_ID, ...collectImageIds(chapters)];

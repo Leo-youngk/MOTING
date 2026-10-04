@@ -42,6 +42,7 @@ interface CacheEntry {
 }
 
 interface InflightEntry {
+  key: string;
   promise: Promise<SpeechClip>;
   controller: AbortController;
   /** 还在等这次结果的消费者数。归零且不是播放请求，就没必要继续占着上游连接。 */
@@ -150,14 +151,11 @@ export class SpeechClipStore {
 
   /** 换书、跳章、关面板时把还没人等的准备任务全掐掉。 */
   cancelPending(): void {
-    for (const [key, waiting] of Array.from(this.pending)) {
-      this.pending.delete(key);
-      waiting.entry.controller.abort();
-      // 门没开的话 promise 会永远卡在这儿，必须放行让它走 abort 分支。
-      waiting.start();
+    for (const waiting of Array.from(this.pending.values())) {
+      this.discard(waiting.entry);
     }
-    for (const entry of this.inflight.values()) {
-      if (!entry.priority) entry.controller.abort();
+    for (const entry of Array.from(this.inflight.values())) {
+      if (!entry.priority) this.discard(entry);
     }
   }
 
@@ -199,7 +197,7 @@ export class SpeechClipStore {
         entry.waiting -= 1;
         // 没人等这个结果了就断掉上游：它要么是被新选择顶掉的旧音色，
         // 要么是跳位置前那一段，留着只是白占一条合成连接。
-        if (entry.waiting <= 0) entry.controller.abort();
+        if (entry.waiting <= 0) this.discard(entry);
       };
       const onAbort = () => {
         detach();
@@ -233,6 +231,7 @@ export class SpeechClipStore {
   ): InflightEntry {
     const controller = new AbortController();
     const entry: InflightEntry = {
+      key,
       promise: undefined as unknown as Promise<SpeechClip>,
       controller,
       waiting: 0,
@@ -252,7 +251,8 @@ export class SpeechClipStore {
         return clip;
       })
       .finally(() => {
-        this.inflight.delete(key);
+        // 这条可能早就被 discard 摘掉、同一个键上已经换了一条新的，别把新的删了。
+        if (this.inflight.get(key) === entry) this.inflight.delete(key);
         if (entry.counted) {
           entry.counted = false;
           this.running -= 1;
@@ -275,6 +275,22 @@ export class SpeechClipStore {
       this.pump();
     }
     return entry;
+  }
+
+  /**
+   * 掐掉一条请求，并当场从登记表里摘掉。上游的拒绝要过一拍才落定，这期间同一段文本
+   * 再来要（播放器常常是「先 abort 旧的、紧接着同步请求同一段」），挂到这条上只会跟着
+   * 拿到 AbortError——播放器把它当成主动取消吞掉，界面就一直停在「正在准备音频」。
+   */
+  private discard(entry: InflightEntry): void {
+    entry.controller.abort();
+    if (this.inflight.get(entry.key) === entry) this.inflight.delete(entry.key);
+    const waiting = this.pending.get(entry.key);
+    if (waiting?.entry === entry) {
+      this.pending.delete(entry.key);
+      // 门没开的话 promise 会永远卡在这儿，必须放行让它走 abort 分支。
+      waiting.start();
+    }
   }
 
   private pump(): void {

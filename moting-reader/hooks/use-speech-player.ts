@@ -90,6 +90,11 @@ const LATIN_CHARS_PER_SECOND = 15;
 const HIGHLIGHT_INTERVAL_MS = 100;
 /** 面板打开时最多顺手准备几个音色。再多就是在替用户瞎猜，白烧合成次数。 */
 const MAX_VOICE_PREFETCH = 3;
+/**
+ * 云端连着这么多段都读不了（服务本身没报挂），就当它整场用不了。
+ * 不设这道闸的话，每一段都要先白等一轮合成、失败了才用系统朗读顶一小段，听起来一卡一卡的。
+ */
+const EDGE_FAILURE_LIMIT = 3;
 
 function estimateCharsPerSecond(text: string, rate: number): number {
   const cjk = text.match(/[㐀-鿿]/g)?.length ?? 0;
@@ -182,6 +187,8 @@ interface PlayOptions {
   quick?: boolean;
   /** 交接用：音频从这一句对应的时间点开始放，而不是从整段开头。 */
   seekToSentence?: number;
+  /** 云端读不了这一段（不是服务挂了）：只这一段改用系统朗读，下一段照旧走云端。 */
+  systemOnce?: boolean;
 }
 
 export function useSpeechPlayer({
@@ -235,6 +242,8 @@ export function useSpeechPlayer({
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const edgeDownRef = useRef(false);
+  /** 云端连着失败了几段，出声一次就清零。 */
+  const edgeFailuresRef = useRef(0);
   const waitingForClipRef = useRef(false);
   const activeVoiceRef = useRef("");
   const requestedVoiceRef = useRef(settings.voiceURI);
@@ -457,7 +466,9 @@ export function useSpeechPlayer({
       const chapter = book.chapters[chapterIndex];
       const voiceURI = settingsRef.current.voiceURI;
       const useEdge =
-        !edgeDownRef.current && (!voiceURI || isEdgeVoiceURI(voiceURI));
+        !edgeDownRef.current &&
+        !options.systemOnce &&
+        (!voiceURI || isEdgeVoiceURI(voiceURI));
       const selectedEngine: SpeechEngine = useEdge ? "edge" : "system";
       const quick = options.quick ?? false;
       const segment = chapter
@@ -494,7 +505,7 @@ export function useSpeechPlayer({
       }
       // 已经退回系统朗读时要留着提示，否则读完一段就把「云端不可用」抹掉，
       // 用户永远不知道音色为什么变了。
-      if (!edgeDownRef.current) setError("");
+      if (!edgeDownRef.current && !options.systemOnce) setError("");
 
       const applySpan = (span: SpeechSpan) => {
         if (token !== tokenRef.current) return;
@@ -595,7 +606,10 @@ export function useSpeechPlayer({
             event.error === "synthesis-unavailable";
           if (recoverable && selectedVoice && !selectedVoice.localService) {
             blockedVoicesRef.current.add(selectedVoice.voiceURI);
-            playAtRef.current?.(bookId, chapterIndex, sentenceIndex, { quick });
+            playAtRef.current?.(bookId, chapterIndex, sentenceIndex, {
+              quick,
+              systemOnce: options.systemOnce,
+            });
             return;
           }
           setError("系统朗读被中断，请重新播放");
@@ -689,6 +703,7 @@ export function useSpeechPlayer({
           }
 
           waitingForClipRef.current = false;
+          edgeFailuresRef.current = 0;
           setIsBuffering(false);
           playingClipRef.current = { bookId, chapterIndex, segment, clip };
           noteVoiceUsed(resolvedEdgeVoiceURI(settingsRef.current.voiceURI));
@@ -745,15 +760,18 @@ export function useSpeechPlayer({
             if (isAbortError(reason)) return;
             // 只有服务真的不可用才拉闸退回系统朗读；单段合成失败下一段还要再试云端，
             // 否则一句超长文本就能让后面整本书都变成机器音。
+            edgeFailuresRef.current += 1;
             const serviceDown =
-              !(reason instanceof SpeechClipError) || reason.serviceDown;
-            edgeDownRef.current = true;
+              !(reason instanceof SpeechClipError) ||
+              reason.serviceDown ||
+              edgeFailuresRef.current >= EDGE_FAILURE_LIMIT;
+            if (serviceDown) edgeDownRef.current = true;
             waitingForClipRef.current = false;
             setIsBuffering(false);
             setError(
               serviceDown
                 ? "云端语音暂不可用，已切换到系统朗读"
-                : "这一段云端读不了，已切换到系统朗读"
+                : "这一段云端读不了，先用系统朗读"
             );
             // 云端批次远长于系统 utterance，必须按系统语音的小块重新定位，
             // 不能把几千字直接塞进 SpeechSynthesisUtterance。
@@ -761,7 +779,7 @@ export function useSpeechPlayer({
               bookId,
               chapterIndex,
               startSpan.sentenceIndex,
-              { quick: true }
+              { quick: true, systemOnce: !serviceDown }
             );
           });
       };
@@ -1011,6 +1029,7 @@ export function useSpeechPlayer({
       if (!book) return;
       // 用户主动开播时再给云端一次机会，之前的失败可能只是临时断网。
       edgeDownRef.current = false;
+      edgeFailuresRef.current = 0;
       // 拉黑的系统音色多半也是那次断网连累的，一起放出来重试。
       blockedVoicesRef.current.clear();
       cancelHandover();
@@ -1098,6 +1117,7 @@ export function useSpeechPlayer({
 
     // 已停止，重新起播；顺便给云端一次机会，之前的失败可能只是临时断网。
     edgeDownRef.current = false;
+    edgeFailuresRef.current = 0;
     playAt(current.bookId, current.chapterIndex, current.sentenceIndex, {
       quick: true,
     });

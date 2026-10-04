@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   EMPTY_SESSION_STATE,
+  MAX_LISTEN_TICK_SECONDS,
   MAX_TICK_SECONDS,
   advanceSession,
   type SessionInput,
@@ -71,6 +72,15 @@ test("挂机的那几跳不计时，回来接着算同一段", () => {
 test("后台压住定时器造成的超长间隔按上限钳位", () => {
   const { state } = run([input({ now: BASE }), input({ now: BASE + 600000 })]);
   assert.equal(state.session?.seconds, MAX_TICK_SECONDS);
+});
+
+test("锁屏后台听书的长间隔照实算，只按兜底上限钳位", () => {
+  const listen = (now: number) => input({ now, kind: "listen" });
+  const background = run([listen(BASE), listen(BASE + 600000)]);
+  assert.equal(background.state.session?.seconds, 600);
+
+  const interrupted = run([listen(BASE), listen(BASE + 3 * 3600000)]);
+  assert.equal(interrupted.state.session?.seconds, MAX_LISTEN_TICK_SECONDS);
 });
 
 test("换书封账重开，短于下限的那段丢掉", () => {

@@ -236,6 +236,56 @@ test("云端朗读批次跨段落合并并保持句子下标", () => {
   }
 });
 
+test("句末标点后的引号、括号跟着这一句，不挂到下一句开头", () => {
+  assert.deepEqual(splitIntoSentences("“你好。”他说。「走吧！」她回答……』（见上。）"), [
+    "“你好。”",
+    "他说。",
+    "「走吧！」",
+    "她回答……』",
+    "（见上。）",
+  ]);
+  // 半角引号分不清开合，不收。
+  assert.deepEqual(splitIntoSentences('他走了。"等等！"她喊道。'), [
+    "他走了。",
+    '"等等！',
+    '"她喊道。',
+  ]);
+  // 只剩标点的碎片接回上一句。
+  assert.deepEqual(splitIntoSentences("真的？！”。。"), ["真的？！”。。"]);
+});
+
+test("念不出字的句子（场景分隔、单独的注码）不送去朗读，只占零宽位置", () => {
+  const chapter = createChapter(
+    "第一章",
+    [{ text: "第一段结束了。" }, { text: "* * *" }, { text: "新的一段开始。[1]" }],
+    0
+  );
+  assert.ok(chapter);
+
+  const blocks = buildSpeechBlocks(chapter);
+  assert.deepEqual(blocks.map((block) => block.text), ["第一段结束了。", "新的一段开始。"]);
+  // 整段念不出来的挂到上一块末尾，章末判断数得到它。
+  assert.deepEqual(
+    blocks[0].spans.map((span) => [span.sentenceIndex, span.start, span.end]),
+    [
+      [0, 0, 7],
+      [1, 7, 7],
+    ]
+  );
+
+  const batches = buildEdgeSpeechBatches(chapter);
+  assert.deepEqual(batches.map((batch) => batch.text), ["第一段结束了。新的一段开始。"]);
+  assert.deepEqual(
+    batches[0].spans.map((span) => [span.sentenceIndex, span.end - span.start]),
+    [
+      [0, 7],
+      [1, 0],
+      [2, 7],
+      [3, 0],
+    ]
+  );
+});
+
 test("阅读位置能够跨章节移动并计算进度", () => {
   const first = createChapter("第一章", [{ text: "甲。乙。" }], 0);
   const second = createChapter("第二章", [{ text: "丙。丁。" }], 1);

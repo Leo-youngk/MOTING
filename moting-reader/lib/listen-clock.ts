@@ -1,4 +1,4 @@
-import { flattenChapter } from "./content.ts";
+import { flattenChapter, speakableOf } from "./content.ts";
 import type { Chapter } from "./types.ts";
 
 /**
@@ -44,7 +44,7 @@ export function listenChapter(
     const chapter = chapters[chapterIndex];
     if (!chapter) continue;
     flattenChapter(chapter).forEach((sentence, sentenceIndex) => {
-      seconds += speechSeconds(sentence.speakableText || sentence.text);
+      seconds += speechSeconds(speakableOf(sentence));
       sentences.push({ chapterIndex, sentenceIndex });
       starts.push(seconds);
     });

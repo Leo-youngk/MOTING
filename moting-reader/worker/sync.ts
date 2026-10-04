@@ -20,6 +20,10 @@ const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
 // 滑动续期:距上次续期超过一天才写库、重发 cookie,不让每次同步都多一次 D1 写。
 // 只要 30 天内同步过一次,就永远不用重新登录。
 const SESSION_RENEW_AFTER_MS = 24 * 3600 * 1000;
+// 登录限流:同一来源 15 分钟里最多试 5 次,超了就先不比对密码,直接让它等。
+// 每试一次都把窗口往后推,一直猜就一直锁着。已登录的设备靠会话续期,不受影响。
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const MAX_LOGIN_ATTEMPTS = 5;
 const PUSH_ITEM_LIMIT = 500;
 // 一页 pull 的条数与字节预算。页满就带 hasMore 返回,客户端拿 cursor 接着拉。
 const PULL_PAGE_ROWS = 300;
@@ -130,10 +134,16 @@ async function handleLogin(request: Request, env: SyncEnv, { store }: Resolved):
   if (!username || !password || username.length > 256 || password.length > 256) {
     return json({ error: "请输入用户名和密码" }, 400);
   }
+  const client = request.headers.get("cf-connecting-ip") || "unknown";
+  const attempts = await store.noteLoginAttempt(client, Date.now(), LOGIN_WINDOW_MS);
+  if (attempts > MAX_LOGIN_ATTEMPTS) {
+    return json({ error: "登录尝试次数过多,请 15 分钟后再试" }, 429);
+  }
   const [gotUser, wantUser, gotPass, wantPass] = await Promise.all([
     sha256Hex(username), sha256Hex(env.SYNC_USERNAME), sha256Hex(password), sha256Hex(env.SYNC_PASSWORD),
   ]);
   if (gotUser !== wantUser || gotPass !== wantPass) return json({ error: "用户名或密码不正确" }, 401);
+  await store.clearLoginAttempts(client);
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   const token = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
