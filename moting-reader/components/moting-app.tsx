@@ -197,8 +197,10 @@ import {
 } from "../lib/reader-options";
 import { wereadCoverDisplayUrl } from "../lib/weread";
 import { useSafeInsets, type SafeInsets } from "../hooks/use-safe-insets";
-import { useTextSelection } from "../hooks/use-text-selection";
+import { useTextSelection, wordAtPoint } from "../hooks/use-text-selection";
+import { isEnglishText, isMidSentence, lookupSpans } from "../lib/dictionary";
 import { SelectionLayer } from "./selection-layer";
+import { WordGlossCard, glossKey, type GlossTarget } from "./word-gloss";
 import { Modal, SheetCancelButton, scrollWhenUnlocked, useScrollLock } from "./sheet";
 import { SoftRange } from "./soft-range";
 import { SettingsScreen } from "./settings-screen";
@@ -2737,12 +2739,17 @@ const AI_TOC_LIMIT = 6000;
 /** 刚发出的问题滚到顶栏下面时离顶栏的距离。改它要同步 CSS 里 .ai-chat__latest 的最小高度。 */
 const LATEST_GAP = 16;
 
-/** 起手提问：拿真实的书名和章节标题拼，只是把常问的几件事摆出来，不编造内容。 */
+/**
+ * 起手提问：拿真实的书名和章节标题拼，只是把常问的几件事摆出来，不编造内容。
+ * 英文模式下划的是英文句子时，先给翻译和拆句——读英文最常卡在这两处。
+ */
 function starterPrompts(
   book: BookMeta,
   chapter: Chapter | undefined,
-  hasQuote: boolean
+  hasQuote: boolean,
+  englishQuote = false
 ) {
+  if (hasQuote && englishQuote) return ["翻译成中文", "拆解句子结构", "这段在说什么"];
   if (hasQuote) return ["这段在说什么", "举个例子", "和前后文什么关系"];
   const list = ["这本书主要在讲什么"];
   if (chapter) list.push(`讲讲《${chapterLabelFor(book.chapterOutline, chapter.id)}》这一章`);
@@ -2791,6 +2798,11 @@ async function askAi({
   const chapterContext = chapter
     ? `\n\n当前章节《${chapterTitle}》正文${chapterText.length >= AI_CHAPTER_TEXT_LIMIT ? "（篇幅较长，只截取了前面一部分）" : ""}：\n${chapterText}`
     : "";
+  // 英文模式下读的是英文章节：读者英语基础一般，讲解要照顾到。关着英文模式或是中文书，提示词一字不变。
+  const englishNote =
+    settings.englishMode && isEnglishText(chapterText)
+      ? "\n这是一本英文书，读者英语基础一般：讲解一律用中文；翻译要通顺自然；讲句子结构时先找出主干，再讲从句和修饰成分，少用语法术语。"
+      : "";
   await streamAiChat(
     {
       baseUrl: settings.aiBaseUrl,
@@ -2803,7 +2815,7 @@ async function askAi({
       messages: [
         {
           role: "system",
-          content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。\n如有需要可使用 Markdown 格式（标题、加粗、列表、代码块等）让回答更清晰，但不必为简短回答刻意加格式。${brief ? "\n这次回答显示在正文旁边的批注里，控制在 200 字以内，直接说结论，不要用标题。" : ""}`,
+          content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。\n如有需要可使用 Markdown 格式（标题、加粗、列表、代码块等）让回答更清晰，但不必为简短回答刻意加格式。${englishNote}${brief ? "\n这次回答显示在正文旁边的批注里，控制在 200 字以内，直接说结论，不要用标题。" : ""}`,
         },
         ...modelHistory(history),
       ],
@@ -3218,7 +3230,12 @@ function AiAskPanel({
           <div className="ai-chat__row">
             {configured && !turns.length ? (
               <div className="ai-chat__starters" aria-label="建议提问">
-                {starterPrompts(book, chapter, isFreshQuote).map((preset) => (
+                {starterPrompts(
+                  book,
+                  chapter,
+                  isFreshQuote,
+                  settings.englishMode && isEnglishText(text)
+                ).map((preset) => (
                   <button
                     type="button"
                     key={preset}
@@ -3406,7 +3423,12 @@ function AiInlineAsk({
               </button>
             </div>
             <div className="ai-inline__starters">
-              {starterPrompts(book, chapter, true).map((preset) => (
+              {starterPrompts(
+                book,
+                chapter,
+                true,
+                settings.englishMode && isEnglishText(text)
+              ).map((preset) => (
                 <button
                   type="button"
                   key={preset}
@@ -3689,6 +3711,9 @@ function ReaderScreen({
     sentenceIds: string[];
     anchorId: string;
   } | null>(null);
+  // 英文段落里点中的那个词，有值时浮出释义卡。
+  const [glossTarget, setGlossTarget] = useState<GlossTarget | null>(null);
+  const closeGloss = useCallback(() => setGlossTarget(null), []);
   const articleRef = useRef<HTMLElement>(null);
   const insets = useSafeInsets();
   // iPhone 上由应用接管正文选择，桌面和拿不到 caret 定位的浏览器退回系统选择。
@@ -3730,6 +3755,7 @@ function ReaderScreen({
     pageIndexRef.current = next;
     setPageIndex(next);
     setPopup(null);
+    setGlossTarget(null);
   }, []);
   const chapter = book.chapters[chapterIndex];
   const tocList = useMemo(() => tocIndexes(book.chapters), [book.chapters]);
@@ -4845,6 +4871,27 @@ function ReaderScreen({
     setPopup({ kind: "mark", anchor, note: created });
   };
 
+  /**
+   * 英文模式下，这一下点在英文段落的哪个词上。英文模式关着就什么都不做；开着时先看段落
+   * 是不是英文，中文段落每次单击只多一次 closest 和一遍字数统计，不去按坐标找字。
+   */
+  const glossTargetAt = (event: MouseEvent<HTMLElement>): GlossTarget | null => {
+    if (!settings.englishMode) return null;
+    const article = articleRef.current;
+    const block =
+      event.target instanceof Element ? event.target.closest(".reader-block") : null;
+    if (!article || !block || !isEnglishText(block.textContent ?? "")) return null;
+    const word = wordAtPoint(article, event.clientX, event.clientY);
+    if (!word) return null;
+    const spans = lookupSpans(word.text, word.start, word.end);
+    if (!spans.length) return null;
+    return {
+      sentenceId: word.sentenceId,
+      spans,
+      midSentence: isMidSentence(word.text, spans[spans.length - 1].start),
+    };
+  };
+
   const handleArticleClick = (event: MouseEvent<HTMLElement>) => {
     // 刚翻过页就别再顺手把那一下当成选句子。
     if (turnedRef.current) {
@@ -4873,6 +4920,20 @@ function ReaderScreen({
         openMarkPopup(mark, note);
         return;
       }
+    }
+    // 英文段落里点中一个词：弹释义卡，再点同一个词收起。中文段落、空白、行尾照旧往下走。
+    const target = glossTargetAt(event);
+    if (target) {
+      setPopup(null);
+      setGlossTarget((current) =>
+        current && glossKey(current) === glossKey(target) ? null : target
+      );
+      return;
+    }
+    // 释义卡开着时点空白只是收起它，不顺手切沉浸。
+    if (glossTarget) {
+      setGlossTarget(null);
+      return;
     }
     // 单击一律只切沉浸模式。想从某处开始听要先划词，再用浮条上的「从这里听」。
     setPopup(null);
@@ -5170,6 +5231,18 @@ function ReaderScreen({
   // 不然浮层的呼吸缺口里会露出还在显示、还能点的浮条，看着像一条横杠。
   // 不改 chromeVisible 本身：浮层关掉后 chrome 要精确回到用户手动切换前的显隐状态。
   const overlayOpen = showChapters || showSettings || Boolean(thoughtDraft) || askAiText !== null;
+  // 菜单、浮层、选区、划线浮条一出来，或者手指开始拖着翻页、英文模式关掉，释义卡就让位。
+  if (
+    glossTarget &&
+    (overlayOpen ||
+      showReaderMenu ||
+      textSelection.active ||
+      activePopup ||
+      isDragging ||
+      !settings.englishMode)
+  ) {
+    setGlossTarget(null);
+  }
   // 进度条的实时页码：分页模式用手指翻页时立刻变的 pageIndex，跟底栏原来那行文字
   // 同一个算法；滚动模式没有 pageIndex，退回 currentPage（阅读位置驱动，锚点线
   // 停稳后 400ms 内更新，跟 TOC 里「第 X 页」用的是同一个近似值）。
@@ -5336,6 +5409,16 @@ function ReaderScreen({
         onHandleDown={textSelection.beginHandleDrag}
         dragging={textSelection.dragging}
       />
+
+      {glossTarget ? (
+        <WordGlossCard
+          key={glossKey(glossTarget)}
+          target={glossTarget}
+          articleRef={articleRef}
+          insets={insets}
+          onClose={closeGloss}
+        />
+      ) : null}
 
       {activePopup ? (
         <ReaderPopover
@@ -5599,6 +5682,26 @@ function ReaderScreen({
                 value={settings.lineHeight}
                 onValue={(lineHeight) => applySettings({ ...settings, lineHeight })}
               />
+            </label>
+
+            {/* 英文模式默认关：关着时单击、问 AI 都跟以前一样，打开才点词出释义。 */}
+            <label className="rset-row">
+              <span className="rset-row__label">
+                英文模式
+                <small className="rset-row__hint">点英文单词看中文释义</small>
+              </span>
+              <span className="ai-switch">
+                <input
+                  type="checkbox"
+                  checked={settings.englishMode}
+                  onChange={(event) =>
+                    applySettings({ ...settings, englishMode: event.target.checked })
+                  }
+                />
+                <span className="ai-switch__track">
+                  <span className="ai-switch__thumb" />
+                </span>
+              </span>
             </label>
 
             <div className="compact-toggle rset-layout">

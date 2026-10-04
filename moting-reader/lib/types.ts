@@ -185,6 +185,11 @@ export interface ReaderSettings {
   /** 新建划线直接沿用最近一次选择；旧设置由 DEFAULT_SETTINGS 补齐。 */
   highlightColor: HighlightColor;
   highlightStyle: HighlightStyle;
+  /**
+   * 英文模式：英文段落里单击单词出中文释义，划英文句子问 AI 时多给「翻译」「拆解句子」两个提问。
+   * 默认关，关着时阅读器的单击、问 AI 跟没有这个功能时完全一样。
+   */
+  englishMode: boolean;
   speechRate: number;
   voiceURI: string;
   /**
@@ -272,6 +277,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   readingMode: "scroll",
   highlightColor: "yellow",
   highlightStyle: "underline",
+  englishMode: false,
   speechRate: 1,
   voiceURI: "",
   followSpeech: false,

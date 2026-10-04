@@ -95,6 +95,13 @@ function splitLongSentence(sentence: string): string[] {
   return pieces;
 }
 
+/**
+ * 英文句子的交界：前一句以英文字母或数字（后面可以跟英文标点、引号）结尾，
+ * 后一句以英文字母或数字（前面可以有引号、括号）开头。中文句子之间不留空格，英文要留。
+ */
+const LATIN_SENTENCE_END = /[A-Za-z0-9][.!?;:,…'"’”)\]]*$/;
+const LATIN_SENTENCE_START = /^['"‘“(\[]*[A-Za-z0-9]/;
+
 export function splitIntoSentences(value: string): string[] {
   const clean = normalizeWhitespace(value);
   if (!clean) return [];
@@ -105,8 +112,8 @@ export function splitIntoSentences(value: string): string[] {
     ) ?? [clean];
 
   const sentences: string[] = [];
-  for (const raw of matches) {
-    const sentence = normalizeWhitespace(raw);
+  for (let index = 0; index < matches.length; index++) {
+    const sentence = normalizeWhitespace(matches[index]);
     if (!sentence) continue;
     if (sentence.length <= 1 && /^[。！？!?；;…]$/.test(sentence)) {
       if (sentences.length) {
@@ -114,7 +121,19 @@ export function splitIntoSentences(value: string): string[] {
       }
       continue;
     }
-    sentences.push(...splitLongSentence(sentence));
+    const pieces = splitLongSentence(sentence);
+    // 「Hi! How are you?」切开后，原文里那个空格留在前一句末尾；
+    // 句子是挨着排的，丢了它正文就成了「Hi!How are you?」。
+    const next = matches[index + 1];
+    if (
+      next &&
+      /^\s/.test(next) &&
+      LATIN_SENTENCE_END.test(sentence) &&
+      LATIN_SENTENCE_START.test(next.trimStart())
+    ) {
+      pieces[pieces.length - 1] += " ";
+    }
+    sentences.push(...pieces);
   }
 
   return sentences.length ? sentences : splitLongSentence(clean);
@@ -413,6 +432,16 @@ export function flattenChapter(chapter: Chapter): Sentence[] {
   return chapter.paragraphs.flatMap((paragraph) => paragraph.sentences);
 }
 
+/**
+ * 拼朗读文本时两句之间放什么。中文句末有标点就直接接上；英文句子之间要空一格，
+ * 否则「England;」「he came」拼成「England;he」，会被当成一个怪词读。
+ */
+function speechSeparator(text: string, next: string): string {
+  if (!text) return "";
+  if (LATIN_SENTENCE_END.test(text) && LATIN_SENTENCE_START.test(next)) return " ";
+  return /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
+}
+
 const MAX_SPEECH_BLOCK_LENGTH = 240;
 export const MAX_EDGE_SPEECH_BATCH_LENGTH = 4800;
 
@@ -435,8 +464,7 @@ export function buildSpeechBlocks(chapter: Chapter): SpeechBlock[] {
       if (text && text.length + speakable.length > MAX_SPEECH_BLOCK_LENGTH) {
         flush();
       }
-      const separator =
-        !text || /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
+      const separator = speechSeparator(text, speakable);
       const start = text.length + separator.length;
       text += separator + speakable;
       spans.push({
@@ -477,8 +505,7 @@ export function buildEdgeSpeechBatches(
     for (const sentence of paragraph.sentences) {
       const speakable = sentence.speakableText || sentence.text;
       if (text && text.length + speakable.length > maxLength) flush();
-      const separator =
-        !text || /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
+      const separator = speechSeparator(text, speakable);
       const start = text.length + separator.length;
       text += separator + speakable;
       spans.push({

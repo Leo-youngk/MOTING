@@ -4059,6 +4059,63 @@ html[data-keyboard-open] .bottom-bar {
   background: rgb(255 255 255 / 12%);
 }
 
+/* 英文书点词释义：跟划线浮条同一种深色气泡（材质、尖角都沿用 .reader-popover），
+   不带按钮，只有词、音标和两三行中文释义。外壳文字一律黑体，这张卡也是。 */
+.reader-popover.word-gloss {
+  display: block;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 24px));
+  padding: 9px 13px 11px;
+  color: rgb(245 245 247 / 90%);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.45;
+}
+
+.word-gloss p {
+  margin: 0;
+}
+
+.word-gloss p.word-gloss__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 8px;
+  margin-bottom: 3px;
+}
+
+.word-gloss__head strong {
+  color: #fff;
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.word-gloss__phonetic,
+.word-gloss__note,
+.word-gloss__pos {
+  color: rgb(245 245 247 / 56%);
+  font-size: var(--text-md);
+}
+
+.word-gloss__pos {
+  margin-right: 4px;
+}
+
+.word-gloss__also {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 0.5px solid rgb(255 255 255 / 14%);
+}
+
+/* 点中的词垫一层淡蓝，比选区（34%）轻一档：看得出在查哪个词，又不像是选中了。 */
+.word-gloss-mark span {
+  position: fixed;
+  z-index: 25;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--mark-blue) 22%, transparent);
+  pointer-events: none;
+}
+
 .player-screen {
   min-height: 100dvh;
   background: var(--paper);
@@ -4909,6 +4966,15 @@ html[data-keyboard-open] .modal-sheet {
   flex-shrink: 0;
   font-size: var(--text-base);
   font-weight: 600;
+}
+
+/* 标签下面的一行小字说明（英文模式），不加粗、淡一档。 */
+.rset-row__hint {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
 }
 
 /* 字号：一对 A，小 A 减、大 A 加。 */

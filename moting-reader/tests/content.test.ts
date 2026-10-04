@@ -31,6 +31,52 @@ test("按中文标点切分朗读句子", () => {
   ]);
 });
 
+test("英文句子切开后保留句间空格，拼回去和原文一样", () => {
+  const text = "Hi! How are you? Fine; thanks. “Where are you going?” I asked.";
+  const sentences = splitIntoSentences(text);
+  assert.deepEqual(sentences, [
+    "Hi! ",
+    "How are you? ",
+    "Fine; ",
+    "thanks. “Where are you going?",
+    "” I asked.",
+  ]);
+  assert.equal(sentences.join(""), text);
+  // 朗读文本是去掉首尾空白的，空格只在排版里。
+  const chapter = createChapter("Chapter 1", [{ text }], 0);
+  assert.ok(chapter);
+  assert.equal(chapter.paragraphs[0].sentences[0].speakableText, "Hi!");
+});
+
+test("中文句子之间照旧不留空格，中文里夹的英文句子之间才留", () => {
+  assert.deepEqual(splitIntoSentences("你好！ 我是谁？ 这里；"), ["你好！", "我是谁？", "这里；"]);
+  assert.deepEqual(splitIntoSentences("他说 OK! Fine 就好。"), ["他说 OK! ", "Fine 就好。"]);
+});
+
+test("朗读文本里英文句子之间有空格，中文照旧直接相连", () => {
+  const english = createChapter(
+    "Chapter 1",
+    [{ text: "He was not. “But it is,” returned she; “for Mrs. Long told me.”" }, { text: "Mr. Bennet made no answer." }],
+    0
+  );
+  assert.ok(english);
+  const [block] = buildEdgeSpeechBatches(english);
+  assert.equal(
+    block.text,
+    "He was not. “But it is,” returned she; “for Mrs. Long told me.” Mr. Bennet made no answer."
+  );
+  const sentences = english.paragraphs.flatMap((paragraph) => paragraph.sentences);
+  for (const span of block.spans) {
+    assert.equal(block.text.slice(span.start, span.end), sentences[span.sentenceIndex].speakableText);
+  }
+  // 段内朗读块也一样。
+  assert.equal(buildSpeechBlocks(english)[0].text, "He was not. “But it is,” returned she; “for Mrs. Long told me.”");
+
+  const chinese = createChapter("第一章", [{ text: "甲。乙！" }, { text: "丙；丁。" }], 0);
+  assert.ok(chinese);
+  assert.equal(buildEdgeSpeechBatches(chinese)[0].text, "甲。乙！丙；丁。");
+});
+
 test("清理不适合朗读的标记和链接", () => {
   assert.equal(
     toSpeakableText("**正文**[注1]，详见 https://example.com/a。"),
