@@ -43,8 +43,10 @@ export function progressId(kind: ProgressKind, key: string): string {
 export function acknowledgeProgress(current: QueuedProgress, receipt: ProgressReceipt): QueuedProgress {
   const record = receipt.record;
   if (!record || record.serverAt < current.serverRev || receipt.status === "upgrade") return current;
-  if (receipt.status === "accepted" && current.pending && current.mutationId !== receipt.mutationId) {
-    return { ...current, serverRev: record.serverAt, baseServerRev: record.serverAt };
+  if (current.pending && current.mutationId !== receipt.mutationId) {
+    return { ...current, serverRev: record.serverAt,
+      // 自己刚上传成功可接续版本；旧操作的冲突不能替新操作决定覆盖远端。
+      baseServerRev: receipt.status === "accepted" ? record.serverAt : current.baseServerRev };
   }
   return {
     ...current,

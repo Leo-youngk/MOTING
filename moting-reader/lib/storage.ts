@@ -438,7 +438,8 @@ export async function applySyncedProgress(kind: ProgressKind, record: ProgressRe
     if (current && record.serverAt <= current.serverRev) return;
     const data = JSON.stringify(record.data);
     const next: QueuedProgress = current ? acknowledgeProgress(current, {
-      kind, key: record.key, record, mutationId: record.mutationId,
+      // 拉取处理的是当前本地候选，上传回执才带被确认的那次 mutation。
+      kind, key: record.key, record, mutationId: current.mutationId,
       status: current.pending && record.mutationId !== current.mutationId ? "conflict" : "accepted",
     }) : {
       id: progressId(kind, record.key), kind, key: record.key, data, updatedAt: record.updatedAt,
