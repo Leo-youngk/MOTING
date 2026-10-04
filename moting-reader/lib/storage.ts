@@ -1,7 +1,9 @@
+import type { PushFailure } from "./sync-record";
 import { normalizeVoiceURI } from "./edge-voices";
 import type { BookMetadataPatch } from "./book-metadata-types";
 import { outlineOf } from "./content";
 import { mergeChatTurns } from "./sync-merge";
+import { acknowledgeProgress, progressId, type ProgressKind, type ProgressReceipt, type ProgressRecord, type QueuedProgress } from "./sync-progress";
 import type {
   Book,
   BookAiChat,
@@ -17,8 +19,8 @@ import type {
 import { DEFAULT_SETTINGS, DEFAULT_STATS } from "./types";
 
 const DB_NAME = "moting-reader";
-/** 5：正文从书目记录里拆到 contents 表。 */
-const DB_VERSION = 5;
+/** 6：增加与位置同事务保存的进度待上传队列。 */
+const DB_VERSION = 6;
 const BOOK_STORE = "books";
 /** 书的正文，一本书一条，主键 bookId。书目在 books 表里，打开这本书时才读这里。 */
 const CONTENT_STORE = "contents";
@@ -27,6 +29,7 @@ const SETTINGS_STORE = "settings";
 const IMAGE_STORE = "images";
 const CHAT_STORE = "chats";
 const SESSION_STORE = "sessions";
+const PROGRESS_STORE = "sync-progress";
 const READING_POSITION_PREFIX = "reading-position:";
 /** 线上补全的书籍资料。跟阅读位置一样单独存，不写回体积巨大的 Book 记录。 */
 const BOOK_METADATA_PREFIX = "book-metadata:";
@@ -55,7 +58,7 @@ export interface SyncTombstones {
 
 /**
  * 云端同步的本地状态。两个水位分属两台时钟,绝不能混用:
- * - pushedAt:本机时钟(毫秒)。上次成功同步开始的时刻,本地记录的修改时间比它新才需要上传。
+ * - pushedAt:普通记录的本机时间水位；阅读/听书位置由独立队列逐条确认。
  * - pullCursor:服务端号段(server_at)。下次 pull 从这里接着拉。
  */
 export interface SyncState {
@@ -63,10 +66,16 @@ export interface SyncState {
   schema: number;
   pushedAt: number;
   pullCursor: number;
+  progressCursor?: number;
+  lastProgressAt?: number;
   tombstones: SyncTombstones;
   pendingContent: string[];
+  pendingDownloads?: BookMeta[];
+  blockedContent?: Array<{ bookId: string; reason: string }>;
   pendingImages: Array<{ bookId: string; imageId: string }>;
   pendingPush: Partial<Record<SyncPushKind, string[]>>;
+  pushFailures?: PushFailure[];
+  lastCompleteAt?: number;
 }
 
 export type SyncPushKind =
@@ -189,6 +198,9 @@ function openDatabase(): Promise<IDBDatabase> {
         const sessions = db.createObjectStore(SESSION_STORE, { keyPath: "id" });
         sessions.createIndex("bookId", "bookId", { unique: false });
       }
+      if (!db.objectStoreNames.contains(PROGRESS_STORE)) {
+        db.createObjectStore(PROGRESS_STORE, { keyPath: "id" });
+      }
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -252,6 +264,246 @@ function validPosition(value: unknown): value is StoredReadingPosition {
       typeof record.lastOpenedAt === "number" &&
       Number.isFinite(record.lastOpenedAt)
   );
+}
+
+export type ReadingPositionEntry = StoredReadingPosition & { bookId: string };
+
+function notifyProgressPending(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("moting:progress-pending"));
+}
+
+function rememberReadingBackup(bookId: string, data: string): void {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(`moting:pos:${bookId}`, JSON.stringify(JSON.parse(data).position)); }
+  catch { /* IndexedDB 已保存，localStorage 不可用时仍可恢复。 */ }
+}
+
+export async function recoverReadingBackups(books: BookMeta[]): Promise<void> {
+  if (typeof window === "undefined") return;
+  const entries: ReadingPositionEntry[] = [];
+  for (const book of books) {
+    try {
+      const raw = window.localStorage.getItem(`moting:pos:${book.id}`);
+      if (!raw) continue;
+      const position = JSON.parse(raw) as BookPosition;
+      if (typeof position.sentenceId !== "string" || !Number.isFinite(position.updatedAt) ||
+          position.updatedAt <= (book.readingPosition?.updatedAt ?? 0)) continue;
+      entries.push({ bookId: book.id, position, savedAt: position.updatedAt, lastOpenedAt: position.updatedAt });
+    } catch { /* 单条损坏的兜底不影响书库。 */ }
+  }
+  await saveReadingPositions(entries, { bootstrap: true });
+}
+
+function queueProgress(
+  transaction: IDBTransaction,
+  kind: ProgressKind,
+  key: string,
+  data: string,
+  updatedAt: number,
+  bootstrap = false
+): void {
+  const store = transaction.objectStore(PROGRESS_STORE);
+  const id = progressId(kind, key);
+  const request = store.get(id);
+  request.onsuccess = () => {
+    const current = request.result as QueuedProgress | undefined;
+    store.put({
+      id, kind, key, data, updatedAt,
+      seq: (current?.seq ?? 0) + 1,
+      mutationId: crypto.randomUUID(),
+      serverRev: current?.serverRev ?? 0,
+      baseServerRev: current?.pending ? current.baseServerRev : current?.serverRev ?? 0,
+      pending: true,
+      bootstrap,
+      conflict: current?.conflict,
+    } satisfies QueuedProgress);
+  };
+}
+
+/** 旧库对账：未进入队列的旧位置保留原时间，修复历史 pushedAt 漏洞。 */
+export async function getProgressQueue(): Promise<QueuedProgress[]> {
+  const [metas, positions] = await Promise.all([getBookMetas(), getAllReadingPositions()]);
+  const liveBooks = new Set(metas.map((book) => book.id));
+  const localOnly = new Set(metas.filter((book) => book.format === "demo").map((book) => book.id));
+  const candidates: Array<{ kind: ProgressKind; key: string; data: string; updatedAt: number }> = [];
+  const positionById = new Map(positions.map((entry) => [entry.bookId, entry]));
+  for (const meta of metas) {
+    if (localOnly.has(meta.id)) continue;
+    if (meta.listeningPosition) candidates.push({ kind: "listening", key: meta.id,
+      data: JSON.stringify(meta.listeningPosition), updatedAt: meta.listeningPosition.updatedAt });
+    const stored = positionById.get(meta.id);
+    if (meta.readingPosition && (!stored || meta.readingPosition.updatedAt > Math.max(stored.savedAt, stored.position.updatedAt))) {
+      positionById.set(meta.id, { bookId: meta.id, position: meta.readingPosition,
+        savedAt: meta.readingPosition.updatedAt, lastOpenedAt: meta.lastOpenedAt });
+    }
+  }
+  for (const { bookId, ...value } of positionById.values()) {
+    if (!liveBooks.has(bookId) || localOnly.has(bookId)) continue;
+    candidates.push({ kind: "positions", key: bookId, data: JSON.stringify(value), updatedAt: value.savedAt });
+  }
+  const db = await openDatabase();
+  const transaction = db.transaction([PROGRESS_STORE, SETTINGS_STORE, BOOK_STORE], "readwrite");
+  const store = transaction.objectStore(PROGRESS_STORE);
+  for (const candidate of candidates) {
+    const request = store.get(progressId(candidate.kind, candidate.key));
+    request.onsuccess = () => {
+      const current = request.result as QueuedProgress | undefined;
+      // 旧库尚无确认队列的记录只迁移一次，保留原修改时间。
+      if (!current) {
+        const book = transaction.objectStore(BOOK_STORE).get(candidate.key);
+        book.onsuccess = () => {
+          if (!book.result) return;
+          writeProgressValue(transaction, candidate.kind, candidate.key, candidate.data);
+          queueProgress(transaction, candidate.kind, candidate.key, candidate.data, candidate.updatedAt, true);
+        };
+      }
+    };
+  }
+  await transactionDone(transaction);
+  const read = db.transaction(PROGRESS_STORE, "readonly");
+  return requestToPromise(read.objectStore(PROGRESS_STORE).getAll() as IDBRequest<QueuedProgress[]>);
+}
+
+function writeProgressValue(transaction: IDBTransaction, kind: ProgressKind, key: string, data: string): void {
+  const value = JSON.parse(data);
+  if (kind === "positions") {
+    transaction.objectStore(SETTINGS_STORE).put(value, readingPositionKey(key));
+    const books = transaction.objectStore(BOOK_STORE);
+    const request = books.get(key);
+    request.onsuccess = () => {
+      const book = request.result as BookMeta | undefined;
+      if (book?.readingPosition) {
+        const { readingPosition: _legacyPosition, ...meta } = book;
+        books.put(meta);
+      }
+    };
+  } else {
+    const books = transaction.objectStore(BOOK_STORE);
+    const request = books.get(key);
+    request.onsuccess = () => {
+      const book = request.result as BookMeta | undefined;
+      if (book) books.put({ ...book, listeningPosition: value });
+    };
+  }
+}
+
+/** 确认与位置落库同事务。上传期间产生的新 mutation 不会被旧响应清除。 */
+export async function applyProgressReceipt(receipt: ProgressReceipt): Promise<boolean> {
+  const db = await openDatabase();
+  const transaction = db.transaction([PROGRESS_STORE, SETTINGS_STORE, BOOK_STORE], "readwrite");
+  const store = transaction.objectStore(PROGRESS_STORE);
+  let changed = false;
+  let backup: string | undefined;
+  const request = store.get(progressId(receipt.kind, receipt.key));
+  request.onsuccess = () => {
+    const current = request.result as QueuedProgress | undefined;
+    if (!current || !receipt.record) return;
+    const next = acknowledgeProgress(current, receipt);
+    if (next === current) return;
+    store.put(next);
+    if (!next.pending && next.data !== current.data) {
+      writeProgressValue(transaction, next.kind, next.key, next.data);
+      if (next.kind === "positions") backup = next.data;
+      changed = true;
+    }
+  };
+  await transactionDone(transaction);
+  if (backup) rememberReadingBackup(receipt.key, backup);
+  return changed;
+}
+
+/** 单条异常不阻塞其他位置和拉取；下一次真实本地操作会替换这个条目。 */
+export async function rejectProgress(kind: ProgressKind, key: string, mutationId: string): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(PROGRESS_STORE, "readwrite");
+  const store = transaction.objectStore(PROGRESS_STORE);
+  const request = store.get(progressId(kind, key));
+  request.onsuccess = () => {
+    const current = request.result as QueuedProgress | undefined;
+    if (current?.mutationId === mutationId) store.put({ ...current, rejection: "进度内容异常，请打开这本书重新定位" });
+  };
+  await transactionDone(transaction);
+}
+
+/** 服务端版本大于本机已知版本才应用；并发本地候选保留在 conflict 中。 */
+export async function applySyncedProgress(kind: ProgressKind, record: ProgressRecord): Promise<boolean> {
+  const db = await openDatabase();
+  const transaction = db.transaction([PROGRESS_STORE, SETTINGS_STORE, BOOK_STORE], "readwrite");
+  const store = transaction.objectStore(PROGRESS_STORE);
+  let changed = false;
+  let backup: string | undefined;
+  const request = store.get(progressId(kind, record.key));
+  request.onsuccess = () => {
+    const current = request.result as QueuedProgress | undefined;
+    if (current && record.serverAt <= current.serverRev) return;
+    const data = JSON.stringify(record.data);
+    const next: QueuedProgress = current ? acknowledgeProgress(current, {
+      // 拉取处理的是当前本地候选，上传回执才带被确认的那次 mutation。
+      kind, key: record.key, record, mutationId: current.mutationId,
+      status: current.pending && record.mutationId !== current.mutationId ? "conflict" : "accepted",
+    }) : {
+      id: progressId(kind, record.key), kind, key: record.key, data, updatedAt: record.updatedAt,
+      seq: 0, mutationId: record.mutationId ?? "", serverRev: record.serverAt,
+      baseServerRev: record.serverAt, pending: false, bootstrap: false,
+    };
+    store.put(next);
+    if (!next.pending) {
+      writeProgressValue(transaction, kind, record.key, next.data);
+      if (kind === "positions") backup = next.data;
+      changed = !current || current.data !== next.data;
+    }
+  };
+  await transactionDone(transaction);
+  if (backup) rememberReadingBackup(record.key, backup);
+  return changed;
+}
+
+/** 显式选择本机候选才生成新修改；选择云端只清除保留的候选。 */
+export async function resolveProgressConflict(id: string, useLocal: boolean): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction([PROGRESS_STORE, SETTINGS_STORE, BOOK_STORE], "readwrite");
+  const store = transaction.objectStore(PROGRESS_STORE);
+  const request = store.get(id);
+  request.onsuccess = () => {
+    const current = request.result as QueuedProgress | undefined;
+    if (!current?.conflict) return;
+    const { conflict, ...clean } = current;
+    if (useLocal) {
+      const data = JSON.parse(conflict.data);
+      const now = Math.max(Date.now(), current.updatedAt + 1);
+      if (current.kind === "positions") {
+        data.savedAt = now;
+        data.lastOpenedAt = now;
+        data.position.updatedAt = now;
+      } else data.updatedAt = now;
+      const serialized = JSON.stringify(data);
+      writeProgressValue(transaction, current.kind, current.key, serialized);
+      store.put({ ...clean, data: serialized, updatedAt: now, seq: current.seq + 1,
+        mutationId: crypto.randomUUID(), baseServerRev: current.serverRev, pending: true, bootstrap: false });
+    } else store.put(clean);
+  };
+  await transactionDone(transaction);
+  if (useLocal) notifyProgressPending();
+}
+
+/** 新本地听书事件立即保存；不再等待旧定时器，也不修改书目同步时间。 */
+export async function saveLocalListeningPosition(bookId: string, position: BookPosition): Promise<BookMeta | undefined> {
+  const db = await openDatabase();
+  const transaction = db.transaction([BOOK_STORE, PROGRESS_STORE], "readwrite");
+  const store = transaction.objectStore(BOOK_STORE);
+  let saved: BookMeta | undefined;
+  const request = store.get(bookId);
+  request.onsuccess = () => {
+    const current = request.result as BookMeta | undefined;
+    if (!current) return;
+    const next = { ...position, updatedAt: Math.max(position.updatedAt, (current.listeningPosition?.updatedAt ?? 0) + 1) };
+    saved = { ...current, listeningPosition: next };
+    store.put(saved);
+    if (current.format !== "demo") queueProgress(transaction, "listening", bookId, JSON.stringify(next), next.updatedAt);
+  };
+  await transactionDone(transaction);
+  if (saved) notifyProgressPending();
+  return saved;
 }
 
 /** 书库要显示的书目：叠上阅读位置和线上补全的资料，不含正文。 */
@@ -422,15 +674,23 @@ export async function updateBookMeta(
   changes: Partial<Omit<BookMeta, "id">>
 ): Promise<BookMeta | undefined> {
   const db = await openDatabase();
-  const transaction = db.transaction(BOOK_STORE, "readwrite");
+  const transaction = db.transaction([BOOK_STORE, PROGRESS_STORE], "readwrite");
   const store = transaction.objectStore(BOOK_STORE);
   let updated: BookMeta | undefined;
   const request = store.get(bookId);
   request.onsuccess = () => {
     const current = request.result as BookMeta | undefined;
     if (!current) return;
-    updated = { ...current, ...changes, id: current.id };
+    const safe = { ...changes };
+    if (safe.listeningPosition && safe.listeningPosition.updatedAt <= (current.listeningPosition?.updatedAt ?? 0)) {
+      delete safe.listeningPosition;
+    }
+    updated = { ...current, ...safe, id: current.id,
+      updatedAt: Math.max(current.updatedAt, safe.updatedAt ?? current.updatedAt) };
     store.put(updated);
+    if (safe.listeningPosition && current.format !== "demo") {
+      queueProgress(transaction, "listening", bookId, JSON.stringify(safe.listeningPosition), safe.listeningPosition.updatedAt);
+    }
   };
   await transactionDone(transaction);
   return updated;
@@ -532,16 +792,22 @@ export async function getSyncState(): Promise<SyncState> {
     schema: typeof stored.schema === "number" ? stored.schema : 0,
     pushedAt: typeof stored.pushedAt === "number" ? stored.pushedAt : 0,
     pullCursor: typeof stored.pullCursor === "number" ? stored.pullCursor : 0,
+    progressCursor: typeof stored.progressCursor === "number" ? stored.progressCursor : 0,
+    lastProgressAt: typeof stored.lastProgressAt === "number" ? stored.lastProgressAt : 0,
     tombstones: {
       books: stored.tombstones?.books ?? {},
       notes: stored.tombstones?.notes ?? {},
     },
     pendingContent: Array.isArray(stored.pendingContent) ? stored.pendingContent : [],
+    pendingDownloads: Array.isArray(stored.pendingDownloads) ? stored.pendingDownloads : [],
+    blockedContent: Array.isArray(stored.blockedContent) ? stored.blockedContent : [],
     pendingImages: Array.isArray(stored.pendingImages)
       ? stored.pendingImages.filter((entry): entry is { bookId: string; imageId: string } =>
           Boolean(entry && typeof entry.bookId === "string" && typeof entry.imageId === "string")
         )
       : [],
+    pushFailures: Array.isArray(stored.pushFailures) ? stored.pushFailures : [],
+    lastCompleteAt: typeof stored.lastCompleteAt === "number" ? stored.lastCompleteAt : 0,
     pendingPush: Object.fromEntries(
       (["books", "notes", "positions", "sessions", "settings", "chats", "patches", "listening"] as const)
         .flatMap((kind) => {
@@ -584,10 +850,26 @@ export async function commitSyncState(
     store.put(
       {
         ...next,
+        lastCompleteAt: Math.max(current.lastCompleteAt ?? 0, next.lastCompleteAt ?? 0),
+        pullCursor: Math.max(current.pullCursor, next.pullCursor),
+        lastProgressAt: Math.max(current.lastProgressAt ?? 0, next.lastProgressAt ?? 0),
+        progressCursor: Math.max(current.progressCursor ?? 0, next.progressCursor ?? 0),
         tombstones: { books: keep("books"), notes: keep("notes") },
       } satisfies SyncState,
       SYNC_STATE_KEY
     );
+  };
+  await transactionDone(transaction);
+}
+
+export async function commitProgressCursor(cursor: number): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(SETTINGS_STORE, "readwrite");
+  const store = transaction.objectStore(SETTINGS_STORE);
+  const request = store.get(SYNC_STATE_KEY);
+  request.onsuccess = () => {
+    const current = (request.result as SyncState | undefined) ?? DEFAULT_SYNC_STATE;
+    store.put({ ...current, progressCursor: Math.max(current.progressCursor ?? 0, cursor), lastProgressAt: Date.now() }, SYNC_STATE_KEY);
   };
   await transactionDone(transaction);
 }
@@ -682,7 +964,7 @@ async function removeBookData(
 ): Promise<boolean> {
   const db = await openDatabase();
   const transaction = db.transaction(
-    [BOOK_STORE, CONTENT_STORE, NOTE_STORE, IMAGE_STORE, CHAT_STORE, SETTINGS_STORE],
+    [BOOK_STORE, CONTENT_STORE, NOTE_STORE, IMAGE_STORE, CHAT_STORE, SETTINGS_STORE, PROGRESS_STORE],
     "readwrite"
   );
   const books = transaction.objectStore(BOOK_STORE);
@@ -706,6 +988,8 @@ async function removeBookData(
     transaction.objectStore(CHAT_STORE).delete(bookId);
     const settings = transaction.objectStore(SETTINGS_STORE);
     settings.delete(readingPositionKey(bookId));
+    transaction.objectStore(PROGRESS_STORE).delete(progressId("positions", bookId));
+    transaction.objectStore(PROGRESS_STORE).delete(progressId("listening", bookId));
     // 补丁必须跟着删：留着的话重新导入同一本书、复用到同一个 id 时会串到旧资料上。
     settings.delete(bookMetadataKey(bookId));
     removed = Boolean(current);
@@ -728,40 +1012,49 @@ export async function removeBookIfOlder(bookId: string, deletedAt: number): Prom
 
 /** 只保存阅读位置，不复制整本正文；正文仍由 saveBook 负责持久化。 */
 export async function saveReadingPositions(
-  entries: Array<{
-    bookId: string;
-    position: BookPosition;
-    lastOpenedAt: number;
-    savedAt: number;
-  }>
-): Promise<void> {
-  if (!entries.length) return;
+  entries: ReadingPositionEntry[],
+  { local = false, bootstrap = false }: { local?: boolean; bootstrap?: boolean } = {}
+): Promise<ReadingPositionEntry[]> {
+  if (!entries.length) return [];
   const db = await openDatabase();
-  const transaction = db.transaction(SETTINGS_STORE, "readwrite");
+  const transaction = db.transaction([SETTINGS_STORE, PROGRESS_STORE, BOOK_STORE], "readwrite");
   const store = transaction.objectStore(SETTINGS_STORE);
+  const saved: ReadingPositionEntry[] = [];
   // 一个批次里先按 savedAt 去重，免得同一本书的迟到旧条目覆盖较新的条目。
   const latest = new Map<string, (typeof entries)[number]>();
   for (const entry of entries) {
     const previous = latest.get(entry.bookId);
-    if (!previous || entry.savedAt > previous.savedAt) latest.set(entry.bookId, entry);
+    if (local || !previous || entry.savedAt > previous.savedAt) latest.set(entry.bookId, entry);
   }
   for (const entry of latest.values()) {
     const key = readingPositionKey(entry.bookId);
     const request = store.get(key);
     request.onsuccess = () => {
       const previous = request.result;
-      if (validPosition(previous) && previous.savedAt >= entry.savedAt) return;
-      store.put(
-        {
-          position: entry.position,
+      if (!local && validPosition(previous) && previous.savedAt >= entry.savedAt) return;
+      const book = transaction.objectStore(BOOK_STORE).get(entry.bookId);
+      book.onsuccess = () => {
+        if (!book.result) return;
+        const savedAt = local && validPosition(previous) ? Math.max(entry.savedAt, previous.savedAt + 1) : entry.savedAt;
+        const value: StoredReadingPosition = {
+          position: { ...entry.position, updatedAt: savedAt },
           lastOpenedAt: entry.lastOpenedAt,
-          savedAt: entry.savedAt,
-        } satisfies StoredReadingPosition,
-        key
-      );
+          savedAt,
+        };
+        store.put(value, key);
+        const { readingPosition: _legacyPosition, ...meta } = book.result as BookMeta;
+        if ((book.result as BookMeta).readingPosition) transaction.objectStore(BOOK_STORE).put(meta);
+        saved.push({ bookId: entry.bookId, ...value });
+        if ((book.result as BookMeta).format !== "demo") {
+          queueProgress(transaction, "positions", entry.bookId, JSON.stringify(value), savedAt, bootstrap);
+        }
+      };
     };
   }
   await transactionDone(transaction);
+  for (const entry of saved) rememberReadingBackup(entry.bookId, JSON.stringify(entry));
+  if (saved.length) notifyProgressPending();
+  return saved;
 }
 
 /** 图片可先于正文重试落库；一张失败的插图不应阻塞整本书的同步。 */
@@ -817,7 +1110,7 @@ export async function saveImportedBook(book: Book, images: BookImage[]): Promise
 /** Sync download must not replace a book imported or edited while the network request was running. */
 export async function saveImportedBookIfMissing(book: Book, images: BookImage[]): Promise<boolean> {
   const db = await openDatabase();
-  const transaction = db.transaction([BOOK_STORE, CONTENT_STORE, IMAGE_STORE, SETTINGS_STORE], "readwrite");
+  const transaction = db.transaction([BOOK_STORE, CONTENT_STORE, IMAGE_STORE, SETTINGS_STORE, PROGRESS_STORE], "readwrite");
   const books = transaction.objectStore(BOOK_STORE);
   const settings = transaction.objectStore(SETTINGS_STORE);
   let saved = false;
@@ -828,6 +1121,11 @@ export async function saveImportedBookIfMissing(book: Book, images: BookImage[])
   const commitIfCurrent = () => {
     if (!bookRead || !stateRead || current || tombstoneAt >= Math.max(book.updatedAt, book.syncReadyAt ?? 0)) return;
     putBook(transaction, book);
+    const listening = transaction.objectStore(PROGRESS_STORE).get(progressId("listening", book.id));
+    listening.onsuccess = () => {
+      const progress = listening.result as QueuedProgress | undefined;
+      if (progress) writeProgressValue(transaction, "listening", book.id, progress.data);
+    };
     for (const image of images) transaction.objectStore(IMAGE_STORE).put(image);
     saved = true;
   };
@@ -1151,6 +1449,7 @@ export async function clearLibrary(): Promise<void> {
       IMAGE_STORE,
       CHAT_STORE,
       SESSION_STORE,
+      PROGRESS_STORE,
     ],
     "readwrite"
   );
@@ -1161,5 +1460,6 @@ export async function clearLibrary(): Promise<void> {
   transaction.objectStore(IMAGE_STORE).clear();
   transaction.objectStore(CHAT_STORE).clear();
   transaction.objectStore(SESSION_STORE).clear();
+  transaction.objectStore(PROGRESS_STORE).clear();
   await transactionDone(transaction);
 }

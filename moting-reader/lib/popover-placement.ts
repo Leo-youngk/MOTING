@@ -106,11 +106,15 @@ export function anchorFromRects(
   return visible ?? union;
 }
 
+/** 摆在选区下方时离末行多远：末行底下挂着终点手柄的小圆球，菜单不能压住它。 */
+const BELOW_SELECTION_GAP = 22;
+
 /**
  * 给一整片选区摆菜单。
  *
- * 不能只拿选区顶端当锚点：顶端上方放不下时会翻到下方，而「下方」是相对顶端那一行说的，
- * 菜单正好压在选中的第二、三行正文上。所以翻到下方时改用选区底端重新摆一次。
+ * 先摆在选区下方（用户定的：菜单在上面会挡住正在读的上文），以末行为锚点，
+ * 留出终点手柄的位置；下方放不下才翻到上方，这时改用首行当锚点，
+ * 否则「上方」是相对末行说的，菜单会压在选中的前几行正文上。
  */
 export function placeForSelection(input: {
   rects: Rect[];
@@ -126,17 +130,17 @@ export function placeForSelection(input: {
     insets: input.insets,
   };
 
-  const top = anchorFromRects(input.rects, input.union, input.viewport, input.insets);
-  const above = placePopover({ anchor: top, ...shared });
-  if (above.side === "above") return above;
-
   const bottom = anchorFromRects(
     [...input.rects].reverse(),
     input.union,
     input.viewport,
     input.insets
   );
-  return placePopover({ anchor: bottom, prefer: "below", ...shared });
+  const below = placePopover({ anchor: bottom, prefer: "below", gap: BELOW_SELECTION_GAP, ...shared });
+  if (below.side === "below") return below;
+
+  const top = anchorFromRects(input.rects, input.union, input.viewport, input.insets);
+  return placePopover({ anchor: top, prefer: "above", ...shared });
 }
 
 /**

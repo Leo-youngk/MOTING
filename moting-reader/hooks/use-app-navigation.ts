@@ -51,6 +51,13 @@ function keepsScroll(view: AppView): boolean {
   return view.name !== "reader" && view.name !== "player";
 }
 
+/** 这条历史是不是应用自己压的（navigate / replace 写进去的都带 view）。 */
+function isAppEntry(state: unknown): boolean {
+  return !!state && typeof state === "object" && "view" in state;
+}
+
+type RscNavigate = (href: string, redirectDepth?: number, kind?: string, ...rest: unknown[]) => Promise<void>;
+
 function readSaved(): AppView | null {
   try {
     const raw = window.localStorage.getItem(VIEW_KEY);
@@ -157,6 +164,24 @@ export function useAppNavigation(): AppNavigation {
     window.history.scrollRestoration = "manual";
     return () => {
       window.history.scrollRestoration = previous;
+    };
+  }, []);
+
+  // vinext 的 App Router 也监听 popstate，每次后退都向服务器再要一遍 "/" 的 RSC；
+  // 取不到（离线、弱网、Worker 回 5xx）就 location.href 整页重载——读完书点返回，
+  // 书库先白屏再重新开机。应用自己压的历史条目 URL 全是 "/"，没有服务端内容要换，
+  // 这类后退不交给它。它在事件发生时才读 window.__VINEXT_RSC_NAVIGATE__，换掉这个入口就够了。
+  useEffect(() => {
+    const host = window as unknown as { __VINEXT_RSC_NAVIGATE__?: RscNavigate };
+    const original = host.__VINEXT_RSC_NAVIGATE__;
+    if (typeof original !== "function") return;
+    const navigateRsc: RscNavigate = (href, redirectDepth, kind, ...rest) =>
+      kind === "traverse" && isAppEntry(window.history.state)
+        ? Promise.resolve()
+        : original(href, redirectDepth, kind, ...rest);
+    host.__VINEXT_RSC_NAVIGATE__ = navigateRsc;
+    return () => {
+      if (host.__VINEXT_RSC_NAVIGATE__ === navigateRsc) host.__VINEXT_RSC_NAVIGATE__ = original;
     };
   }, []);
 

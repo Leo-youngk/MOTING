@@ -9,6 +9,7 @@ const configPath = new URL("../dist/server/wrangler.json", import.meta.url);
 const config = JSON.parse(await readFile(configPath, "utf8"));
 delete config.d1_databases;
 delete config.r2_buckets;
+delete config.queues;
 config.vars = { ...config.vars, SYNC_UPSTREAM: UPSTREAM };
 await writeFile(configPath, JSON.stringify(config, null, 2) + "\n", "utf8");
 console.log(`Legacy config written: sync upstream = ${UPSTREAM}`);

@@ -1,0 +1,185 @@
+{
+  "audit_date": "2026-09-30",
+  "timezone": "Asia/Shanghai",
+  "baseline_commit": "1b050d6",
+  "scope": "生产只读检查；本地隔离诊断；业务代码未修改",
+  "production": {
+    "workers": {
+      "primary": {
+        "url": "https://moting-reader.if5v.workers.dev",
+        "deployed_at_utc": "2026-09-29T08:30:33.146202Z",
+        "version_id": "75090954-9422-4ff7-bb57-054358bc55b6",
+        "handlers": [
+          "queue",
+          "fetch"
+        ]
+      },
+      "legacy": {
+        "url": "https://moting-reader.yk2958374240.workers.dev",
+        "deployed_at_utc": "2026-09-23T03:48:30.075988Z",
+        "version_id": "68edad77-d5a9-4081-8224-964c73c487f9",
+        "handlers": [
+          "fetch"
+        ]
+      }
+    },
+    "deployed_source": {
+      "primary": {
+        "bytes": 4658648,
+        "sha256": "bfa6b4ee1ee4522ea638ec34b1251d16e2df0108d3a3adbbdcbd50be8f0f0e7b",
+        "markers": {
+          "sync_push_progress_failed": true,
+          "另一台设备读到了": true,
+          "听读同步": true,
+          "moting-reader-sync": true,
+          "sync_push_rejected": true,
+          "pendingImages": true,
+          "pendingPush": true
+        }
+      },
+      "legacy": {
+        "bytes": 4421336,
+        "sha256": "6a0bf8eafc3731de9cd071f4beccb13c049ce9b9482069b1312d1b1abe02b441",
+        "markers": {
+          "sync_push_progress_failed": false,
+          "另一台设备读到了": false,
+          "听读同步": false,
+          "moting-reader-sync": false,
+          "sync_push_rejected": true,
+          "pendingImages": false,
+          "pendingPush": false
+        }
+      }
+    },
+    "database": {
+      "name": "moting-sync",
+      "file_size": 3219456,
+      "running_in_region": "WNAM",
+      "read_replication": {
+        "mode": "disabled"
+      }
+    },
+    "counts": {
+      "books": 37,
+      "positions": 24,
+      "listening": 18,
+      "notes": 241,
+      "sessions": 208,
+      "settings": 2,
+      "chats": 17,
+      "patches": 20
+    },
+    "latest_reading": {
+      "saved_at_cn": "2026-09-30T18:10:52+08:00",
+      "received_at_cn": "2026-09-30T18:11:30+08:00",
+      "client_to_server_seconds": 37.372,
+      "caveat": "时间差可能包含离线等待和设备时钟偏差，不是严格网络时延"
+    },
+    "telemetry_sample": {
+      "from_cn": "2026-09-29T18:51:00+08:00",
+      "to_cn": "2026-09-30T18:51:00+08:00",
+      "returned_events": 33,
+      "http_status_counts": {
+        "200": 33
+      },
+      "device_counts": {
+        "iPhone": 33
+      },
+      "caveat": "样本 HTTP 200 不证明逐条进度最新或已被另一端应用；未取得用户电脑实际入口"
+    },
+    "direct_site_access": {
+      "primary": {
+        "url": "https://moting-reader.if5v.workers.dev",
+        "error_type": "HTTPError",
+        "http_status": 403,
+        "failed_path": ""
+      },
+      "legacy": {
+        "url": "https://moting-reader.yk2958374240.workers.dev",
+        "error_type": "HTTPError",
+        "http_status": 403,
+        "failed_path": ""
+      }
+    }
+  },
+  "engine_reproductions": {
+    "delayed_reading_flush": {
+      "local_sentence": 4,
+      "savedAt": 1790766294631,
+      "pushedAt": 1790766294651,
+      "skipped_by_watermark": true,
+      "appears_in_next_push": false,
+      "peer_sentence": 1
+    },
+    "delayed_listening_flush": {
+      "local_sentence": 5,
+      "updatedAt": 1790766294771,
+      "pushedAt": 1790766294793,
+      "skipped_by_watermark": true,
+      "appears_in_next_push": false,
+      "peer_sentence": null
+    },
+    "listening_overwrite_after_pull": {
+      "remote_before": 8,
+      "stale_after": 2,
+      "after_next_sync": 2,
+      "old_timestamp_overwrote_new": true
+    },
+    "clock_rollback": {
+      "captured_at": 1790765695026,
+      "pushedAt": 1790766294994,
+      "attempted_sentence": 7,
+      "stored_sentence": 4,
+      "appears_in_next_push": false
+    },
+    "partial_success_state": {
+      "failedContent": [],
+      "skipped": 0,
+      "pendingContent": 1,
+      "reports_completed": true,
+      "book_still_not_ready": true
+    }
+  },
+  "ui_reproductions": {
+    "retry_suppressed_after_failure": {
+      "pulls_before_online": 2,
+      "pulls_after_online": 2,
+      "still_shows_failure": true
+    },
+    "actual_reading_flush_watermark": {
+      "sentence": 45,
+      "savedAt": 1790765923319,
+      "pushedAt": 1790765923333,
+      "appears_in_next_push": false
+    },
+    "continuous_reading_starves_debounce": {
+      "duration_seconds": 40.08,
+      "requests": [],
+      "push_count": 0,
+      "pull_count": 0
+    }
+  },
+  "boot_recovery_reproduction": {
+    "session_requests_at_boot": [
+      "session"
+    ],
+    "requests_after_online": [],
+    "login_form_still_shown": true,
+    "server_session_connected": true
+  },
+  "existing_validation": {
+    "typecheck": "passed",
+    "sync_unit_tests": {
+      "passed": 35,
+      "failed": 0
+    },
+    "sync_browser": "passed: 3 个上下文，651 条划线，分页、删除、升级、封面和续传",
+    "sync_timing_browser": "passed: 离开前台推送，回前台拉取，远端提示与跳转"
+  },
+  "limits": [
+    "新增诊断返回观测值，退出码 0 不是功能通过",
+    "线上首页从审计环境访问返回 403，未直接验证生产 UI",
+    "使用 Edge/Chromium 移动尺寸模拟，未在真实 iPhone 上验证锁屏冻结和原生音频",
+    "历史听书长时间差在 9 月 29 日修复前，不作为当前版本同等延迟的证明"
+  ]
+}

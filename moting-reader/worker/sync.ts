@@ -1,14 +1,24 @@
+import { handleAudioStream } from "./audio-stream.ts";
+import { APP_BUILD, SYNC_PROTOCOL } from "../lib/build-info.ts";
+import { handleLiveHls } from "./live-hls.ts";
+import { handleHls } from "./hls.ts";
+import { synthesizeSpeech } from "./edge-tts.ts";
 // 云端同步服务端:登录会话 + 记录级 LWW 增量同步 + R2 正文/插图存取。
 // 合并语义:所有记录按客户端声明的 updated_at 比较,新者胜;删除走墓碑。
 // 没有任何「整库覆盖」路径——手机首次同步是上传,另一台设备首次同步是拉取合并。
 // 持久化经注入的 SyncStore(生产 createD1Store,测试内存实现),R2 经 env.BOOKS_BUCKET。
 import { createD1Store, D1_PARAM_BYTES, packedRowBytes, type PushRow, type SyncRow, type SyncStore, type SyncTable } from "./sync-store.ts";
 
+import { INLINE_RECORD_BYTES, MAX_RECORD_BYTES, STORED_BLOB_PREFIX, isRecordBlob, storedBlob,
+  recordHash, recordObjectKey, utf8Bytes, type RecordIssue, type RecordReceipt } from "../lib/sync-record.ts";
+import type { ProgressReceipt } from "../lib/sync-progress.ts";
+
 type Json = Record<string, unknown>;
 
 export interface SyncEnv {
   DB?: D1Database;
   BOOKS_BUCKET?: R2Bucket;
+  AUDIO_QUEUE?: Queue<import("./live-hls.ts").LiveHlsJob>;
   SYNC_USERNAME?: string;
   SYNC_PASSWORD?: string;
   /** 测试注入;缺省时由 env.DB 生成 D1 store。 */
@@ -64,17 +74,31 @@ async function sha256Hex(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function readBody(request: Request, limit: number): Promise<Json> {
-  const contentLength = Number(request.headers.get("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > limit) throw new SyncError("请求数据过大", 413);
-  const text = await request.text();
-  if (text.length > limit) throw new SyncError("请求数据过大", 413);
-  let parsed: unknown;
+async function readLimitedText(request: Request, limit: number): Promise<string> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) throw new SyncError("请求数据过大", 413);
+  const reader = request.body?.getReader();
+  if (!reader) return "";
+  const parts: string[] = [];
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let bytes = 0;
   try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new SyncError("请求数据无效", 400);
-  }
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > limit) { await reader.cancel(); throw new SyncError("请求数据过大", 413); }
+      parts.push(decoder.decode(value, { stream: true }));
+    }
+    parts.push(decoder.decode());
+  } finally { reader.releaseLock(); }
+  return parts.join("");
+}
+
+async function readBody(request: Request, limit: number): Promise<Json> {
+  const text = await readLimitedText(request, limit);
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { throw new SyncError("请求数据无效", 400); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new SyncError("请求数据格式不对", 400);
   return parsed as Json;
 }
@@ -159,7 +183,9 @@ function parsePushItem(raw: unknown, config: (typeof TABLES)[string], now: numbe
   const key = typeof item.key === "string" ? item.key : "";
   if (!key || !config.keyPattern.test(key)) throw new SyncError("记录键无效");
   const updatedAt = Number(item.updatedAt);
-  if (!Number.isInteger(updatedAt) || updatedAt <= 0 || updatedAt > now + MAX_CLOCK_SKEW_MS) {
+  const isProgress = config.table === "positions" || config.table === "listening";
+  const modern = isProgress && typeof item.mutationId === "string";
+  if (!Number.isSafeInteger(updatedAt) || updatedAt <= 0 || (!modern && updatedAt > now + MAX_CLOCK_SKEW_MS)) {
     throw new SyncError("记录时间戳无效");
   }
   let deletedAt: number | null = null;
@@ -178,57 +204,147 @@ function parsePushItem(raw: unknown, config: (typeof TABLES)[string], now: numbe
     if (!rawBookId || !SYNC_KEY_PATTERN.test(rawBookId)) throw new SyncError("记录缺少有效的书籍编号");
     bookId = rawBookId;
   }
+  if (modern) {
+    if (!TOKEN_PATTERN.test(String(item.mutationId)) || !Number.isSafeInteger(item.baseServerRev) || Number(item.baseServerRev) < 0) {
+      throw new SyncError("进度确认版本无效");
+    }
+    let value: Json;
+    try { value = JSON.parse(data) as Json; } catch { throw new SyncError("进度内容无效"); }
+    const position = config.table === "positions" ? value?.position as Json : value;
+    if (!position || typeof position.sentenceId !== "string" || typeof position.chapterId !== "string" ||
+        !Number.isInteger(position.chapterIndex) || Number(position.chapterIndex) < 0 ||
+        !Number.isInteger(position.sentenceIndex) || Number(position.sentenceIndex) < 0 ||
+        typeof position.percent !== "number" || !Number.isFinite(position.percent) ||
+        typeof position.updatedAt !== "number" || !Number.isFinite(position.updatedAt)) {
+      throw new SyncError("进度位置无效");
+    }
+    if (config.table === "positions" && (!Number.isFinite(value.savedAt) || !Number.isFinite(value.lastOpenedAt))) {
+      throw new SyncError("阅读位置无效");
+    }
+  }
   return {
     table: config.table,
-    row: { key, data, updatedAt, deletedAt: config.tombstones ? deletedAt : null, bookId },
+    row: { key, data, updatedAt, deletedAt: config.tombstones ? deletedAt : null, bookId,
+      ...(modern ? { mutationId: String(item.mutationId), baseServerRev: Number(item.baseServerRev), bootstrap: item.bootstrap === true } : {}) },
   };
 }
 
-async function handlePush(request: Request, { store }: Resolved): Promise<Response> {
+async function handlePush(request: Request, { store, bucket }: Resolved): Promise<Response> {
   const session = await checkSession(request, store);
   if (!session.ok) return json({ error: "请先登录同步账号" }, 401);
   const now = Date.now();
   const body = await readBody(request, PUSH_BODY_LIMIT);
+  let count = 0;
+  for (const name of Object.keys(TABLES)) {
+    const list = body[name];
+    if (list === undefined || list === null) continue;
+    if (!Array.isArray(list) || list.length > PUSH_ITEM_LIMIT) throw new SyncError(`${name} 记录数无效`);
+    count += list.length;
+  }
+  if (count > PUSH_ITEM_LIMIT) throw new SyncError("单次上传记录过多");
 
   const accepted: ParsedPush[] = [];
   const tooLarge: Record<string, string[]> = {};
   const rejected: Record<string, string[]> = {};
+  const issues: RecordIssue[] = [];
   for (const [name, config] of Object.entries(TABLES)) {
-    const list = body[name];
-    if (list === undefined || list === null) continue;
-    if (!Array.isArray(list) || list.length > PUSH_ITEM_LIMIT) throw new SyncError(`${name} 记录数无效`);
-    for (const raw of list) {
-      let parsed: ParsedPush;
+    for (const raw of (body[name] ?? []) as unknown[]) {
+      let bytes = 0;
       try {
-        parsed = parsePushItem(raw, config, now);
+        const item = raw && typeof raw === "object" ? raw as Json : {};
+        const progress = name === "positions" || name === "listening";
+        const blob = item.blob;
+        if (blob !== undefined && (progress || !isRecordBlob(blob))) throw new SyncError("大记录引用无效");
+        // 引用使用非 JSON 前缀，用户提交的 JSON 正文无法伪装成存储指针。
+        const prepared = isRecordBlob(blob) ? { ...item, data: STORED_BLOB_PREFIX + JSON.stringify(blob) } : raw;
+        const parsed = parsePushItem(prepared, config, now);
+        const { row } = parsed;
+        if (!row.deletedAt) {
+          if (isRecordBlob(blob)) {
+            bytes = blob.bytes;
+            const object = await bucket.head(recordObjectKey(name, row.key, blob.hash));
+            if (!object || object.size !== blob.bytes) throw new SyncError("大记录正文尚未上传完成", 503);
+          } else {
+            bytes = utf8Bytes(row.data);
+            if (bytes > MAX_RECORD_BYTES) throw new SyncError("单条记录超过 32 MB 同步上限", 413);
+            try { JSON.parse(row.data); } catch { throw new SyncError("记录内容不是有效的 JSON"); }
+            const packed = packedRowBytes({ i: 0, k: row.key, d: row.data, u: row.updatedAt, x: row.deletedAt, b: row.bookId });
+            if (progress && packed > D1_PARAM_BYTES - 2) throw new SyncError("进度记录过大，请重新定位后同步", 413);
+            if (!progress && (bytes > INLINE_RECORD_BYTES || packed > D1_PARAM_BYTES - 2)) {
+              const hash = await recordHash(row.data);
+              const objectKey = recordObjectKey(name, row.key, hash);
+              if (!(await bucket.head(objectKey))) await bucket.put(objectKey, row.data, {
+                httpMetadata: { contentType: "application/json" },
+              });
+              row.data = STORED_BLOB_PREFIX + JSON.stringify({ hash, bytes });
+              console.info("sync_record_offloaded", { kind: name, key: row.key, bytes });
+            }
+          }
+        }
+        accepted.push(parsed);
       } catch (error) {
-        if (!(error instanceof SyncError)) throw error;
-        const key = raw && typeof raw === "object" && typeof (raw as Json).key === "string" ? String((raw as Json).key).slice(0, 64) : "";
-        (rejected[name] ??= []).push(key);
-        continue;
+        const item = raw && typeof raw === "object" ? raw as Json : {};
+        const key = typeof item.key === "string" ? item.key.slice(0, 64) : "";
+        const status = error instanceof SyncError ? error.status : 503;
+        const reason = error instanceof SyncError ? error.message : "大记录存储暂时失败，稍后自动重试";
+        const code = status === 413 ? "record_too_large" : status >= 500 ? "storage_unavailable" : "invalid_record";
+        (status === 413 ? tooLarge : rejected)[name] ??= [];
+        (status === 413 ? tooLarge : rejected)[name].push(key);
+        const issue: RecordIssue = { kind: name as RecordIssue["kind"], key, updatedAt: Number(item.updatedAt) || 0,
+          code, reason, bytes, retryable: status >= 500 };
+        issues.push(issue);
+        console.warn("sync_push_issue", { kind: name, key, code, bytes, retryable: issue.retryable });
       }
-      const { row } = parsed;
-      // D1 单个参数/单行上限 2 MB:超了的记录跳过并回报,其余照常入库。
-      const bytes = packedRowBytes({ i: 0, k: row.key, d: row.data, u: row.updatedAt, x: row.deletedAt, b: row.bookId });
-      if (bytes > D1_PARAM_BYTES - 2) {
-        (tooLarge[name] ??= []).push(row.key);
-        continue;
-      }
-      accepted.push(parsed);
     }
   }
-  if (accepted.length > PUSH_ITEM_LIMIT) throw new SyncError("单次上传记录过多");
-  await store.applyPush(accepted);
-  const skipped = Object.values(rejected).reduce((sum, keys) => sum + keys.length, 0);
-  if (skipped) console.warn("sync_push_rejected", { count: skipped });
-  return json({ tooLarge, rejected }, 200, session.cookie);
+  // 先持久化不可变 R2 对象，再提交 D1 引用。D1 失败时只留下可幂等复用的对象。
+  const allReceipts = await store.applyPush(accepted);
+  const receipts = allReceipts.filter((receipt): receipt is ProgressReceipt => receipt.kind === "positions" || receipt.kind === "listening");
+  const recordReceipts = allReceipts.filter((receipt): receipt is RecordReceipt => receipt.kind !== "positions" && receipt.kind !== "listening");
+  if (receipts.some((receipt) => receipt.status === "upgrade")) {
+    return json({ error: "同步协议已升级，请更新应用后重试；本机进度仍保留", upgradeRequired: true }, 426, session.cookie);
+  }
+  for (const receipt of recordReceipts) {
+    const sent = accepted.find((entry) => entry.table === receipt.kind && entry.row.key === receipt.key && entry.row.updatedAt === receipt.updatedAt);
+    const blob = sent ? storedBlob(sent.row.data) : null;
+    if (blob) console.info("sync_record_confirmed", { kind: receipt.kind, key: receipt.key,
+      status: receipt.status, bytes: blob.bytes, serverAt: receipt.serverAt });
+  }
+  return json({ tooLarge, rejected, receipts, recordReceipts, issues }, 200, session.cookie);
+}
+
+async function handleRecord(request: Request, { store, bucket }: Resolved, kind: string, key: string, hash: string): Promise<Response> {
+  const session = await checkSession(request, store);
+  if (!session.ok) return json({ error: "请先登录同步账号" }, 401);
+  const config = TABLES[kind];
+  if (!config || kind === "positions" || kind === "listening" || !config.keyPattern.test(key) || !/^[a-f0-9]{64}$/.test(hash)) {
+    throw new SyncError("记录地址无效");
+  }
+  const objectKey = recordObjectKey(kind, key, hash);
+  const headers: Record<string, string> = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
+  if (session.cookie) headers["set-cookie"] = session.cookie;
+  if (request.method === "HEAD") {
+    const object = await bucket.head(objectKey);
+    return new Response(null, { status: object ? 200 : 404, headers: { ...headers, "x-record-bytes": String(object?.size ?? 0) } });
+  }
+  if (request.method === "GET") {
+    const object = await bucket.get(objectKey);
+    if (!object) throw new SyncError("大记录正文暂时不可用，稍后自动重试", 503);
+    if (object.size > MAX_RECORD_BYTES) throw new SyncError("大记录正文超过上限", 413);
+    return new Response(object.body, { headers: { ...headers, "content-type": "application/json" } });
+  }
+  const data = await readLimitedText(request, MAX_RECORD_BYTES);
+  try { JSON.parse(data); } catch { throw new SyncError("记录内容不是有效的 JSON"); }
+  if (await recordHash(data) !== hash) throw new SyncError("记录内容校验失败");
+  if (!(await bucket.head(objectKey))) await bucket.put(objectKey, data, { httpMetadata: { contentType: "application/json" } });
+  return json({ stored: true, hash, bytes: utf8Bytes(data) }, 200, session.cookie);
 }
 
 /**
  * 增量拉取,跨表按 server_at 统一分页。先固定一个已提交上界，再查询每张表；
  * 并发写入会落在这个上界之后，不能在某张表已查完后插进本页并被游标越过。
  */
-async function handlePull(request: Request, { store }: Resolved): Promise<Response> {
+async function handlePull(request: Request, { store, bucket }: Resolved): Promise<Response> {
   const session = await checkSession(request, store);
   if (!session.ok) return json({ error: "请先登录同步账号" }, 401);
   const body = await readBody(request, 4096);
@@ -238,6 +354,7 @@ async function handlePull(request: Request, { store }: Resolved): Promise<Respon
 
   const candidates: Array<{ name: string; row: SyncRow }> = [];
   for (const [name, config] of Object.entries(TABLES)) {
+    if (body.progressOnly === true && name !== "positions" && name !== "listening") continue;
     for (const row of await store.since(config.table, since, through, PULL_PAGE_ROWS + 1)) candidates.push({ name, row });
   }
   candidates.sort((a, b) => a.row.serverAt - b.row.serverAt);
@@ -248,25 +365,35 @@ async function handlePull(request: Request, { store }: Resolved): Promise<Respon
   let bytes = 0;
   let cursor = since;
   for (const { name, row } of candidates) {
-    if (taken >= PULL_PAGE_ROWS || (taken > 0 && bytes + row.data.length > PULL_PAGE_BYTES)) break;
-    let data: unknown = null;
-    if (row.data) {
-      try {
-        data = JSON.parse(row.data);
-      } catch {
-        data = null;
-      }
-    }
-    const item: Json = { key: row.key, updatedAt: row.updatedAt };
-    if (data !== null) item.data = data;
+    if (taken >= PULL_PAGE_ROWS) break;
+    const blob = storedBlob(row.data);
+    // 引用页也按展开后的体积限额，接收端不会一次解开数百个大正文。
+    if (taken > 0 && bytes + (blob?.bytes ?? utf8Bytes(row.data)) > PULL_PAGE_BYTES) break;
+    const item: Json = { key: row.key, updatedAt: row.updatedAt, serverAt: row.serverAt };
+    if (row.mutationId) item.mutationId = row.mutationId;
     if (row.deletedAt) item.deletedAt = row.deletedAt;
+    if (blob && body.recordBlobs === true) item.blob = blob;
+    else if (row.data) {
+      let text = row.data;
+      if (blob) {
+        if (taken > 0 && bytes + blob.bytes > PULL_PAGE_BYTES) break;
+        const object = await bucket.get(recordObjectKey(name, row.key, blob.hash));
+        if (!object || object.size !== blob.bytes) throw new SyncError("大记录正文暂时不可用，稍后自动重试", 503);
+        text = await new Response(object.body).text();
+        if (await recordHash(text) !== blob.hash) throw new SyncError("大记录正文校验失败", 503);
+      }
+      try { item.data = JSON.parse(text); }
+      catch { throw new SyncError("云端记录内容异常，请稍后重试", 503); }
+    }
+    const itemBytes = utf8Bytes(JSON.stringify(item));
+    if (taken > 0 && bytes + itemBytes > PULL_PAGE_BYTES) break;
     (result[name] as Json[]).push(item);
     taken += 1;
-    bytes += row.data.length;
+    bytes += Math.max(itemBytes, blob?.bytes ?? 0);
     cursor = row.serverAt + 1;
   }
-  result.cursor = cursor;
   result.hasMore = taken < candidates.length;
+  result.cursor = result.hasMore ? cursor : Math.max(cursor, through + 1);
   return json(result, 200, session.cookie);
 }
 
@@ -350,7 +477,7 @@ async function handleBookImage(
   return json({ error: "只支持 GET、HEAD 或 POST 请求" }, 405);
 }
 
-export async function handleSync(request: Request, env: SyncEnv): Promise<Response> {
+export async function handleSync(request: Request, env: SyncEnv, ctx?: ExecutionContext): Promise<Response> {
   try {
     if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "POST") {
       return json({ error: "只支持 GET、HEAD 或 POST 请求" }, 405);
@@ -370,18 +497,46 @@ export async function handleSync(request: Request, env: SyncEnv): Promise<Respon
       }
       if (!resolved) return json({ connected: false, enabled: false });
       const session = await checkSession(request, resolved.store);
-      return json({ connected: session.ok, enabled: true }, 200, session.cookie);
+      return json({ connected: session.ok, enabled: true, protocol: SYNC_PROTOCOL, build: APP_BUILD, backend: "moting-sync" }, 200, session.cookie);
     }
 
     const resolved = resolve(env);
+    if (request.method === "GET" && action === "version") {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先登录同步账号" }, 401);
+      return json({ version: await resolved.store.latestServerAt(), protocol: SYNC_PROTOCOL, build: APP_BUILD }, 200, session.cookie);
+    }
     if (request.method === "POST" && action === "login") return await handleLogin(request, env, resolved);
     if (request.method === "POST" && action === "logout") {
       const token = sessionToken(request);
       if (TOKEN_PATTERN.test(token)) await resolved.store.dropSession(await sha256Hex(token));
       return json({ connected: false }, 200, sessionCookie(request, "", 0));
     }
+    if (action.startsWith("audio-stream/")) {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先在设置里登录云端同步" }, 401);
+      const response = await handleAudioStream(request, resolved.bucket, ctx);
+      if (session.cookie) response.headers.set("set-cookie", session.cookie);
+      return response;
+    }
+    if (action.startsWith("live/")) {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先在设置里登录云端同步" }, 401);
+      const response = await handleLiveHls(request, resolved.bucket, env.AUDIO_QUEUE, ctx, env.DB);
+      if (session.cookie) response.headers.set("set-cookie", session.cookie);
+      return response;
+    }
+    if (action.startsWith("hls/")) {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先在设置里登录云端同步，再准备 HLS 音频" }, 401);
+      const response = await handleHls(request, resolved.bucket, synthesizeSpeech);
+      if (session.cookie) response.headers.set("set-cookie", session.cookie);
+      return response;
+    }
     if (request.method === "POST" && action === "push") return await handlePush(request, resolved);
     if (request.method === "POST" && action === "pull") return await handlePull(request, resolved);
+    const recordMatch = /^record\/([^/]+)\/([^/]+)\/([a-f0-9]{64})$/.exec(action);
+    if (recordMatch) return await handleRecord(request, resolved, recordMatch[1], decodeURIComponent(recordMatch[2]), recordMatch[3]);
     const contentMatch = /^book\/([^/]+)\/content$/.exec(action);
     if (contentMatch) return await handleBookContent(request, resolved, decodeURIComponent(contentMatch[1]));
     const imageMatch = /^book\/([^/]+)\/images\/([^/]+)$/.exec(action);

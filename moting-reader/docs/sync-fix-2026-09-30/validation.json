@@ -1,0 +1,56 @@
+{
+  "unit": {
+    "passed": 224,
+    "failed": 0
+  },
+  "typecheck": "passed",
+  "eslint_changed_files": "passed",
+  "browser": {
+    "library": {
+      "passed": 20
+    },
+    "progress": {
+      "late_write_queued": true,
+      "late_write_reaches_peer": true,
+      "stale_listening_does_not_roll_back": true,
+      "new_progress_survives_old_ack": true,
+      "duplicate_mutation_is_idempotent": true,
+      "new_progress_eventually_reaches_peer": true,
+      "clock_rollback_preserves_new_progress": true,
+      "concurrent_candidates_preserved": true,
+      "explicit_rereading_can_move_backwards": true,
+      "legacy_client_cannot_bypass_confirmation": true,
+      "offline_queue_survives_page_close": true,
+      "offline_queue_reaches_peer_after_reopen": true,
+      "progress_not_blocked_by_resource_request": true,
+      "resource_failure_reported_as_pending": true,
+      "embedded_legacy_position_cannot_revive": true,
+      "invalid_progress_is_reported": true,
+      "invalid_progress_does_not_block_pull": true,
+      "new_reading_replaces_invalid_progress": true,
+      "deleted_book_ignores_delayed_position": true
+    },
+    "ui": {
+      "network_recovery_retries": true,
+      "latest_reading_uploaded": true,
+      "continuous_reading_syncs": true
+    },
+    "boot": {
+      "boot_session_rechecked": true,
+      "valid_cookie_reconnects": true
+    },
+    "timing": {
+      "passed": 7
+    },
+    "storage_v4_to_v6": {
+      "passed": 10
+    }
+  },
+  "browser_checks_passed": 61,
+  "continuous_reading": {
+    "seconds": 40.1,
+    "pushes": 8,
+    "pulls": 8
+  },
+  "production_test_data_written": false
+}

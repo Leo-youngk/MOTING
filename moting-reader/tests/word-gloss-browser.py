@@ -173,9 +173,8 @@ def set_english_mode(page, cdp, on):
 
 
 def inline_starters(page, cdp, word):
-    """长按选词 → 更多 → 问 AI，读出正文批注里的建议提问，再收起批注。"""
+    """长按选词 → 问 AI，读出正文批注里的建议提问，再收起批注。"""
     long_press(page, cdp, word_point(page, word))
-    page.get_by_role("button", name="更多", exact=True).click()
     page.get_by_role("button", name="问 AI", exact=True).click()
     starters = page.locator(".ai-inline__starter")
     expect(starters.first).to_be_visible()

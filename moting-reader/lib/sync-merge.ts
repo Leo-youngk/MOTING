@@ -1,18 +1,26 @@
+import { utf8Bytes, type RecordBlob } from "./sync-record.ts";
 // 云端同步的纯合并逻辑:记录级 LWW、push 收集后的分批。只依赖类型(编译期擦除),
 // 因此能被 node --experimental-strip-types 直接跑,不经 IndexedDB。
 export interface SyncRecord {
   key: string;
   data?: unknown;
   updatedAt: number;
+  blob?: RecordBlob;
   deletedAt?: number;
+  serverAt?: number;
+  mutationId?: string;
 }
 
 export interface PushItem {
   key: string;
   data: string;
   updatedAt: number;
+  blob?: RecordBlob;
   deletedAt?: number;
   bookId?: string;
+  mutationId?: string;
+  baseServerRev?: number;
+  bootstrap?: boolean;
 }
 
 export interface PushPayload {
@@ -71,16 +79,16 @@ export function splitPayload(
   const batches: PushPayload[] = [];
   let current: PushPayload = {};
   let count = 0;
-  let bytes = 0;
+  let bytes = 32;
   for (const [name, list] of Object.entries(payload) as Array<[keyof PushPayload, PushItem[] | undefined]>) {
     if (!list) continue;
     for (const item of list) {
-      const size = item.data.length + item.key.length + 64;
+      const size = utf8Bytes(JSON.stringify(item)) + name.length + 16;
       if (count && (count >= limit || bytes + size > byteLimit)) {
         batches.push(current);
         current = {};
         count = 0;
-        bytes = 0;
+        bytes = 32;
       }
       (current[name] ??= []).push(item);
       count += 1;

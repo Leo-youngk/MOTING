@@ -335,7 +335,6 @@ img {
     .toast__undo,
     .zen-log__all,
     .ai-ask__reasoning-toggle,
-    .reader-popover__back,
     .toc__close,
     .section-link,
     .bottom-nav button,
@@ -4037,22 +4036,23 @@ html[data-keyboard-open] .bottom-bar {
   justify-content: center;
 }
 
+/* 图标在上、字在下（微信读书的排法）：每项窄成一列，五项一排约 280px，
+   375px 的 iPhone 上靠边也放得下；再窄的屏才会折成两行，不会出屏。 */
 .reader-popover__actions button {
   display: inline-flex;
-  min-height: 44px;
+  min-width: 52px;
+  min-height: 52px;
+  flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  padding: 0 12px;
+  padding: 7px 6px 6px;
   border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
-  font-size: var(--text-md);
+  font-size: var(--text-sm);
+  line-height: 1;
   white-space: nowrap;
-}
-
-/* 「更多」里的返回箭头只有图标，按正方形收窄，别撑出一块空白。 */
-.reader-popover__back {
-  padding: 0 8px;
 }
 
 .reader-popover__actions button:active {

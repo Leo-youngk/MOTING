@@ -1,5 +1,7 @@
 "use client";
 
+import { RECORD_LABELS, type PushFailure } from "../lib/sync-record";
+
 import {
   BookOpen,
   Check,
@@ -43,6 +45,7 @@ import type {
 import { Modal } from "./sheet";
 import { SoftRange } from "./soft-range";
 import "./settings-screen.css";
+import type { QueuedProgress } from "../lib/sync-progress";
 
 export interface SyncSummary {
   enabled: boolean;
@@ -51,6 +54,17 @@ export interface SyncSummary {
   message: string;
   error: string;
   lastSyncAt: number;
+  checkingSession?: boolean;
+  pendingProgress?: number;
+  pendingResources?: number;
+  blockedBooks?: Array<{ bookId: string; reason: string }>;
+  recordFailures?: PushFailure[];
+  pendingRecords?: number;
+  lastCompleteAt?: number;
+  blockedProgress?: number;
+  conflicts?: QueuedProgress[];
+  bookTitles?: Record<string, string>;
+  onResolveConflict?: (id: string, useLocal: boolean) => Promise<void>;
 }
 
 const SPEED_PRESETS = [0.8, 1, 1.2, 1.5, 2];
@@ -467,6 +481,27 @@ export function SettingsScreen({
           </div>
         </Section>
 
+        <Section foot="打开后，在阅读页划词点「从这里听」会留在正文里，底栏多一个暂停键。手指一滑正文就不再跟，点右下角的小圆点接着跟。">
+          <label className="settings-card settings-toggle">
+            <span>
+              <strong>听读同步</strong>
+              <em>听书时正文跟着朗读翻动，听到哪里阅读进度就记到哪里</em>
+            </span>
+            <span className="ai-switch">
+              <input
+                type="checkbox"
+                checked={settings.followSpeech}
+                onChange={(event) =>
+                  onChange({ ...settings, followSpeech: event.target.checked })
+                }
+              />
+              <span className="ai-switch__track">
+                <span className="ai-switch__thumb" />
+              </span>
+            </span>
+          </label>
+        </Section>
+
         <Section
           title="助手与数据"
           foot={
@@ -505,6 +540,14 @@ export function SettingsScreen({
               label={update.status === "available" ? "更新到新版本" : "检查更新"}
               value={UPDATE_LABEL[update.status]}
               onClick={update.status === "available" ? update.apply : update.check}
+            />
+            {/* 临时的诊断页：在主屏幕打开的 PWA 里验证锁屏连续听书，定下播放方案后删掉。 */}
+            <LinkRow
+              icon={<Headphones size={24} strokeWidth={1.7} />}
+              label="后台听书测试"
+              detail="锁屏连续播放诊断"
+              value=""
+              onClick={() => window.location.assign("/mms-probe.html")}
             />
           </div>
         </Section>
@@ -558,7 +601,7 @@ function SyncPage({
           <>
             <Section
               title="状态"
-              foot="每条记录单独比时间，新的留下；任何一台设备的数据都不会被整库覆盖。"
+              foot="进度收到云端确认后才清理待上传项；并发位置保留供你选择。"
             >
               <div className="settings-card settings-card--padded" aria-live="polite">
                 <p className="settings-status">
@@ -568,7 +611,7 @@ function SyncPage({
                       {sync.message || "正在同步…"}
                     </>
                   ) : sync.lastSyncAt ? (
-                    `上次同步 ${formatSyncTime(sync.lastSyncAt)}`
+                    `上次检查云端 ${formatSyncTime(sync.lastSyncAt)}`
                   ) : (
                     "尚未同步"
                   )}
@@ -578,6 +621,27 @@ function SyncPage({
                     {sync.error}
                   </p>
                 ) : null}
+                {!sync.syncing && sync.message ? <p className="settings-note">{sync.message}</p> : null}
+                {sync.lastCompleteAt ? <p className="settings-note">上次全部同步 {formatSyncTime(sync.lastCompleteAt)}</p> : null}
+                {sync.recordFailures?.length ? (
+                  <div role="status">
+                    <p className="settings-error">{sync.recordFailures.length} 条记录尚未同步，本机内容已保留</p>
+                    {sync.recordFailures.map((failure) => (
+                      <p className="settings-note" key={`${failure.kind}:${failure.key}`}>
+                        {RECORD_LABELS[failure.kind]} · {sync.bookTitles?.[failure.key] ?? failure.key.slice(0, 8)}
+                        {failure.bytes > 0 ? ` · ${(failure.bytes / 1024 / 1024).toFixed(2)} MB` : ""}
+                        {`：${failure.reason}。${failure.retryable ? "稍后自动重试" : "修改对应记录后自动重试，也可点击立即同步"}`}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+                {(sync.pendingRecords ?? 0) > (sync.recordFailures?.length ?? 0) ? <p className="settings-note">{sync.pendingRecords} 条记录待同步</p> : null}
+                {sync.pendingProgress ? <p className="settings-note">{sync.pendingProgress} 条进度待上传</p> : null}
+                {sync.blockedProgress ? <p role="alert" className="settings-error">{sync.blockedProgress} 条进度内容异常；打开对应书籍重新定位后可恢复同步</p> : null}
+                {sync.blockedBooks?.map((entry) => <p className="settings-error" key={entry.bookId}>
+                  {sync.bookTitles?.[entry.bookId] ?? "书籍正文"}：{entry.reason}。本机正文保留，可点击立即同步重试。
+                </p>)}
+                {sync.pendingResources ? <p className="settings-note">进度独立同步；{sync.pendingResources} 项书籍资源尚未同步</p> : null}
                 <div className="settings-actions">
                   <button
                     type="button"
@@ -599,7 +663,33 @@ function SyncPage({
                 </div>
               </div>
             </Section>
+            {sync.conflicts?.map((entry) => {
+              const local = JSON.parse(entry.conflict!.data);
+              const remote = JSON.parse(entry.data);
+              const label = (value: typeof local) => {
+                const position = entry.kind === "positions" ? value.position : value;
+                return `第 ${position.chapterIndex + 1} 章 · ${Math.round(position.percent)}%`;
+              };
+              return <Section key={entry.id} title={`${sync.bookTitles?.[entry.key] ?? "书籍"} · ${entry.kind === "positions" ? "阅读" : "听书"}`}>
+                <div className="settings-card settings-card--padded">
+                  <p className="settings-note">两台设备修改了位置，当前保留云端位置，本机候选仍可恢复。</p>
+                  <p className="settings-note">本机：{label(local)}；云端：{label(remote)}</p>
+                  <div className="settings-actions">
+                    <button type="button" className="primary-button" onClick={() => void sync.onResolveConflict?.(entry.id, true)}>使用本机位置</button>
+                    <button type="button" className="text-button" onClick={() => void sync.onResolveConflict?.(entry.id, false)}>保留云端位置</button>
+                  </div>
+                </div>
+              </Section>;
+            })}
           </>
+        ) : sync.checkingSession ? (
+          <Section title="连接状态">
+            <div className="settings-card settings-card--padded" aria-live="polite">
+              <p className="settings-note">正在恢复同步连接，本机进度已保留。</p>
+              {sync.error ? <p role="alert" className="settings-error">{sync.error}</p> : null}
+              <button type="button" className="primary-button" onClick={onSyncNow}>重试连接</button>
+            </div>
+          </Section>
         ) : (
           <Section title="登录" foot="不登录也照常用，只是数据只存在这台设备上。">
             <form className="settings-card settings-card--form sync-login" onSubmit={submit}>
