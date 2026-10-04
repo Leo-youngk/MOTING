@@ -238,3 +238,43 @@ test("还有人等的时候不会被别人的取消带走", async () => {
   fake.settle[0](clip(32));
   assert.ok(await kept);
 });
+
+test("撤掉之后紧接着再要同一段，要重新发一条，不能挂到掐掉的那条上", async () => {
+  const fake = recorder();
+  const store = new SpeechClipStore(fake.fetcher);
+
+  const first = new AbortController();
+  store.request("一段话", "晓晓", { priority: true, signal: first.signal }).catch(() => undefined);
+  await tick();
+  // 播放器换位置的固定动作：先 abort 旧的，同一拍里再请求同一段。
+  first.abort();
+  const fresh = store.request("一段话", "晓晓", { priority: true });
+  await tick();
+
+  assert.equal(fake.calls.length, 2, "掐掉的那条不能复用");
+  assert.equal(fake.calls[0].signal.aborted, true);
+  assert.equal(fake.calls[1].signal.aborted, false);
+
+  // 旧那条落定时不能把新那条的登记删掉：第三个人来要还得共用新那条。
+  const third = store.request("一段话", "晓晓", { priority: true });
+  await tick();
+  assert.equal(fake.calls.length, 2);
+
+  fake.settle[1](clip(64));
+  assert.equal(await fresh, await third);
+});
+
+test("cancelPending 之后再要同一段，重新发一条", async () => {
+  const fake = recorder();
+  const store = new SpeechClipStore(fake.fetcher);
+
+  store.prefetch("一段话", "晓晓");
+  await tick();
+  store.cancelPending();
+  const again = store.request("一段话", "晓晓", { priority: true });
+  await tick();
+
+  assert.equal(fake.calls.length, 2);
+  fake.settle[1](clip(64));
+  assert.ok(await again);
+});

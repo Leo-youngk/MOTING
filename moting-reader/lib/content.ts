@@ -95,20 +95,28 @@ function splitLongSentence(sentence: string): string[] {
   return pieces;
 }
 
+/**
+ * 句末标点后面紧跟的收尾符号（引号、括号、书名号）属于这一句。不跟上的话
+ * 「“你好。”他说。」会切成「“你好。」和「”他说。」，高亮、划线都带着半个引号。
+ * 半角引号不收：它分不清开合，「他走了。"等等！"」里那个 " 是下一句的开头。
+ */
+const SENTENCE_PATTERN =
+  /[^。！？!?；;…]+(?:(?:[。！？!?；;]+|…{1,2})[”’」』）》〉】〗)]*|$)|[。！？!?；;…]+[”’」』）》〉】〗)]*/g;
+
+/** 只有标点、没有字的碎片，接回上一句。 */
+const PUNCTUATION_ONLY = /^[。！？!?；;…”’」』）》〉】〗)]+$/;
+
 export function splitIntoSentences(value: string): string[] {
   const clean = normalizeWhitespace(value);
   if (!clean) return [];
 
-  const matches =
-    clean.match(
-      /[^。！？!?；;…]+(?:[。！？!?；;]+|…{1,2}|$)|[。！？!?；;…]+/g
-    ) ?? [clean];
+  const matches = clean.match(SENTENCE_PATTERN) ?? [clean];
 
   const sentences: string[] = [];
   for (const raw of matches) {
     const sentence = normalizeWhitespace(raw);
     if (!sentence) continue;
-    if (sentence.length <= 1 && /^[。！？!?；;…]$/.test(sentence)) {
+    if (PUNCTUATION_ONLY.test(sentence)) {
       if (sentences.length) {
         sentences[sentences.length - 1] += sentence;
       }
@@ -413,6 +421,15 @@ export function flattenChapter(chapter: Chapter): Sentence[] {
   return chapter.paragraphs.flatMap((paragraph) => paragraph.sentences);
 }
 
+/**
+ * 一句里能念出来的字。只剩记号的句子（场景分隔「* * *」、单独一个注码）念不出东西，
+ * 这时给空串，不能退回原文——那样 TTS 会把记号原样念出来。
+ * 朗读块里它只占一个零宽的位置：句子编号照样数得上，高亮和章末判断都不受影响。
+ */
+export function speakableOf(sentence: Sentence): string {
+  return (sentence.speakableText ?? sentence.text).trim();
+}
+
 const MAX_SPEECH_BLOCK_LENGTH = 240;
 export const MAX_EDGE_SPEECH_BATCH_LENGTH = 4800;
 
@@ -425,18 +442,26 @@ export function buildSpeechBlocks(chapter: Chapter): SpeechBlock[] {
     let spans: SpeechSpan[] = [];
 
     const flush = () => {
-      if (spans.length && text.trim()) blocks.push({ text, spans });
+      if (spans.length && text.trim()) {
+        blocks.push({ text, spans });
+      } else if (spans.length && blocks.length) {
+        // 整段都念不出来（单独一行「* * *」）：位置挂到上一块末尾，
+        // 不然读到它前面那块时会以为还没到章末，接着去找一段根本不存在的朗读。
+        const previous = blocks[blocks.length - 1];
+        const end = previous.text.length;
+        previous.spans.push(...spans.map((span) => ({ ...span, start: end, end })));
+      }
       text = "";
       spans = [];
     };
 
     for (const sentence of paragraph.sentences) {
-      const speakable = sentence.speakableText || sentence.text;
-      if (text && text.length + speakable.length > MAX_SPEECH_BLOCK_LENGTH) {
+      const speakable = speakableOf(sentence);
+      if (speakable && text && text.length + speakable.length > MAX_SPEECH_BLOCK_LENGTH) {
         flush();
       }
       const separator =
-        !text || /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
+        !speakable || !text || /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
       const start = text.length + separator.length;
       text += separator + speakable;
       spans.push({
@@ -475,10 +500,10 @@ export function buildEdgeSpeechBatches(
 
   for (const paragraph of chapter.paragraphs) {
     for (const sentence of paragraph.sentences) {
-      const speakable = sentence.speakableText || sentence.text;
-      if (text && text.length + speakable.length > maxLength) flush();
+      const speakable = speakableOf(sentence);
+      if (speakable && text && text.length + speakable.length > maxLength) flush();
       const separator =
-        !text || /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
+        !speakable || !text || /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
       const start = text.length + separator.length;
       text += separator + speakable;
       spans.push({

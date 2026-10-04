@@ -706,13 +706,14 @@ function AiSettingsPage({
   );
 
   // 地址之前就填过的话，一进来就去拉列表，不用等再点一下输入框。
+  // 「已经拉过」要等计时器真跑起来才记：onChange 每次父组件渲染都是新的，loadModels 跟着变，
+  // 这个 effect 会重跑、上一次的计时器会被清掉。先记上的话，被清掉的那次就再也补不回来。
   useEffect(() => {
     if (initialLoadRef.current || !settings.aiBaseUrl.trim()) return;
-    initialLoadRef.current = true;
-    const timer = window.setTimeout(
-      () => void loadModels(settings.aiBaseUrl, settings.aiApiKey),
-      0
-    );
+    const timer = window.setTimeout(() => {
+      initialLoadRef.current = true;
+      void loadModels(settings.aiBaseUrl, settings.aiApiKey);
+    }, 0);
     return () => window.clearTimeout(timer);
   }, [loadModels, settings.aiBaseUrl, settings.aiApiKey]);
   useEffect(() => () => controllerRef.current?.abort(), []);

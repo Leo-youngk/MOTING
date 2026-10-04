@@ -30,6 +30,14 @@ export interface SyncStore {
   dropSession(tokenHash: string): Promise<void>;
   /** 把会话的过期时刻推到 expiresAt(滑动续期)。 */
   renewSession(tokenHash: string, expiresAt: number): Promise<void>;
+  /**
+   * 记一次登录尝试并返回这个来源最近一阵子的尝试次数(含这一次)。
+   * 先记再比对密码:并发猜密码也只能在上限内各算一次,不能一起溜过检查。
+   * 距上一次尝试超过 windowMs 就从 1 重新数。
+   */
+  noteLoginAttempt(client: string, now: number, windowMs: number): Promise<number>;
+  /** 登录成功后清掉这个来源的计数。 */
+  clearLoginAttempts(client: string): Promise<void>;
   /** 当前已提交的全局 server_at 上界；一次 pull 的所有表都使用同一个快照。 */
   latestServerAt(): Promise<number>;
   /**
@@ -158,6 +166,14 @@ function upsertSql(table: SyncTable): string {
   );
 }
 
+/**
+ * 登录尝试借 sync_meta 存,不另建表(已部署的库不用重跑建表脚本):
+ * 每个来源一行,key = login:<ip>,value = 最近一次尝试的毫秒时刻 × 16 + 次数(封顶 15)。
+ * 一个整数里放两样东西,读写都能在一条语句里原子地做完。
+ */
+const LOGIN_KEY_PREFIX = "login:";
+const LOGIN_COUNT_BASE = 16;
+
 export function createD1Store(db: D1Database): SyncStore {
   return {
     async addSession(tokenHash, expiresAt) {
@@ -175,6 +191,26 @@ export function createD1Store(db: D1Database): SyncStore {
     },
     async renewSession(tokenHash, expiresAt) {
       await db.prepare("UPDATE auth_tokens SET expires_at = ? WHERE token_hash = ?").bind(expiresAt, tokenHash).run();
+    },
+    async noteLoginAttempt(client, now, windowMs) {
+      // 同一个事务里:先扔掉窗口外的旧计数(顺带清理别的来源留下的),再给这个来源加一。
+      const [, counted] = await db.batch<{ value: number }>([
+        db
+          .prepare(`DELETE FROM sync_meta WHERE key LIKE '${LOGIN_KEY_PREFIX}%' AND value < ?1`)
+          .bind((now - windowMs) * LOGIN_COUNT_BASE),
+        db
+          .prepare(
+            "INSERT INTO sync_meta (key, value) VALUES (?1, ?2 * ?3 + 1) " +
+              "ON CONFLICT(key) DO UPDATE SET value = ?2 * ?3 + MIN(value % ?3 + 1, ?3 - 1) " +
+              "RETURNING value"
+          )
+          .bind(`${LOGIN_KEY_PREFIX}${client}`, now, LOGIN_COUNT_BASE),
+      ]);
+      const value = Number(counted.results?.[0]?.value ?? LOGIN_COUNT_BASE + 1);
+      return Math.round(value) % LOGIN_COUNT_BASE;
+    },
+    async clearLoginAttempts(client) {
+      await db.prepare("DELETE FROM sync_meta WHERE key = ?").bind(`${LOGIN_KEY_PREFIX}${client}`).run();
     },
     async latestServerAt() {
       const row = await db.prepare("SELECT value FROM sync_meta WHERE key = 'server_clock'").first<{ value: number }>();
