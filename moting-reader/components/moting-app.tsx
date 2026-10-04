@@ -3663,8 +3663,8 @@ function ReaderScreen({
   onSettingsChange: (settings: ReaderSettings) => void;
   onToast: (message: string) => void;
 }) {
-  const restorePosition = latestPosition(book);
-  const initial = restorePosition ?? initialPosition(book);
+  // 一次阅读会话只确定一次初始位置。同步和进度回写不能重选恢复目标。
+  const [initial] = useState(() => latestPosition(book) ?? initialPosition(book));
   const [chapterIndex, setChapterIndex] = useState(initial.chapterIndex);
   const [showChapters, setShowChapters] = useState(false);
   const tocListRef = useRevealActiveChapter(showChapters);
@@ -3709,6 +3709,9 @@ function ReaderScreen({
   const savedSentenceRef = useRef(initial.sentenceId);
   /** 上次存下来的「锚点线落在这句第几像素」，用来判断同一段里是否已经读过了一行以上。 */
   const savedOffsetRef = useRef(initial.anchorOffset ?? 0);
+  const savedPageOffsetRef = useRef(initial.pageOffset ?? 0);
+  const restoringRef = useRef(false);
+  const flushReaderProgressRef = useRef<() => void>(() => {});
   // onProgress 每次渲染都是新的箭头函数，book 也随每一次进度回写换引用。把它们直接
   // 写进观察器的依赖，就等于每渲染一次都把盯着上千个句子元素的观察器拆了重建。
   const progressRef = useRef(onProgress);
@@ -3795,7 +3798,7 @@ function ReaderScreen({
 
   // 进入章节时要落到哪一页：句子 id、章末，或者不动。
   const restoreRef = useRef<string | "last" | null>(
-    book.readingPosition?.sentenceId ?? null
+    initial.sentenceId
   );
   const previousPagedRef = useRef(paged);
 
@@ -3803,6 +3806,7 @@ function ReaderScreen({
     if (paged && !previousPagedRef.current) {
       // 连续阅读中保存点一直在更新；切入分页时应使用当前屏幕的锚点，而非进书时的旧位置。
       restoreRef.current = savedSentenceRef.current;
+      savedPageOffsetRef.current = 0;
     } else if (!paged) {
       restoreRef.current = null;
     }
@@ -3845,13 +3849,26 @@ function ReaderScreen({
           article.getBoundingClientRect().left
         : pageIndexRef.current * step;
       // 句子从这一栏的第几像素开始都算这一页：四舍五入的话，从右半行开头的句子会落到下一页。
-      goToPage(Math.max(0, Math.min(count - 1, Math.floor((offset + 1) / step))));
+      goToPage(Math.max(0, Math.min(count - 1, Math.floor((offset + 1) / step) + savedPageOffsetRef.current)));
     };
 
+    let cancelled = false;
+    restoringRef.current = true;
     measure();
+    // WebKit 冷启动可能先用备用字体排栏；字体就绪未必改变 article 尺寸，
+    // ResizeObserver 收不到文字重排，必须按同一句重新算页。
+    void document.fonts.ready.then(() => {
+      if (cancelled) return;
+      measure();
+      restoringRef.current = false;
+    });
     const observer = new ResizeObserver(measure);
     observer.observe(article);
-    return () => observer.disconnect();
+    return () => {
+      cancelled = true;
+      restoringRef.current = false;
+      observer.disconnect();
+    };
   }, [
     paged,
     chapterIndex,
@@ -3867,15 +3884,21 @@ function ReaderScreen({
   // 冷启动（刷新、被 iOS 回收后重开）直接落进阅读器时不是，会先画出一帧章首再跳到读到的地方。
   useLayoutEffect(() => {
     if (paged) return;
-    const targetId = restorePosition?.sentenceId;
+    // 必须先排好目标章再量位置，避免先按估算高度定位、下一帧又整章撑开。
+    primeSection(articleRef.current?.querySelector<HTMLElement>(
+      `[data-chapter-section="${rangeRef.current.start}"]`
+    ));
+    const targetId = savedSentenceRef.current;
+    const anchorOffset = savedOffsetRef.current;
     if (!targetId) return;
-    // 刚打开一本没读过的书时，openReader 会写一条「第一章第一句」的起始位置。
+    // 刚打开一本没读过的书时，初始位置是「第一章第一句」。
     // 那种情况不该去定位：把第一句对到锚点线等于把章节标题顶出屏幕，
     // 而书本来就该从头显示。真读到过第一句也一样——那时页面本来就在顶上。
     if (
-      restorePosition.chapterIndex === 0 &&
-      restorePosition.sentenceIndex === 0 &&
-      !restorePosition.anchorOffset
+      initial.chapterIndex === 0 &&
+      initial.sentenceId === targetId &&
+      initial.sentenceIndex === 0 &&
+      !anchorOffset
     ) {
       return;
     }
@@ -3884,7 +3907,7 @@ function ReaderScreen({
     // 提前停掉校正会留下整段高度的偏差。短时间继续复查，到期或用户一动就退出。
     // 不能重新放宽到几秒，否则会妨碍刚进书时的手势。
     const SETTLE_WINDOW_MS = 1500;
-    const MIN_STABLE_MS = 1200;
+    const MIN_STABLE_MS = 200;
     const QUIET_MS = 200;
     let settled = false;
     let frame = 0;
@@ -3893,9 +3916,11 @@ function ReaderScreen({
     const deadline = Date.now() + SETTLE_WINDOW_MS;
     const startedAt = Date.now();
     let lastAdjustmentAt = startedAt;
+    restoringRef.current = true;
     const stop = () => {
       if (settled) return;
       settled = true;
+      restoringRef.current = false;
       if (frame) cancelAnimationFrame(frame);
       frame = 0;
       resize?.disconnect();
@@ -3925,7 +3950,7 @@ function ReaderScreen({
       // 目标高度 = 锚点线往上退回「当初读到这句第几像素」，这样长段落读到一半
       // 也能回到原处，而不是退回整段开头。
       const targetTop =
-        READING_ANCHOR_TOP - (restorePosition?.anchorOffset ?? 0);
+        READING_ANCHOR_TOP - anchorOffset;
       const driftNow = () => element.getBoundingClientRect().top - targetTop;
 
       const drift = driftNow();
@@ -3941,6 +3966,9 @@ function ReaderScreen({
 
     const settle = () => {
       if (settled) return;
+      // ResizeObserver、字体就绪和 rAF 共用一个调度，不能各自启动一条校正循环。
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
       // 这里不能用 scrollY 的变化判断手势：首次渲染的文档可能短得只能滚
       // 535px，正文接着排开时浏览器会自己改动 scrollY；那不是用户在滚。
       // 用户输入由下方的 touch / wheel / pointer / keydown 事件立即停止恢复。
@@ -3987,10 +4015,11 @@ function ReaderScreen({
   useEffect(() => {
     const article = articleRef.current;
     if (!paged || !article) return;
-    const timer = setTimeout(() => {
+    const savePage = (final = false) => {
+      if (!final && restoringRef.current) return;
       // 正文整体被平移过，当前页的左边界要把平移量加回去才算得对。
       const left =
-        article.getBoundingClientRect().left + pageIndex * pageStep;
+        article.getBoundingClientRect().left + pageIndexRef.current * pageStep;
       const sentences = Array.from(
         article.querySelectorAll<HTMLElement>("[data-sentence-id]")
       );
@@ -4006,12 +4035,23 @@ function ReaderScreen({
       const target = startsHere ?? sentences[first];
       const id = target?.dataset.sentenceId;
       const index = Number(target?.dataset.sentenceIndex);
-      if (!id || Number.isNaN(index) || savedSentenceRef.current === id) return;
+      if (!id || Number.isNaN(index) || !pageStep) return;
+      const origin = target.getBoundingClientRect().left - article.getBoundingClientRect().left;
+      const pageOffset = Math.max(0, pageIndexRef.current - Math.floor((origin + 1) / pageStep));
+      if (savedSentenceRef.current === id && savedPageOffsetRef.current === pageOffset) return;
       savedSentenceRef.current = id;
+      savedPageOffsetRef.current = pageOffset;
+      savedOffsetRef.current = 0;
       showLivePosition(chapterIndex, index);
-      progressRef.current(positionFor(bookRef.current, chapterIndex, index));
-    }, 320);
-    return () => clearTimeout(timer);
+      progressRef.current({ ...positionFor(bookRef.current, chapterIndex, index), pageOffset });
+    };
+    const flushPage = () => savePage(true);
+    flushReaderProgressRef.current = flushPage;
+    const timer = setTimeout(() => savePage(), 320);
+    return () => {
+      clearTimeout(timer);
+      if (flushReaderProgressRef.current === flushPage) flushReaderProgressRef.current = () => {};
+    };
   }, [paged, pageIndex, pageStep, pageCount, chapterIndex, showLivePosition]);
 
   useEffect(() => {
@@ -4114,13 +4154,19 @@ function ReaderScreen({
     };
 
     const saveAnchor = () => {
+      if (restoringRef.current) return;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = null;
+      pendingSave = null;
       const anchor = measureAnchor();
       if (anchor) commitAnchor(anchor);
     };
+    flushReaderProgressRef.current = saveAnchor;
 
     let snapshotAt = 0;
 
     const schedule = () => {
+      if (restoringRef.current) return;
       // 当场先量一份快照：卸载时（退出阅读器、切书）effect 清理跑在 DOM 拆掉之后，
       // 那时再量是量不到的，只能靠这份快照把最后这一下补写进去。
       //
@@ -4149,14 +4195,29 @@ function ReaderScreen({
     window.addEventListener("scroll", schedule, { passive: true });
     return () => {
       window.removeEventListener("scroll", schedule);
+      if (flushReaderProgressRef.current === saveAnchor) flushReaderProgressRef.current = () => {};
       // 卸载前如果还有没落盘的最新位置（防抖还没到），立即量一次存掉，
       // 不能让 clearTimeout 把用户刚读到的地方悄悄扔了。
       if (pendingTimer) {
         clearTimeout(pendingTimer);
-        pendingSave?.();
+        if (!restoringRef.current) pendingSave?.();
       }
     };
   }, [book.id, paged, showLivePosition]);
+
+  // 在 DOM 还在、页面尚未冻结时同步保存。父组件的后台推送随后才能拿到最终位置。
+  useEffect(() => {
+    const flush = () => flushReaderProgressRef.current();
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush, true);
+    window.addEventListener("popstate", flush, true);
+    document.addEventListener("visibilitychange", onHide, true);
+    return () => {
+      window.removeEventListener("pagehide", flush, true);
+      window.removeEventListener("popstate", flush, true);
+      document.removeEventListener("visibilitychange", onHide, true);
+    };
+  }, []);
 
   // 接章、摘章、整章排版都会改变正文上方的高度，不补偿的话页面会当场跳一下。
   // 改之前记住视口里正在看的那一段在哪，改完按它的位移把滚动条推回去。
@@ -4556,6 +4617,7 @@ function ReaderScreen({
 
     function step() {
       timer = 0;
+      if (restoringRef.current) { arm(WINDOW_IDLE_MS); return; }
       if (touching || selectionActiveRef.current) return;
       const quietFor = performance.now() - lastScrollAt;
       if (quietFor < WINDOW_IDLE_MS) {
@@ -4824,6 +4886,8 @@ function ReaderScreen({
     setChapterIndex(safe);
     const position = positionFor(currentBook, safe, 0);
     savedSentenceRef.current = position.sentenceId;
+    savedOffsetRef.current = 0;
+    savedPageOffsetRef.current = 0;
     onProgress(position);
     restoreRef.current = landing === "last" ? "last" : null;
     setPopup(null);
@@ -5125,7 +5189,7 @@ function ReaderScreen({
           type="button"
           className="reader-chrome__back"
           aria-label="返回书架"
-          onClick={onBack}
+          onClick={() => { flushReaderProgressRef.current(); onBack(); }}
         >
           <ChevronLeft size={24} />
         </button>
@@ -7614,19 +7678,22 @@ export default function MotingApp() {
   /** 先把这本书的正文读进来，再进页面；页面第一帧就是完整的。 */
   const withContent = async (bookId: string, refreshProgress = false): Promise<Book | null> => {
     const token = ++openTokenRef.current;
+    // 快速退出后紧接着重开，也要先等最后一次本地位置落库。
+    await flushProgressRef.current();
+    if (token !== openTokenRef.current) return null;
     if (refreshProgress && syncConnectedRef.current) {
       const controller = new AbortController();
       const timer = window.setTimeout(() => controller.abort(), 2500);
       try {
-        await flushProgressRef.current();
         await runProgressSync({ signal: controller.signal, onApplied: scheduleSyncReload });
-        const fresh = await getAllBooks();
-        if (token === openTokenRef.current) { booksRef.current = fresh; setBooks(fresh); }
       } catch { setSyncMessage("先使用本机进度，联网后同步"); }
       finally { window.clearTimeout(timer); }
     }
     const chapters = await loadContent(bookId);
+    const fresh = await getAllBooks();
     if (token !== openTokenRef.current) return null;
+    booksRef.current = fresh;
+    setBooks(fresh);
     const meta = booksRef.current.find((book) => book.id === bookId);
     if (!chapters || !meta) {
       showToast("这本书的正文读不出来了");
@@ -7638,13 +7705,13 @@ export default function MotingApp() {
   const openReader = async (meta: BookMeta, position?: BookPosition) => {
     const book = await withContent(meta.id, !position);
     if (!book) return;
+    // 点击打开书时的事件时间，不是渲染期间取时钟。
+    // eslint-disable-next-line react-hooks/purity
     const now = Date.now();
-    const nextPosition =
-      position ??
-      pendingReadingProgressRef.current.get(book.id)?.position ??
-      book.readingPosition ??
-      initialPosition(book);
-    patchBookMeta(book.id, { readingPosition: nextPosition, lastOpenedAt: now, updatedAt: now });
+    // 打开书只更新最近打开时间，不能把旧进度写回书目生成第二份位置。
+    // 笔记／播放器指定的跳转才是真正的新阅读操作，先同步更新兜底和待保存队列。
+    if (position) handleReadProgress(book, position);
+    patchBookMeta(book.id, { lastOpenedAt: now, updatedAt: now });
     navigate({ name: "reader", bookId: book.id });
   };
 

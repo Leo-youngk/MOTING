@@ -32,3 +32,14 @@ test("a delayed acknowledgement cannot undo a server version already applied", (
   assert.equal(acknowledgeProgress(current, { kind: "positions", key: "book", mutationId: current.mutationId, status: "accepted",
     record: { key: "book", data: { sentence: 1 }, updatedAt: 100, serverAt: 11 } }), current);
 });
+
+test("a delayed conflict cannot clear a newer position created during upload", () => {
+  const current = pending();
+  const next = acknowledgeProgress(current, { kind: "positions", key: "book", mutationId: "older-mutation", status: "conflict",
+    record: { key: "book", data: { sentence: 8 }, updatedAt: 1, serverAt: 12 } });
+  assert.equal(next.pending, true);
+  assert.equal(next.data, current.data);
+  assert.equal(next.mutationId, current.mutationId);
+  assert.equal(next.baseServerRev, current.baseServerRev);
+  assert.equal(next.serverRev, 12);
+});

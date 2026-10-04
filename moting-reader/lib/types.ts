@@ -64,6 +64,8 @@ export interface Chapter {
 }
 
 export interface BookPosition {
+  /** 同一句跨多页时，当前页距句首所在页的页数；滚动模式不用。 */
+  pageOffset?: number;
   chapterId: string;
   chapterIndex: number;
   sentenceId: string;

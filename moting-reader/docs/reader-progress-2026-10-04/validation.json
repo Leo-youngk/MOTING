@@ -1,0 +1,93 @@
+{
+  "date": "2026-10-04",
+  "baseCommit": "95a9bd015c460c166704d01e9b4c231692790655",
+  "book": {
+    "title": "豆棚閒話",
+    "source": "https://www.gutenberg.org/ebooks/25328.txt.utf-8",
+    "complete": true,
+    "bytes": 284878,
+    "sha256": "dd964c3a12d6a75f5996fe35696abc4cfd59b22474ad2c10698cb36f2341844d",
+    "characters": 107371,
+    "sentences": 3329,
+    "internalChapters": 10
+  },
+  "unitTests": {
+    "passed": 238,
+    "failed": 0
+  },
+  "browsers": {
+    "chromium": {
+      "engine": "chromium",
+      "checks": {
+        "settled_resume_750": true,
+        "settled_resume_4500": true,
+        "settled_resume_12000": true,
+        "fast_exit_flushes_exact_anchor": true,
+        "pagehide_flushes_before_freeze": true,
+        "touch_cancels_restore_without_bounce": true,
+        "return_does_not_reload_document": true,
+        "complete_book_imported": true,
+        "later_chapter_resume_0.5": true,
+        "later_chapter_resume_0.9": true,
+        "continuous_chapter_boundary_keeps_position": true,
+        "paged_fast_exit_keeps_same_page": true,
+        "paged_newer_backup_wins": true,
+        "sentence_crossing_pages_keeps_page_offset": true,
+        "expired_asset_does_not_reload_reader": true,
+        "no_script_errors": true
+      }
+    },
+    "webkit": {
+      "engine": "webkit",
+      "checks": {
+        "settled_resume_750": true,
+        "settled_resume_4500": true,
+        "settled_resume_12000": true,
+        "fast_exit_flushes_exact_anchor": true,
+        "pagehide_flushes_before_freeze": true,
+        "touch_cancels_restore_without_bounce": true,
+        "return_does_not_reload_document": true,
+        "complete_book_imported": true,
+        "later_chapter_resume_0.5": true,
+        "later_chapter_resume_0.9": true,
+        "continuous_chapter_boundary_keeps_position": true,
+        "paged_fast_exit_keeps_same_page": true,
+        "paged_newer_backup_wins": true,
+        "sentence_crossing_pages_keeps_page_offset": true,
+        "expired_asset_does_not_reload_reader": true,
+        "no_script_errors": true
+      }
+    }
+  },
+  "oldProduction": {
+    "engine": "webkit",
+    "checks": {
+      "settled_resume_750": true,
+      "settled_resume_4500": true,
+      "settled_resume_12000": true,
+      "fast_exit_flushes_exact_anchor": "saved sentence-7d225a10-b34a-4c49-815c-17b4a9189c11 at 13.703125px; restored 934.703125px",
+      "pagehide_flushes_before_freeze": "synchronous backup must contain the visible sentence before pagehide returns\n+ actual - expected\n\n+ 'sentence-c9832754-920d-4fd1-93c8-5e6a4642b7fd'\n- 'sentence-3287bf73-894c-4419-872e-0d7658772ce4'\n",
+      "touch_cancels_restore_without_bounce": true,
+      "return_does_not_reload_document": true,
+      "complete_book_imported": true,
+      "later_chapter_resume_0.5": true,
+      "later_chapter_resume_0.9": true,
+      "continuous_chapter_boundary_keeps_position": true,
+      "paged_fast_exit_keeps_same_page": "Expected values to be strictly equal:\n+ actual - expected\n\n+ 'translateX(-792px)'\n- 'translateX(-2376px)'\n               ^\n",
+      "paged_newer_backup_wins": "backup page 28; restored transform translateX(-6732px)",
+      "sentence_crossing_pages_keeps_page_offset": "cross-page offset restored to translateX(-396px)",
+      "expired_asset_does_not_reload_reader": "Expected values to be strictly equal:\n+ actual - expected\n\n+ undefined\n- 'same'\n",
+      "no_script_errors": true
+    }
+  },
+  "checks": {
+    "typecheck": "passed",
+    "eslint": "passed",
+    "productionBuild": "passed",
+    "wranglerDryRun": "passed"
+  },
+  "limits": [
+    "Desktop WebKit touch viewport is not a physical iPhone standalone PWA.",
+    "Browser book import and writes were isolated locally; no production test data."
+  ]
+}

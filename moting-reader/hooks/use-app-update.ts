@@ -53,8 +53,9 @@ export function useAppUpdate() {
     const onMessage = (event: MessageEvent) => {
       const data = event.data as { type?: string; assets?: string[]; offline?: boolean } | null;
       if (data?.type === "shell-expired") {
-        // 旧页面引用的哈希分片已被源站回收时，重新导航到缓存中的完整新版外壳。
-        location.reload();
+        // 过期分片可能同时报多次 404。阅读中自动重载会丢掉未截取的屏幕位置，
+        // 也可能在新版外壳尚未就绪时形成重载循环。交给已有更新入口一次性切换。
+        setStatus("available");
         return;
       }
       if (data?.type !== "shell" || !Array.isArray(data.assets)) return;
@@ -77,6 +78,8 @@ export function useAppUpdate() {
 
   /** 重新载入：导航请求由 service worker 从缓存给出，缓存里已经是新版。 */
   const apply = useCallback(() => {
+    // 阅读器的捕获监听先把当前位置同步写入兜底，再离开本页。
+    window.dispatchEvent(new Event("pagehide"));
     location.reload();
   }, []);
 
