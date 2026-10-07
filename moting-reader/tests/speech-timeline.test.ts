@@ -78,9 +78,9 @@ test("按播放秒数二分查到对应字符下标", () => {
 
 test("字符下标能定位到所属句子", () => {
   const spans: SpeechSpan[] = [
-    { sentenceId: "a", sentenceIndex: 0, start: 0, end: 5 },
-    { sentenceId: "b", sentenceIndex: 1, start: 5, end: 11 },
-    { sentenceId: "c", sentenceIndex: 2, start: 11, end: 20 },
+    { sentenceId: "a", chapterIndex: 0, sentenceIndex: 0, start: 0, end: 5 },
+    { sentenceId: "b", chapterIndex: 0, sentenceIndex: 1, start: 5, end: 11 },
+    { sentenceId: "c", chapterIndex: 0, sentenceIndex: 2, start: 11, end: 20 },
   ];
 
   assert.equal(spanAt(spans, 0).sentenceId, "a");

@@ -5038,7 +5038,6 @@ html[data-keyboard-open] .modal-sheet {
 .voice-state {
   display: inline-flex;
   align-items: center;
-  /* 固定最小宽度，「切换中 → 正在播放」换字时行不会左右抖。 */
   min-width: 56px;
   justify-content: flex-end;
   gap: 4px;
@@ -5052,31 +5051,17 @@ html[data-keyboard-open] .modal-sheet {
   color: var(--accent-deep);
 }
 
-.voice-list button.is-preparing strong {
-  color: var(--accent-deep);
-}
-
-/* 切换失败：原来的声音还在读，这里给出原因和一个重试入口。 */
+/* 云端暂时连不上、正在用系统声音顶着：说清楚声音为什么变了、什么时候换回来。 */
 .voice-retry {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 10px 12px;
   border-radius: var(--radius-md);
   margin-top: 12px;
   background: var(--accent-soft);
   color: var(--accent-deep);
   font-size: var(--text-sm);
-  gap: 12px;
-}
-
-.voice-retry button {
-  min-height: 32px;
-  padding: 0 14px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: var(--text-sm);
+  line-height: 1.6;
 }
 
 .import-overlay {

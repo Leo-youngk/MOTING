@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  buildEdgeSpeechBatches,
   buildSpeechBlocks,
   chaptersFromPlainText,
   charsPerLine,
@@ -207,33 +206,18 @@ test("超长段落按句子边界切成多块", () => {
   );
 });
 
-test("云端朗读批次跨段落合并并保持句子下标", () => {
-  const chapter = createChapter(
-    "第一章",
-    [{ text: "甲。乙。" }, { text: "丙。丁。" }, { text: "戊。" }],
-    0
-  );
+test("系统朗读块里每句记着自己是哪一章", () => {
+  const chapter = createChapter("第三章", [{ text: "甲。乙。" }], 2);
   assert.ok(chapter);
-
-  const batches = buildEdgeSpeechBatches(chapter, 7);
+  const blocks = buildSpeechBlocks(chapter, 2, (text) => text.replace("乙", "丙"));
+  assert.equal(blocks[0].text, "甲。丙。");
   assert.deepEqual(
-    batches.map((batch) => batch.text),
-    ["甲。乙。丙。", "丁。戊。"]
+    blocks[0].spans.map((span) => [span.chapterIndex, span.sentenceIndex]),
+    [
+      [2, 0],
+      [2, 1],
+    ]
   );
-  assert.deepEqual(
-    batches.flatMap((batch) => batch.spans.map((span) => span.sentenceIndex)),
-    [0, 1, 2, 3, 4]
-  );
-  for (const batch of batches) {
-    for (const span of batch.spans) {
-      assert.equal(
-        batch.text.slice(span.start, span.end),
-        chapter.paragraphs
-          .flatMap((paragraph) => paragraph.sentences)
-          [span.sentenceIndex].speakableText
-      );
-    }
-  }
 });
 
 test("阅读位置能够跨章节移动并计算进度", () => {

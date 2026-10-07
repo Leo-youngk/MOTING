@@ -2,29 +2,20 @@
 import handler from "vinext/server/app-router-entry";
 import { AI_REQUEST_LIMITS } from "../lib/ai";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
-import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
 import { aiAttemptPlan, aiFailureMessage, requestWithRetry } from "./ai-upstream";
 import { synthesizeSpeech } from "./edge-tts";
+import { SpeechBatchError, synthesizeBatch } from "./speech";
 import { forwardSync, handleSync } from "./sync";
 import { handleWeread } from "./weread";
 import { handleZlibrary } from "./zlibrary";
 
-const MAX_TTS_TEXT_LENGTH = 5000;
-const TTS_CHUNK_LENGTH = 360;
+/** 客户端一批最多 4000 来字，加上跨章补齐的余量和分隔换行，留到 6000。 */
+const MAX_TTS_TEXT_LENGTH = 6000;
 /**
- * 点下播放键之后听到声音的时间，几乎全花在这一次合成上，而合成耗时基本跟字数走
- * （实测约「固定开销 + 18ms/字」）。首段刚好也是 360 字，按 TTS_CHUNK_LENGTH 切只有
- * 一片，下面那个并发度等于没用上。切细到 120 字让它真正并发：同样 360 字，
- * 1 片要 17.8s，3 片并发只要 3.6s。
+ * 合成结果按（格式版本, 音色, 文本）缓存一年。拼接处的停顿规则变了就把版本加一，
+ * 免得同一段文本新旧两种停顿混着出。
  */
-const QUICK_TTS_CHUNK_LENGTH = 120;
-/**
- * 超过这个长度的就是播放中后台预取的长批次，早几秒晚几秒用户感觉不到，
- * 继续用粗分片——4800 字按 120 切要 40 个子请求，会顶到 Workers 的 subrequest 上限。
- */
-const QUICK_SYNTH_MAX_LENGTH = 600;
-const TTS_CONCURRENCY = 4;
-const MAX_TTS_AUDIO_BYTES = 20 * 1024 * 1024;
+const TTS_CACHE_VERSION = "v2";
 const MAX_AI_MODELS_BODY_BYTES = 32 * 1024;
 const MAX_AI_CHAT_BODY_BYTES = 512 * 1024;
 const MAX_TTS_BODY_BYTES = 64 * 1024;
@@ -311,7 +302,7 @@ async function handleAiChat(request: Request): Promise<Response> {
 async function cacheKeyFor(text: string, voice: string): Promise<Request> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(`${voice}|${text}`)
+    new TextEncoder().encode(`${TTS_CACHE_VERSION}|${voice}|${text}`)
   );
   const hash = Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
@@ -334,41 +325,8 @@ function frameResponse(
   return body;
 }
 
-async function synthesizeLongSpeech(
-  text: string,
-  voice: string,
-  signal: AbortSignal
-) {
-  const chunks = splitSpeechText(
-    text,
-    text.length <= QUICK_SYNTH_MAX_LENGTH
-      ? QUICK_TTS_CHUNK_LENGTH
-      : TTS_CHUNK_LENGTH
-  );
-  const results = new Array<Awaited<ReturnType<typeof synthesizeSpeech>>>(
-    chunks.length
-  );
-  let cursor = 0;
-  let audioBytes = 0;
-
-  // 限制并发，既缩短长音频首播等待，也避免同时开太多上游 WebSocket。
-  const workers = Array.from(
-    { length: Math.min(TTS_CONCURRENCY, chunks.length) },
-    async () => {
-      while (cursor < chunks.length) {
-        const index = cursor;
-        cursor += 1;
-        const result = await synthesizeSpeech(chunks[index].text, voice, signal);
-        audioBytes += result.audio.byteLength;
-        if (audioBytes > MAX_TTS_AUDIO_BYTES) {
-          throw new Error("朗读音频过大");
-        }
-        results[index] = result;
-      }
-    }
-  );
-  await Promise.all(workers);
-  return joinSpeechChunks(chunks, results);
+function logSpeech(event: string, detail: Record<string, unknown>) {
+  console.warn(event, detail);
 }
 
 async function handleSpeech(
@@ -391,8 +349,9 @@ async function handleSpeech(
     );
   }
 
-  const text = typeof payload.text === "string" ? payload.text.trim() : "";
-  if (!text) {
+  // 不 trim：客户端的句子下标是按它发来的原文算的，结尾的换行还表示这批读完之后停多久。
+  const text = typeof payload.text === "string" ? payload.text : "";
+  if (!text.trim()) {
     return Response.json({ error: "缺少朗读文本" }, { status: 400 });
   }
   if (text.length > MAX_TTS_TEXT_LENGTH) {
@@ -409,22 +368,39 @@ async function handleSpeech(
   const cached = await cache.match(key);
   if (cached) return cached;
 
-  let audio: Uint8Array;
-  let timeline;
+  let result;
   try {
-    ({ audio, timeline } = await synthesizeLongSpeech(text, voice, request.signal));
+    result = await synthesizeBatch(text, voice, request.signal, {
+      synthesize: synthesizeSpeech,
+      log: logSpeech,
+    });
   } catch (error) {
+    if (request.signal.aborted) {
+      return new Response(null, { status: 499 });
+    }
+    const failure =
+      error instanceof SpeechBatchError
+        ? error
+        : new SpeechBatchError(
+            error instanceof Error ? error.message : "朗读服务不可用",
+            "service"
+          );
+    logSpeech("tts_failed", {
+      status: failure.status,
+      error: failure.message,
+      length: text.length,
+      voice,
+    });
     return Response.json(
-      { error: error instanceof Error ? error.message : "朗读服务不可用" },
-      { status: 502 }
+      { error: failure.message },
+      {
+        status: failure.status,
+        headers: failure.kind === "service" ? { "retry-after": "5" } : undefined,
+      }
     );
   }
 
-  if (!audio.length) {
-    return Response.json({ error: "朗读服务没有返回音频" }, { status: 502 });
-  }
-
-  const body = frameResponse(timeline, audio);
+  const body = frameResponse(result.timeline, result.audio);
   const response = new Response(body, {
     headers: {
       "content-type": "application/octet-stream",

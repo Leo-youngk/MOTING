@@ -238,3 +238,71 @@ test("还有人等的时候不会被别人的取消带走", async () => {
   fake.settle[0](clip(32));
   assert.ok(await kept);
 });
+
+function memoryPersistence() {
+  const saved = new Map<string, SpeechClip>();
+  return {
+    saved,
+    persistence: {
+      get: async (key: string) => saved.get(key) ?? null,
+      has: async (key: string) => saved.has(key),
+      put: async (key: string, value: SpeechClip) => {
+        saved.set(key, value);
+      },
+    },
+  };
+}
+
+test("本机缓存里有的直接拿，不发网络请求；网络拿到的顺手存一份", async () => {
+  const fake = recorder();
+  const local = memoryPersistence();
+  local.saved.set("云健|旧的一段", clip(16));
+  const store = new SpeechClipStore(fake.fetcher, undefined, undefined, local.persistence);
+
+  assert.equal((await store.request("旧的一段", "云健", { priority: true })).audio.size, 16);
+  assert.equal(fake.calls.length, 0);
+
+  const fresh = store.request("新的一段", "云健", { priority: true });
+  await tick();
+  await tick();
+  fake.settle[0](clip(32));
+  await fresh;
+  await tick();
+  assert.ok(local.saved.has("云健|新的一段"));
+});
+
+test("进播放页时从本机搬进内存，点播放能同步命中", async () => {
+  const fake = recorder();
+  const local = memoryPersistence();
+  local.saved.set("云健|这一格", clip(16));
+  const store = new SpeechClipStore(fake.fetcher, undefined, undefined, local.persistence);
+
+  assert.equal(store.has("这一格", "云健"), false);
+  assert.equal(await store.warm("这一格", "云健"), true);
+  assert.ok(store.peek("这一格", "云健"));
+  assert.equal(await store.warm("没存过", "云健"), false);
+  assert.equal(fake.calls.length, 0, "warm 只看本机，不走网络");
+});
+
+test("离线缓存直接落盘，不占内存，不把预取好的下一段挤掉", async () => {
+  const fake = recorder();
+  const local = memoryPersistence();
+  const store = new SpeechClipStore(fake.fetcher, 100, undefined, local.persistence);
+
+  const next = store.request("下一段", "云健", { priority: true });
+  await tick();
+  await tick();
+  fake.settle[0](clip(60));
+  await next;
+
+  const download = store.download("后面一章", "云健");
+  await tick();
+  fake.settle[1](clip(80));
+  await download;
+
+  assert.ok(local.saved.has("云健|后面一章"));
+  assert.equal(store.has("后面一章", "云健"), false);
+  assert.ok(store.peek("下一段", "云健"), "内存里预取好的那段还在");
+  await store.download("后面一章", "云健");
+  assert.equal(fake.calls.length, 2, "已经存过的不再下载");
+});

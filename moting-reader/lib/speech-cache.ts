@@ -1,10 +1,12 @@
 import { fetchSpeechClip, type SpeechClip } from "./speech-audio.ts";
+import type { SpeechClipPersistence } from "./speech-persist.ts";
 
 /**
  * 内存缓存预算。跟书籍的 50MB 单文件上限是两回事，各管各的：
  * 这里存的是已经合成好的 MP3，超出后按最久未用淘汰。
+ * 一格长批次约 5MB，正在播的、预取的下一格、首段和第二段同时在内存里要十几 MB，留宽一点。
  */
-export const DEFAULT_CLIP_BUDGET_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_CLIP_BUDGET_BYTES = 40 * 1024 * 1024;
 
 /** 同时在飞的预取请求上限。正在播放要用的那条不受这个限制，永远插队。 */
 const PREFETCH_CONCURRENCY = 2;
@@ -88,15 +90,18 @@ export class SpeechClipStore {
   private readonly fetcher: ClipFetcher;
   private readonly budget: number;
   private readonly concurrency: number;
+  private readonly persistence: SpeechClipPersistence | null;
 
   constructor(
     fetcher: ClipFetcher = fetchSpeechClip,
     budget = DEFAULT_CLIP_BUDGET_BYTES,
-    concurrency = PREFETCH_CONCURRENCY
+    concurrency = PREFETCH_CONCURRENCY,
+    persistence: SpeechClipPersistence | null = null
   ) {
     this.fetcher = fetcher;
     this.budget = budget;
     this.concurrency = concurrency;
+    this.persistence = persistence;
   }
 
   /**
@@ -146,6 +151,55 @@ export class SpeechClipStore {
   /** 顺手准备，不关心结果；失败也不该冒泡成未处理拒绝。 */
   prefetch(text: string, voice: string): void {
     this.request(text, voice).catch(() => undefined);
+  }
+
+  /**
+   * 只从本机缓存往内存里搬，不走网络。进播放页时先把当前位置那一格搬上来，
+   * 点播放就能同步命中、立刻出声。返回这一段现在在不在内存里。
+   */
+  async warm(text: string, voice: string): Promise<boolean> {
+    const key = clipKey(text, voice);
+    if (this.cache.has(key)) return true;
+    const clip = await this.persistence?.get(key).catch(() => null);
+    if (!clip) return false;
+    this.store(key, clip);
+    return true;
+  }
+
+  /**
+   * 离线缓存：合成好直接落到本机，不进内存——下载好几格的时候不能把正在播的、
+   * 预取好的下一段挤出内存，那样后台换段就得现等网络。已经在本机的直接跳过。
+   */
+  async download(text: string, voice: string, signal?: AbortSignal): Promise<void> {
+    if (!this.persistence) throw new Error("这台设备不支持离线缓存");
+    const key = clipKey(text, voice);
+    if (await this.persistence.has(key)) return;
+    const memory = this.cache.get(key)?.clip;
+    if (memory) {
+      await this.persistence.put(key, memory);
+      return;
+    }
+    const inflight = this.inflight.get(key);
+    if (inflight) {
+      await this.attach(inflight, signal);
+      return;
+    }
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      const clip = await this.fetcher(text, voice, controller.signal);
+      await this.persistence.put(key, clip);
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** 本机缓存里有没有这一段（离线缓存显示进度用）。 */
+  async persisted(text: string, voice: string): Promise<boolean> {
+    const key = clipKey(text, voice);
+    if (!this.persistence) return false;
+    return this.persistence.has(key).catch(() => false);
   }
 
   /** 换书、跳章、关面板时把还没人等的准备任务全掐掉。 */
@@ -246,7 +300,15 @@ export class SpeechClipStore {
     });
 
     entry.promise = gate
-      .then(() => this.fetcher(text, voice, controller.signal))
+      .then(async () => {
+        // 先看本机有没有：重开应用、听过的章节再听一遍，都不用再等合成。
+        const saved = await this.persistence?.get(key).catch(() => null);
+        if (saved) return saved;
+        if (controller.signal.aborted) throw abortError();
+        const clip = await this.fetcher(text, voice, controller.signal);
+        void this.persistence?.put(key, clip).catch(() => undefined);
+        return clip;
+      })
       .then((clip) => {
         this.store(key, clip);
         return clip;

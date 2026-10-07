@@ -1,35 +1,67 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { flattenChapter, initialPosition, positionFor } from "../lib/content";
-import { chapterLabel, displayTitle } from "../lib/display-title";
+import { initialPosition, positionFor } from "../lib/content";
+import {
+  chapterLabel,
+  displayTitle,
+  tocIndexes,
+  tocIndexFor,
+  tocRange,
+} from "../lib/display-title";
 import {
   EDGE_VOICES,
   edgeVoiceName,
-  isEdgeVoiceURI,
   normalizeVoiceURI,
   resolvedEdgeVoiceURI,
 } from "../lib/edge-voices";
-import { isAbortError, SpeechClipStore } from "../lib/speech-cache";
 import {
-  segmentFromChapter,
-  spanForSentence,
-  type SpeechEngine,
-} from "../lib/speech-segments";
+  chapterDuration,
+  listenChapter,
+  sentenceAtSeconds,
+  sentenceSeconds,
+  type ListenChapter,
+} from "../lib/listen-clock";
 import { SpeechClipError, type SpeechClip } from "../lib/speech-audio";
+import { isAbortError, SpeechClipStore } from "../lib/speech-cache";
+import { createSpeechPersistence } from "../lib/speech-persist";
+import {
+  cursorAfterSeconds,
+  cursorAt,
+  gridSegmentAt,
+  nextTier,
+  ordinalOf,
+  spanForSentence,
+  speechIndexFor,
+  speechReplacer,
+  speechSegment,
+  systemSegment,
+  type SpeechCursor,
+  type SpeechSegment,
+  type SpeechTier,
+} from "../lib/speech-segments";
 import { charIndexAt, spanAt, timeAt } from "../lib/speech-timeline";
 import type {
   Book,
   BookPosition,
-  Chapter,
   PlayerVoice,
   ReaderSettings,
-  SpeechBlock,
   SpeechLocation,
   SpeechSpan,
 } from "../lib/types";
 
-export type SleepMode = "off" | "15" | "30" | "45" | "chapter";
+export type SleepMode = "off" | "15" | "30" | "45" | "60" | "chapter";
+
+/** 快进快退一下跳多少秒（按屏幕上的时钟，也就是已经除过倍速的时间）。 */
+export const SKIP_SECONDS = 15;
+
+export interface SpeechDownload {
+  bookId: string;
+  total: number;
+  done: number;
+  failed: number;
+  running: boolean;
+}
 
 interface SpeechPlayerOptions {
   /**
@@ -50,46 +82,60 @@ interface SpeechPlayerState {
   currentSentenceId: string;
   error: string;
   sleepMode: SleepMode;
-  /** 真正在出声的那个音色，已折算成具体音色；云端退回系统朗读时这里是系统音色。 */
+  /** 定时关闭的到点时刻（毫秒时间戳）；不是按分钟定时的时候为 null。 */
+  sleepDeadline: number | null;
+  /** 真正在出声的那个音色；云端暂时不可用、退回系统朗读时这里是系统音色。 */
   activeVoiceURI: string;
-  /** 用户刚点、正在准备的音色。空串表示没有正在进行的切换。 */
-  pendingVoiceURI: string;
-  /** 切换失败的原因。原音色会继续播，用户可以重试。 */
-  voiceError: string;
+  /** 云端暂时不可用，正在用系统声音顶着，过一阵会自动试着换回来。 */
+  usingFallback: boolean;
+  download: SpeechDownload | null;
   start: (bookId: string, position?: BookPosition) => void;
   toggle: () => void;
   stop: () => void;
-  skipSentences: (delta: number) => void;
+  /** 往前（正数）或往后跳多少秒，按屏幕时钟算。 */
+  skipSeconds: (seconds: number) => void;
   changeChapter: (delta: number) => void;
   setSleepMode: (mode: SleepMode) => void;
-  retryVoiceSwitch: () => void;
-  /** 打开音色面板时顺手准备几个候选，让常用音色的切换命中缓存。 */
-  prefetchVoices: (voiceURIs: string[]) => void;
-  /** 关面板、跳章、换书时把还没人要的准备任务掐掉。 */
-  cancelVoicePrefetch: () => void;
   /** 进播放页时把首段提前备好，点下去就不用等合成。 */
   prefetchStart: (book: Book, position: BookPosition) => void;
-  /** 这一场用过的音色，最近的排前面。面板拿它决定预取谁。 */
-  recentVoiceURIs: string[];
+  /** 把当前位置往后几章的音频合成好存在本机，没网也能听。 */
+  downloadAhead: (bookId: string, chapters: number) => void;
+  cancelDownload: () => void;
 }
 
 const NATURAL_VOICE_PATTERN =
   /natural|neural|premium|enhanced|online|siri|自然|在线/i;
+/**
+ * 各平台公认好听的中文系统音色（取自 Readium Speech 的推荐表）：苹果的 Lilian、Yue、
+ * Lili、Han，Edge 浏览器自带的 Xiaoxiao 等，Chrome 的 Google 普通话。
+ */
+const RECOMMENDED_VOICE_PATTERN =
+  /lilian|\byue\b|\blili\b|\bhan\b|xiaoxiao|xiaoyi|yunxi|yunjian|yunyang|google 普通话/i;
 
 function voiceScore(voice: SpeechSynthesisVoice): number {
   const lang = voice.lang.toLowerCase().replace(/_/g, "-");
   let score = 0;
-  if (lang === "zh" || /^zh-(cn|hans|sg)/.test(lang)) score += 100;
-  else if (lang.startsWith("zh")) score += 60;
-  if (NATURAL_VOICE_PATTERN.test(voice.name)) score += 30;
+  if (lang === "zh" || /^zh-(cn|hans|sg)/.test(lang) || /^cmn-cn/.test(lang)) score += 100;
+  else if (lang.startsWith("zh") || lang.startsWith("cmn")) score += 60;
+  // 苹果把「增强」「高级」写在 voiceURI 里（com.apple.voice.premium.zh-CN.Lili），名字里没有。
+  if (NATURAL_VOICE_PATTERN.test(`${voice.name} ${voice.voiceURI}`)) score += 30;
+  if (RECOMMENDED_VOICE_PATTERN.test(voice.name)) score += 20;
+  // 退回系统朗读多半是因为网不好，本机就能出声的更靠得住。
+  if (voice.localService) score += 10;
   return score;
 }
 
 const CJK_CHARS_PER_SECOND = 5.2;
 const LATIN_CHARS_PER_SECOND = 15;
 const HIGHLIGHT_INTERVAL_MS = 100;
-/** 面板打开时最多顺手准备几个音色。再多就是在替用户瞎猜，白烧合成次数。 */
-const MAX_VOICE_PREFETCH = 3;
+/** 云端失败后先再试一次，间隔这么久。 */
+const EDGE_RETRY_DELAY_MS = 1500;
+/** 退回系统朗读之后，过多久再试云端；连着失败就翻倍，最多等这么久。 */
+const EDGE_COOLDOWN_MS = 30000;
+const EDGE_MAX_COOLDOWN_MS = 5 * 60 * 1000;
+/** 「本章结束后」在换章前的静音里停下：拼接时章节之间留了 1.8 秒，提前这么多秒停。 */
+const CHAPTER_STOP_LEAD_SECONDS = 1.5;
+const POSITION_STATE_INTERVAL_MS = 5000;
 
 function estimateCharsPerSecond(text: string, rate: number): number {
   const cjk = text.match(/[㐀-鿿]/g)?.length ?? 0;
@@ -100,45 +146,8 @@ function estimateCharsPerSecond(text: string, rate: number): number {
   );
 }
 
-function locationAfter(
-  book: Book,
-  chapterIndex: number,
-  sentenceIndex: number,
-  delta: number
-): { chapterIndex: number; sentenceIndex: number } | null {
-  let chapter = chapterIndex;
-  let sentence = sentenceIndex;
-  let remaining = Math.abs(delta);
-  const direction = delta >= 0 ? 1 : -1;
-
-  if (!book.chapters.length) return null;
-
-  while (remaining > 0) {
-    const sentences = flattenChapter(book.chapters[chapter]);
-    sentence += direction;
-    if (sentence >= sentences.length) {
-      chapter += 1;
-      sentence = 0;
-    } else if (sentence < 0) {
-      chapter -= 1;
-      if (chapter >= 0) {
-        sentence = flattenChapter(book.chapters[chapter]).length - 1;
-      }
-    }
-    // 走到书的两头就停在端点。这里以前返回 null，调用方直接 return，
-    // 于是开头按快退、结尾按快进都是一点反应都没有，看着就像按钮坏了。
-    if (chapter < 0) return { chapterIndex: 0, sentenceIndex: 0 };
-    if (chapter >= book.chapters.length) {
-      const last = book.chapters.length - 1;
-      return {
-        chapterIndex: last,
-        sentenceIndex: Math.max(0, flattenChapter(book.chapters[last]).length - 1),
-      };
-    }
-    remaining -= 1;
-  }
-
-  return { chapterIndex: chapter, sentenceIndex: sentence };
+function isAndroid(): boolean {
+  return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
 }
 
 /**
@@ -177,11 +186,27 @@ function silentClipUrl(): string {
   return silentClipUrlCache;
 }
 
+/** 正在放（或刚放完、暂停着）的这一段。 */
+interface Loaded {
+  token: number;
+  bookId: string;
+  engine: "edge" | "system";
+  segment: SpeechSegment;
+  /** 云端音频和它的时间轴；系统朗读没有。 */
+  clip: SpeechClip | null;
+  /** 合成这段用的音色。暂停期间换了音色，恢复时就不能接着放旧的。 */
+  voice: string;
+}
+
 interface PlayOptions {
-  /** 起播、换音色、跳位置时给一段短的，出声快；接着往下读才换长批次。 */
-  quick?: boolean;
-  /** 交接用：音频从这一句对应的时间点开始放，而不是从整段开头。 */
-  seekToSentence?: number;
+  /** 云端分段档位。接着上一段往下读时是上一段的下一档，跳位置、起播从 0 档开始。 */
+  tier?: SpeechTier;
+  /** 第几次尝试；云端失败先再试一次，再失败才退回系统朗读。 */
+  attempt?: number;
+}
+
+function sameCursor(a: SpeechCursor | null, b: SpeechCursor | null): boolean {
+  return Boolean(a && b && a.chapterIndex === b.chapterIndex && a.sentenceIndex === b.sentenceIndex);
 }
 
 export function useSpeechPlayer({
@@ -195,6 +220,11 @@ export function useSpeechPlayer({
     const voiceURI = normalizeVoiceURI(rawSettings.voiceURI);
     return voiceURI === rawSettings.voiceURI ? rawSettings : { ...rawSettings, voiceURI };
   }, [rawSettings]);
+  const speak = useMemo(
+    () => speechReplacer(settings.speechReplacements),
+    [settings.speechReplacements]
+  );
+
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -203,66 +233,54 @@ export function useSpeechPlayer({
   const [currentSentenceId, setCurrentSentenceId] = useState("");
   const [error, setError] = useState("");
   const [sleepModeState, setSleepModeState] = useState<SleepMode>("off");
+  const [sleepDeadline, setSleepDeadline] = useState<number | null>(null);
   const [activeVoiceURI, setActiveVoiceURI] = useState("");
-  const [pendingVoiceURI, setPendingVoiceURI] = useState("");
-  const [voiceError, setVoiceError] = useState("");
-  const [recentVoiceURIs, setRecentVoiceURIs] = useState<string[]>([]);
+  const [usingFallback, setUsingFallback] = useState(false);
+  const [download, setDownload] = useState<SpeechDownload | null>(null);
 
   const getBookRef = useRef(getBook);
   const settingsRef = useRef(settings);
+  const speakRef = useRef(speak);
   const onProgressRef = useRef(onProgress);
+  const systemVoicesRef = useRef(systemVoices);
   const locationRef = useRef<SpeechLocation | null>(null);
+  /** 用户的意图：应该在出声。系统把音频停了（来电、拔耳机）会被同步成 false。 */
   const playingRef = useRef(false);
+  /** 每次起一段新的播放加一；回调里比对它，过期的直接丢掉。 */
   const tokenRef = useRef(0);
-  const engineRef = useRef<SpeechEngine | null>(null);
-  const sleepModeRef = useRef<SleepMode>("off");
-  const sleepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const trackRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const segmentCacheRef = useRef(new Map<string, SpeechBlock | null>());
-  const blockedVoicesRef = useRef(new Set<string>());
+  const loadedRef = useRef<Loaded | null>(null);
+  /** 正在放静音占位、等云端音频。 */
+  const waitingRef = useRef(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const clipUrlRef = useRef("");
-  /**
-   * 正在播的这一段音频、它对应的文本和时间轴。
-   * 快进快退只要目标句还在这一段里，就能直接跳时间轴，不必重新合成。
-   */
-  const playingClipRef = useRef<{
-    bookId: string;
-    chapterIndex: number;
-    segment: SpeechBlock;
-    clip: SpeechClip;
-  } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const edgeDownRef = useRef(false);
-  const waitingForClipRef = useRef(false);
-  const activeVoiceRef = useRef("");
-  const requestedVoiceRef = useRef(settings.voiceURI);
-  const handoverTokenRef = useRef(0);
-  const handoverAbortRef = useRef<AbortController | null>(null);
-  const handoverPendingRef = useRef(false);
-  /**
-   * 预取时用的那个位置。交接必须回到同一个锚点去取音频：合成结果是按整段文本缓存的，
-   * 换个起始句就是另一段文本、另一个键，预取白做。位置的推进改用 seek 补偿。
-   */
-  const prefetchAnchorRef = useRef<{
-    bookId: string;
-    chapterIndex: number;
-    sentenceIndex: number;
-  } | null>(null);
-  const playAtRef = useRef<
-    | ((
-        bookId: string,
-        chapterIndex: number,
-        sentenceIndex: number,
-        options?: PlayOptions
-      ) => void)
-    | null
-  >(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trackRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** 云端什么时候可以再试；0 表示随时可用。 */
+  const edgeRetryAtRef = useRef(0);
+  const edgeFailuresRef = useRef(0);
+  const blockedVoicesRef = useRef(new Set<string>());
+  const sleepModeRef = useRef<SleepMode>("off");
+  const sleepDeadlineRef = useRef<number | null>(null);
+  const sleepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 「本章结束后」停在哪一章之后：目录里这一项的最后一章（续页算在内）。 */
+  const sleepLastChapterRef = useRef(-1);
+  const downloadAbortRef = useRef<AbortController | null>(null);
+  const positionStateAtRef = useRef(0);
+  const listenCacheRef = useRef<{ chapters: Book["chapters"]; first: number; listen: ListenChapter } | null>(null);
 
-  // 请求与缓存只此一份，整场收听共用，所以换音色来回切能命中已经合成过的音频。
-  // 用 useState 的惰性初始化拿这个稳定实例：useMemo 允许被丢弃重算，缓存会跟着白丢。
-  const [store] = useState(() => new SpeechClipStore());
+  // 请求与缓存只此一份，整场收听共用。用 useState 的惰性初始化拿稳定实例：
+  // useMemo 允许被丢弃重算，缓存会跟着白丢。
+  const [store] = useState(
+    () =>
+      new SpeechClipStore(
+        undefined,
+        undefined,
+        undefined,
+        typeof window === "undefined" ? null : createSpeechPersistence()
+      )
+  );
 
   useEffect(() => {
     getBookRef.current = getBook;
@@ -273,13 +291,16 @@ export function useSpeechPlayer({
   }, [settings]);
 
   useEffect(() => {
+    speakRef.current = speak;
+  }, [speak]);
+
+  useEffect(() => {
     onProgressRef.current = onProgress;
   }, [onProgress]);
 
-  // 云端合成一律按原速，倍速交给 playbackRate，所以调速能在播放中立即生效。
   useEffect(() => {
-    if (audioRef.current) audioRef.current.playbackRate = settings.speechRate;
-  }, [settings.speechRate]);
+    systemVoicesRef.current = systemVoices;
+  }, [systemVoices]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
@@ -301,8 +322,10 @@ export function useSpeechPlayer({
     };
   }, []);
 
-  // 能选的只有云端音色；systemVoices 留着给云端断掉时自动顶上用。
+  // 能选的只有云端音色；系统语音留着给云端断掉时自动顶上用。
   const voices: PlayerVoice[] = EDGE_VOICES;
+
+  const voiceName = () => edgeVoiceName(settingsRef.current.voiceURI);
 
   const clearTimers = useCallback(() => {
     if (keepAliveRef.current) {
@@ -313,6 +336,10 @@ export function useSpeechPlayer({
       clearInterval(trackRef.current);
       trackRef.current = null;
     }
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
   }, []);
 
   const releaseClip = useCallback(() => {
@@ -320,38 +347,6 @@ export function useSpeechPlayer({
       URL.revokeObjectURL(clipUrlRef.current);
       clipUrlRef.current = "";
     }
-  }, []);
-
-  /** 丢掉正在进行的音色切换。连点、播完接段、停止都要走这一步。 */
-  const cancelHandover = useCallback(() => {
-    handoverTokenRef.current += 1;
-    handoverAbortRef.current?.abort();
-    handoverAbortRef.current = null;
-    handoverPendingRef.current = false;
-    setPendingVoiceURI("");
-  }, []);
-
-  const noteVoiceUsed = useCallback((voiceURI: string) => {
-    activeVoiceRef.current = voiceURI;
-    setActiveVoiceURI(voiceURI);
-    setRecentVoiceURIs((current) => {
-      if (current[0] === voiceURI) return current;
-      return [voiceURI, ...current.filter((item) => item !== voiceURI)].slice(
-        0,
-        6
-      );
-    });
-  }, []);
-
-  // 后台播放被系统拦下时不能当成播完：清掉位置的话迷你播放器会消失，
-  // 回到前台连「继续」都没得点。只置成暂停，原地等用户点一下。
-  const holdForResume = useCallback((message: string) => {
-    playingRef.current = false;
-    waitingForClipRef.current = false;
-    setIsPlaying(false);
-    setIsPaused(true);
-    setIsBuffering(false);
-    setError(message);
   }, []);
 
   const silenceAudio = useCallback(() => {
@@ -364,48 +359,69 @@ export function useSpeechPlayer({
     audio.load();
   }, []);
 
-  const stop = useCallback(() => {
-    tokenRef.current += 1;
-    playingRef.current = false;
-    engineRef.current = null;
-    waitingForClipRef.current = false;
-    clearTimers();
-    cancelHandover();
-    abortRef.current?.abort();
-    abortRef.current = null;
-    store.cancelPending();
-    silenceAudio();
-    releaseClip();
-    playingClipRef.current = null;
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
+  /** 目录里这一章（续页并进来）的时长表，锁屏进度条和「拖到第几秒」共用。 */
+  const listenFor = useCallback((book: Book, chapterIndex: number): ListenChapter => {
+    const toc = tocIndexes(book.chapters);
+    const range = tocRange(toc, chapterIndex, book.chapters.length);
+    const cached = listenCacheRef.current;
+    if (cached && cached.chapters === book.chapters && cached.first === range.first) {
+      return cached.listen;
     }
-    // 定时关闭是「这一次收听」的设置，停了就该归零，不然换本书还会在原来的时间点断掉。
-    if (sleepTimerRef.current) {
-      clearTimeout(sleepTimerRef.current);
-      sleepTimerRef.current = null;
-    }
-    sleepModeRef.current = "off";
-    setSleepModeState("off");
-    // 迷你播放器是由 location 推出来的，不清掉就永远赖在书库上关不掉。
-    locationRef.current = null;
-    setLocation(null);
-    setCurrentSentenceId("");
-    setIsPlaying(false);
-    setIsPaused(false);
-    setIsBuffering(false);
-    activeVoiceRef.current = "";
-    setActiveVoiceURI("");
-    setVoiceError("");
-  }, [cancelHandover, clearTimers, releaseClip, silenceAudio, store]);
+    const listen = listenChapter(book.chapters, range.first, range.last);
+    listenCacheRef.current = { chapters: book.chapters, first: range.first, listen };
+    return listen;
+  }, []);
 
-  /** 把「现在读到哪一句」落到状态和进度上。播放推进和段内快进共用这一条路。 */
+  /**
+   * 锁屏和控制中心上的进度条。按屏幕时钟给（已经除过倍速），跟播放页显示的一致；
+   * 位置是这一句的估算起点加上这一句实际已经读了多久。
+   */
+  const updatePositionState = useCallback(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    const session = navigator.mediaSession;
+    if (typeof session.setPositionState !== "function") return;
+    const at = locationRef.current;
+    const book = at ? getBookRef.current(at.bookId) : undefined;
+    if (!at || !book) return;
+    positionStateAtRef.current = Date.now();
+    const rate = Math.max(settingsRef.current.speechRate, 0.1);
+    const listen = listenFor(book, at.chapterIndex);
+    const sentence = sentenceSeconds(listen, at.chapterIndex, at.sentenceIndex);
+    let within = 0;
+    const loaded = loadedRef.current;
+    const audio = audioRef.current;
+    if (loaded?.clip && audio && loaded.engine === "edge") {
+      const span = spanForSentence(loaded.segment, at);
+      if (span) {
+        within = Math.min(
+          Math.max(0, audio.currentTime - timeAt(loaded.clip.timeline, span.start)),
+          sentence.end - sentence.start
+        );
+      }
+    }
+    const duration = Math.max(chapterDuration(listen) / rate, 1);
+    const position = Math.min((sentence.start + within) / rate, duration);
+    try {
+      session.setPositionState({ duration, playbackRate: 1, position });
+    } catch {
+      // 个别浏览器对参数挑剔，进度条不是必需的。
+    }
+  }, [listenFor]);
+
+  /** 把「现在读到哪一句」落到状态和进度上。 */
   const commitSpan = useCallback(
-    (book: Book, chapterIndex: number, span: SpeechSpan) => {
-      if (locationRef.current?.sentenceId === span.sentenceId) return;
+    (book: Book, span: Pick<SpeechSpan, "chapterIndex" | "sentenceIndex" | "sentenceId">) => {
+      const current = locationRef.current;
+      if (
+        current?.bookId === book.id &&
+        current.chapterIndex === span.chapterIndex &&
+        current.sentenceIndex === span.sentenceIndex
+      ) {
+        return;
+      }
       const nextLocation: SpeechLocation = {
         bookId: book.id,
-        chapterIndex,
+        chapterIndex: span.chapterIndex,
         sentenceIndex: span.sentenceIndex,
         sentenceId: span.sentenceId,
       };
@@ -414,73 +430,268 @@ export function useSpeechPlayer({
       setCurrentSentenceId(span.sentenceId);
       onProgressRef.current(
         book.id,
-        positionFor(book, chapterIndex, span.sentenceIndex)
+        positionFor(book, span.chapterIndex, span.sentenceIndex)
       );
+      updatePositionState();
     },
-    []
+    [updatePositionState]
   );
 
-  /** 章节分段的结果按（章, 引擎, 长短）缓存，滚动播放时不必每段重排一次全章。 */
-  const segmentFor = useCallback(
-    (
-      chapter: Chapter,
-      sentenceIndex: number,
-      engine: SpeechEngine,
-      quick: boolean
-    ): SpeechBlock | null => {
-      const key = `${engine}:${quick ? "q" : "l"}:${chapter.id}:${sentenceIndex}`;
-      const cached = segmentCacheRef.current.get(key);
-      if (cached !== undefined) return cached;
-      const segment = segmentFromChapter(chapter, sentenceIndex, engine, quick);
-      // 缓存无上限会随着长书一直涨，超过这个数就整盘丢掉重来，代价只是重排一次。
-      if (segmentCacheRef.current.size > 512) segmentCacheRef.current.clear();
-      segmentCacheRef.current.set(key, segment);
-      return segment;
+  const commitCursor = useCallback(
+    (book: Book, cursor: SpeechCursor) => {
+      const position = positionFor(book, cursor.chapterIndex, cursor.sentenceIndex);
+      commitSpan(book, {
+        chapterIndex: position.chapterIndex,
+        sentenceIndex: position.sentenceIndex,
+        sentenceId: position.sentenceId,
+      });
     },
-    []
+    [commitSpan]
   );
+
+  const noteVoiceUsed = useCallback((voiceURI: string, fallback: boolean) => {
+    setActiveVoiceURI(voiceURI);
+    setUsingFallback(fallback);
+  }, []);
+
+  /**
+   * 停在原地等用户点一下：后台播放被系统拦下、来电打断这类情况不能当成播完，
+   * 清掉位置的话迷你播放器会消失，回到前台连「继续」都没得点。
+   */
+  const holdForResume = useCallback(
+    (message: string) => {
+      playingRef.current = false;
+      waitingRef.current = false;
+      clearTimers();
+      setIsPlaying(false);
+      setIsPaused(true);
+      setIsBuffering(false);
+      setError(message);
+    },
+    [clearTimers]
+  );
+
+  const stop = useCallback(() => {
+    tokenRef.current += 1;
+    playingRef.current = false;
+    waitingRef.current = false;
+    loadedRef.current = null;
+    clearTimers();
+    abortRef.current?.abort();
+    abortRef.current = null;
+    store.cancelPending();
+    silenceAudio();
+    releaseClip();
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    // 定时关闭是「这一次收听」的设置，停了就该归零。
+    if (sleepTimerRef.current) {
+      clearTimeout(sleepTimerRef.current);
+      sleepTimerRef.current = null;
+    }
+    sleepModeRef.current = "off";
+    sleepDeadlineRef.current = null;
+    setSleepModeState("off");
+    setSleepDeadline(null);
+    // 迷你播放器是由 location 推出来的，不清掉就永远赖在书库上关不掉。
+    locationRef.current = null;
+    setLocation(null);
+    setCurrentSentenceId("");
+    setIsPlaying(false);
+    setIsPaused(false);
+    setIsBuffering(false);
+    setActiveVoiceURI("");
+    setUsingFallback(false);
+  }, [clearTimers, releaseClip, silenceAudio, store]);
+
+  const clearSleep = useCallback(() => {
+    if (sleepTimerRef.current) {
+      clearTimeout(sleepTimerRef.current);
+      sleepTimerRef.current = null;
+    }
+    sleepModeRef.current = "off";
+    sleepDeadlineRef.current = null;
+    setSleepModeState("off");
+    setSleepDeadline(null);
+  }, []);
+
+  /** 暂停在原地，位置、迷你播放条都留着。用户点暂停、定时关闭到点都走这里。 */
+  const pause = useCallback(() => {
+    if (!playingRef.current && !waitingRef.current) return;
+    playingRef.current = false;
+    waitingRef.current = false;
+    clearTimers();
+    const loaded = loadedRef.current;
+    if (loaded?.engine === "system") {
+      // 系统朗读的 pause/resume 在 iOS、安卓上都靠不住，干脆停掉，继续时从这一句重读。
+      tokenRef.current += 1;
+      loadedRef.current = null;
+      window.speechSynthesis?.cancel();
+    } else {
+      audioRef.current?.pause();
+      // 还在等音频的那次请求不掐：合成结果会进缓存，继续时直接命中。
+      if (!loaded?.clip) loadedRef.current = null;
+    }
+    setIsPlaying(false);
+    setIsPaused(true);
+    setIsBuffering(false);
+    updatePositionState();
+  }, [clearTimers, updatePositionState]);
+
+  /** 定时关闭到点：暂停，「本章结束后」把位置挪到下一章开头，继续时从那里读。 */
+  const pauseForSleep = useCallback(
+    (resumeAt: SpeechCursor | null) => {
+      pause();
+      clearSleep();
+      if (resumeAt) {
+        const at = locationRef.current;
+        const book = at ? getBookRef.current(at.bookId) : undefined;
+        if (book) commitCursor(book, resumeAt);
+      }
+    },
+    [clearSleep, commitCursor, pause]
+  );
+
+  const sleepDue = () =>
+    sleepDeadlineRef.current !== null && Date.now() >= sleepDeadlineRef.current;
+
+  /** 云端连不上：记一次失败，按次数翻倍冷却，冷却期间用系统朗读。 */
+  const noteEdgeFailure = () => {
+    edgeFailuresRef.current += 1;
+    edgeRetryAtRef.current =
+      Date.now() +
+      Math.min(EDGE_COOLDOWN_MS * 2 ** (edgeFailuresRef.current - 1), EDGE_MAX_COOLDOWN_MS);
+  };
+
+  const noteEdgeSuccess = () => {
+    edgeFailuresRef.current = 0;
+    edgeRetryAtRef.current = 0;
+  };
+
+  const playAtRef = useRef<
+    ((bookId: string, cursor: SpeechCursor, options?: PlayOptions) => void) | null
+  >(null);
+
+  /** 一段读完：接下一段，或者在这里按定时关闭停下。 */
+  const finishSegment = useCallback(
+    (loaded: Loaded) => {
+      if (loaded.token !== tokenRef.current || !playingRef.current) return;
+      clearTimers();
+      const next = loaded.segment.next;
+      if (!next) {
+        // 全书读完。
+        stop();
+        return;
+      }
+      if (sleepDue()) {
+        pauseForSleep(next);
+        return;
+      }
+      if (sleepModeRef.current === "chapter" && next.chapterIndex > sleepLastChapterRef.current) {
+        pauseForSleep(next);
+        return;
+      }
+      playAtRef.current?.(loaded.bookId, next, {
+        tier: loaded.engine === "edge" ? nextTier(loaded.segment.tier) : 0,
+      });
+    },
+    [clearTimers, pauseForSleep, stop]
+  );
+
+  /** 云端这一段的进度：高亮、存进度、定时关闭都在这里判断。 */
+  const tick = useCallback(() => {
+    const loaded = loadedRef.current;
+    const audio = audioRef.current;
+    if (!loaded || loaded.engine !== "edge" || !loaded.clip || !audio) return;
+    if (loaded.token !== tokenRef.current || !playingRef.current || audio.paused) return;
+    const book = getBookRef.current(loaded.bookId);
+    if (!book) return;
+    const time = audio.currentTime;
+    commitSpan(book, spanAt(loaded.segment.spans, charIndexAt(loaded.clip.timeline, time)));
+
+    if (sleepDue()) {
+      pauseForSleep(null);
+      return;
+    }
+    if (sleepModeRef.current === "chapter") {
+      const boundary = loaded.segment.spans.find(
+        (span) => span.chapterIndex > sleepLastChapterRef.current
+      );
+      if (boundary && time >= timeAt(loaded.clip.timeline, boundary.start) - CHAPTER_STOP_LEAD_SECONDS) {
+        pauseForSleep({ chapterIndex: boundary.chapterIndex, sentenceIndex: boundary.sentenceIndex });
+        return;
+      }
+    }
+    if (Date.now() - positionStateAtRef.current > POSITION_STATE_INTERVAL_MS) {
+      updatePositionState();
+    }
+  }, [commitSpan, pauseForSleep, updatePositionState]);
+
+  const tickRef = useRef(tick);
+  useEffect(() => {
+    tickRef.current = tick;
+  }, [tick]);
+
+  const startTracking = useCallback(() => {
+    if (trackRef.current) clearInterval(trackRef.current);
+    trackRef.current = setInterval(() => tickRef.current(), HIGHLIGHT_INTERVAL_MS);
+  }, []);
+
+  /**
+   * 同一个 audio 元素从头用到尾：换源只换 src，不摘掉元素，媒体会话才不会断。
+   * 系统打断（来电、Siri、别的应用放声音、拔耳机）只会暂停元素、不会告诉我们，
+   * 必须监听 pause 事件把状态同步过来，否则界面还显示在播、锁屏上的播放键按了没反应。
+   */
+  const ensureAudio = useCallback((): HTMLAudioElement => {
+    if (audioRef.current) return audioRef.current;
+    const audio = new Audio();
+    audio.preload = "auto";
+    audio.addEventListener("pause", () => {
+      // 自然播完会先发 pause 再发 ended；换源后紧接着 play() 的也会在这里看到 paused=false。
+      if (audio.ended || !audio.paused) return;
+      if (!playingRef.current && !waitingRef.current) return;
+      // 换成系统朗读时是我们自己把元素停了、摘了 src，不是系统打断。
+      if (loadedRef.current?.engine === "system" || !audio.getAttribute("src")) return;
+      playingRef.current = false;
+      waitingRef.current = false;
+      clearTimers();
+      setIsPlaying(false);
+      setIsPaused(true);
+      setIsBuffering(false);
+      updatePositionState();
+    });
+    audio.addEventListener("play", () => {
+      // 系统那边直接把声音续上了（比如车机、耳机上的播放键没经过 Media Session）。
+      const loaded = loadedRef.current;
+      if (playingRef.current || !loaded?.clip || audio.src !== clipUrlRef.current) return;
+      if (loaded.token !== tokenRef.current) return;
+      playingRef.current = true;
+      setIsPlaying(true);
+      setIsPaused(false);
+      setError("");
+      startTracking();
+    });
+    // 熄屏后定时器会被节流，timeupdate 跟着媒体管线走，高亮和定时关闭靠它兜底。
+    audio.addEventListener("timeupdate", () => tickRef.current());
+    audioRef.current = audio;
+    return audio;
+  }, [clearTimers, startTracking, updatePositionState]);
 
   const playAt = useCallback(
-    (
-      bookId: string,
-      chapterIndex: number,
-      sentenceIndex: number,
-      options: PlayOptions = {}
-    ) => {
+    (bookId: string, cursor: SpeechCursor, options: PlayOptions = {}) => {
       const book = getBookRef.current(bookId);
       if (!book) {
         setError("这本书已经不在书架中");
         stop();
         return;
       }
-
-      const chapter = book.chapters[chapterIndex];
-      const voiceURI = settingsRef.current.voiceURI;
-      const useEdge =
-        !edgeDownRef.current && (!voiceURI || isEdgeVoiceURI(voiceURI));
-      const selectedEngine: SpeechEngine = useEdge ? "edge" : "system";
-      const quick = options.quick ?? false;
-      const segment = chapter
-        ? segmentFor(chapter, sentenceIndex, selectedEngine, quick)
-        : null;
-
-      if (!chapter || !segment) {
-        if (chapter && chapterIndex + 1 < book.chapters.length) {
-          playAtRef.current?.(bookId, chapterIndex + 1, 0, { quick });
-          return;
-        }
+      const index = speechIndexFor(book.chapters);
+      if (ordinalOf(index, cursor) < 0) {
         setError("当前章节没有可朗读内容");
         stop();
         return;
       }
-
-      const advanceChapter = () => {
-        if (chapterIndex + 1 >= book.chapters.length) {
-          stop();
-          return;
-        }
-        playAtRef.current?.(bookId, chapterIndex + 1, 0);
-      };
 
       tokenRef.current += 1;
       const token = tokenRef.current;
@@ -492,72 +703,47 @@ export function useSpeechPlayer({
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }
-      // 已经退回系统朗读时要留着提示，否则读完一段就把「云端不可用」抹掉，
-      // 用户永远不知道音色为什么变了。
-      if (!edgeDownRef.current) setError("");
+      playingRef.current = true;
+      setIsPlaying(true);
+      setIsPaused(false);
+      // 退回系统朗读期间要留着提示，否则读完一块就把「云端连不上」抹掉，
+      // 用户永远不知道声音为什么变了；其余的旧提示（「点一下继续」之类）开播就该清掉。
+      if (Date.now() >= edgeRetryAtRef.current) setError("");
 
-      const applySpan = (span: SpeechSpan) => {
-        if (token !== tokenRef.current) return;
-        commitSpan(book, chapterIndex, span);
-      };
+      const speakText = speakRef.current;
+      const voice = voiceName();
+      const tier = options.tier ?? 0;
+      const attempt = options.attempt ?? 0;
 
-      // 交接时从中途起播，高亮也要直接落在那一句上，不能从段首开始往下爬。
-      const startSpan =
-        (options.seekToSentence === undefined
-          ? null
-          : spanForSentence(segment, options.seekToSentence)) ?? segment.spans[0];
-      applySpan(startSpan);
-
-      const finishSegment = () => {
-        if (token !== tokenRef.current || !playingRef.current) return;
-        clearTimers();
-        // 这一段自然读完时如果还在等切换的音频，那次准备已经没用了：
-        // 从下一句直接用新音色起播更快，也不会两段音频抢着播。
-        if (handoverPendingRef.current) cancelHandover();
-        const lastSentenceIndex =
-          segment.spans[segment.spans.length - 1].sentenceIndex;
-        const atChapterEnd = lastSentenceIndex >= chapter.sentenceCount - 1;
-        if (sleepModeRef.current === "chapter" && atChapterEnd) {
-          stop();
-          setSleepModeState("off");
-          sleepModeRef.current = "off";
-          return;
-        }
-        if (atChapterEnd) {
-          advanceChapter();
-          return;
-        }
-        playAtRef.current?.(bookId, chapterIndex, lastSentenceIndex + 1);
-      };
-
-      const startSystem = () => {
+      const startSystem = (reason: "fallback" | "content") => {
         if (
           typeof window === "undefined" ||
           !("speechSynthesis" in window) ||
           typeof SpeechSynthesisUtterance === "undefined"
         ) {
-          setError("当前浏览器没有提供系统朗读能力");
-          stop();
+          holdForResume("云端语音暂时连不上，点一下重试");
+          return;
+        }
+        const segment = systemSegment(book.chapters, cursor, speakText);
+        if (!segment) {
+          holdForResume("当前章节没有可朗读内容");
           return;
         }
 
-        engineRef.current = "system";
-        waitingForClipRef.current = false;
+        waitingRef.current = false;
         setIsBuffering(false);
-        // 系统朗读没有可跳的时间轴，段内快进这条路在这里必须断掉。
-        playingClipRef.current = null;
         silenceAudio();
         releaseClip();
+        const loaded: Loaded = { token, bookId, engine: "system", segment, clip: null, voice: "" };
+        loadedRef.current = loaded;
+
         const utterance = new SpeechSynthesisUtterance(segment.text);
-        const usableVoices = systemVoices.filter(
-          (voice) => !blockedVoicesRef.current.has(voice.voiceURI)
+        const usableVoices = systemVoicesRef.current.filter(
+          (item) => !blockedVoicesRef.current.has(item.voiceURI)
         );
         const selectedVoice =
-          usableVoices.find(
-            (voice) => voice.voiceURI === settingsRef.current.voiceURI
-          ) ??
-          usableVoices.find((voice) => voiceScore(voice) >= 100) ??
-          usableVoices.find((voice) => voiceScore(voice) >= 60);
+          usableVoices.find((item) => voiceScore(item) >= 100) ??
+          usableVoices.find((item) => voiceScore(item) >= 60);
         if (selectedVoice) {
           utterance.voice = selectedVoice;
           utterance.lang = selectedVoice.lang;
@@ -568,223 +754,238 @@ export function useSpeechPlayer({
         utterance.pitch = 1;
         utterance.volume = 1;
         // 退回系统朗读时这里必须报真实音色，不能还显示用户选的那个云端音色。
-        noteVoiceUsed(selectedVoice?.voiceURI ?? "");
+        noteVoiceUsed(selectedVoice?.voiceURI ?? "", reason === "fallback");
 
         let boundarySeen = false;
-
         utterance.onboundary = (event) => {
           if (token !== tokenRef.current) return;
           boundarySeen = true;
-          if (trackRef.current) {
-            clearInterval(trackRef.current);
-            trackRef.current = null;
-          }
-          applySpan(spanAt(segment.spans, event.charIndex));
+          commitSpan(book, spanAt(segment.spans, event.charIndex));
         };
-
-        utterance.onend = finishSegment;
-
+        utterance.onend = () => finishSegment(loaded);
         utterance.onerror = (event) => {
           if (token !== tokenRef.current) return;
           if (event.error === "canceled" || event.error === "interrupted") return;
           clearTimers();
-          // 在线神经音色断网时会报这几种错，把它拉黑后用本地音色重试一次，避免离线时完全不能听。
+          // 在线神经音色断网时会报这几种错，把它拉黑后用本地音色重试一次。
           const recoverable =
             event.error === "network" ||
             event.error === "synthesis-failed" ||
             event.error === "synthesis-unavailable";
           if (recoverable && selectedVoice && !selectedVoice.localService) {
             blockedVoicesRef.current.add(selectedVoice.voiceURI);
-            playAtRef.current?.(bookId, chapterIndex, sentenceIndex, { quick });
+            playAtRef.current?.(bookId, cursor, { tier: 0, attempt });
             return;
           }
-          setError("系统朗读被中断，请重新播放");
-          stop();
+          holdForResume("系统朗读被中断了，点一下继续");
         };
 
+        commitSpan(book, segment.spans[0]);
         window.speechSynthesis.speak(utterance);
 
-        // Chrome 播放单条 utterance 约 15 秒后会静默截断，定期 pause/resume 可以让它继续念完整段。
-        keepAliveRef.current = setInterval(() => {
-          if (token !== tokenRef.current) return;
-          // iOS 上 synth.paused 不可靠，只认我们自己记的状态，否则会把用户的暂停顶回去。
-          if (!playingRef.current) return;
-          const synth = window.speechSynthesis;
-          if (synth.speaking && !synth.paused) {
-            synth.pause();
-            synth.resume();
-          }
-        }, 10000);
+        // 桌面 Chrome 的在线语音念到 15 秒左右会静默截断，定期 pause/resume 能续上。
+        // 安卓上 pause 等于直接结束，绝不能这么干；本地语音也没有这个毛病。
+        if (!isAndroid() && selectedVoice && !selectedVoice.localService) {
+          keepAliveRef.current = setInterval(() => {
+            if (token !== tokenRef.current || !playingRef.current) return;
+            const synth = window.speechSynthesis;
+            if (synth.speaking && !synth.paused) {
+              synth.pause();
+              synth.resume();
+            }
+          }, 10000);
+        }
 
-        // iOS Safari 不派发 boundary 事件，用朗读速度估算高亮位置，等真实事件到达后立刻交还控制权。
-        const charsPerSecond = estimateCharsPerSecond(
-          segment.text,
-          utterance.rate
-        );
+        // iOS Safari 不派发 boundary 事件，按朗读速度估算高亮位置，真实事件一到就交还。
+        const charsPerSecond = estimateCharsPerSecond(segment.text, utterance.rate);
         let elapsed = 0;
         trackRef.current = setInterval(() => {
-          if (token !== tokenRef.current || boundarySeen) return;
-          if (!playingRef.current || window.speechSynthesis.paused) return;
+          if (token !== tokenRef.current || boundarySeen || !playingRef.current) return;
           elapsed += HIGHLIGHT_INTERVAL_MS;
-          applySpan(spanAt(segment.spans, (elapsed / 1000) * charsPerSecond));
+          commitSpan(book, spanAt(segment.spans, (elapsed / 1000) * charsPerSecond));
+          if (sleepDue()) pauseForSleep(null);
         }, HIGHLIGHT_INTERVAL_MS);
+
+        // 冷却到了就在系统朗读这一块的同时悄悄试一下云端：试通了，下一块直接换回云端，
+        // 用户只会听到声音变回来，不会多等。
+        if (reason === "fallback" && segment.next && Date.now() >= edgeRetryAtRef.current) {
+          const probe = speechSegment(index, segment.next, 0, speakText);
+          if (probe) {
+            store
+              .request(probe.text, voice)
+              .then(noteEdgeSuccess)
+              .catch((probeError: unknown) => {
+                if (!isAbortError(probeError)) noteEdgeFailure();
+              });
+          }
+        }
+      };
+
+      const beginClip = (segment: SpeechSegment, clip: SpeechClip) => {
+        const audio = ensureAudio();
+        audio.loop = false;
+        const loaded: Loaded = { token, bookId, engine: "edge", segment, clip, voice };
+        audio.onended = () => finishSegment(loaded);
+        audio.onerror = () => {
+          if (token !== tokenRef.current) return;
+          holdForResume("这一段没能播出来，点一下继续");
+        };
+        const previous = clipUrlRef.current;
+        const url = URL.createObjectURL(clip.audio);
+        clipUrlRef.current = url;
+        audio.src = url;
+        if (previous) URL.revokeObjectURL(previous);
+        audio.defaultPlaybackRate = settingsRef.current.speechRate;
+        audio.playbackRate = settingsRef.current.speechRate;
+
+        // 从中途起播：src 刚换上时 currentTime 可能还写不进去，元数据到位后再补一次。
+        const startSpan = spanForSentence(segment, cursor) ?? segment.spans[0];
+        if (startSpan.start > 0) {
+          const seconds = timeAt(clip.timeline, startSpan.start);
+          const applySeek = () => {
+            if (token !== tokenRef.current) return;
+            try {
+              audio.currentTime = seconds;
+            } catch {
+              // 拿不到就从段首放，顶多重听几句，不能因此不出声。
+            }
+          };
+          applySeek();
+          audio.addEventListener("loadedmetadata", applySeek, { once: true });
+        }
+
+        waitingRef.current = false;
+        loadedRef.current = loaded;
+        setIsBuffering(false);
+        noteEdgeSuccess();
+        noteVoiceUsed(resolvedEdgeVoiceURI(settingsRef.current.voiceURI), false);
+        setError("");
+        commitSpan(book, startSpan);
+        void audio.play().catch(() => {
+          if (token !== tokenRef.current) return;
+          holdForResume("播放被系统打断了，点一下继续");
+        });
+        startTracking();
+        void prefetchAfter(segment);
+      };
+
+      /**
+       * 下一段提前备好：本机缓存里有那一整格就搬进内存（之后同步命中），没有就去合成。
+       * 播放这一段的几十秒到十几分钟足够盖住下一段的合成时间。
+       */
+      const prefetchAfter = async (segment: SpeechSegment) => {
+        const next = segment.next;
+        if (!next) return;
+        const cell = gridSegmentAt(index, next, speakText);
+        if (cell && (await store.warm(cell.text, voice))) return;
+        if (token !== tokenRef.current) return;
+        const following = speechSegment(index, next, nextTier(segment.tier), speakText);
+        if (following) store.prefetch(following.text, voice);
       };
 
       const startEdge = () => {
-        engineRef.current = "edge";
-        const voiceName = edgeVoiceName(settingsRef.current.voiceURI);
-
-        const prefetchNext = () => {
-          const lastSentenceIndex =
-            segment.spans[segment.spans.length - 1].sentenceIndex;
-          const nextChapterIndex =
-            lastSentenceIndex >= chapter.sentenceCount - 1
-              ? chapterIndex + 1
-              : chapterIndex;
-          const nextSentenceIndex =
-            nextChapterIndex === chapterIndex ? lastSentenceIndex + 1 : 0;
-          const nextChapter = book.chapters[nextChapterIndex];
-          if (!nextChapter) return;
-
-          // 短首段之后要预取的是「长批次的精确续点」，不能预取另一个短块，
-          // 否则首段读完还要再等一次网络。
-          const next = segmentFor(nextChapter, nextSentenceIndex, "edge", false);
-          if (next) store.prefetch(next.text, voiceName);
-        };
-
-        const beginClip = (clip: SpeechClip) => {
-          const audio = audioRef.current ?? new Audio();
-          audioRef.current = audio;
-          audio.loop = false;
-          audio.onended = finishSegment;
-          audio.onerror = () => {
-            if (token !== tokenRef.current) return;
-            holdForResume("这一段没能播出来，点一下继续");
-          };
-          const previous = clipUrlRef.current;
-          const url = URL.createObjectURL(clip.audio);
-          clipUrlRef.current = url;
-          audio.src = url;
-          if (previous) URL.revokeObjectURL(previous);
-          audio.playbackRate = settingsRef.current.speechRate;
-
-          // 交接：从当前这句对应的时刻起播。src 刚换上时 currentTime 可能还写不进去，
-          // 所以元数据到位后再补一次，写两遍是幂等的。
-          const seekSpan =
-            options.seekToSentence === undefined
-              ? null
-              : spanForSentence(segment, options.seekToSentence);
-          if (seekSpan && seekSpan.start > 0) {
-            const seconds = timeAt(clip.timeline, seekSpan.start);
-            const applySeek = () => {
-              if (token !== tokenRef.current) return;
-              try {
-                audio.currentTime = seconds;
-              } catch {
-                // 拿不到就从段首放，顶多重听几句，不能因此不出声。
-              }
-            };
-            applySeek();
-            audio.addEventListener("loadedmetadata", applySeek, { once: true });
+        // 1. 这一整格已经在内存里（离线缓存、之前听过、进播放页时从本机搬上来的）：
+        //    直接从格子中间播，不必合成。
+        const cell = gridSegmentAt(index, cursor, speakText);
+        if (cell && store.has(cell.text, voice)) {
+          const clip = store.peek(cell.text, voice);
+          if (clip) {
+            beginClip(cell, clip);
+            return;
           }
+        }
 
-          waitingForClipRef.current = false;
-          setIsBuffering(false);
-          playingClipRef.current = { bookId, chapterIndex, segment, clip };
-          noteVoiceUsed(resolvedEdgeVoiceURI(settingsRef.current.voiceURI));
-          setVoiceError("");
-          void audio.play().catch(() => {
-            if (token !== tokenRef.current) return;
-            holdForResume("播放被系统打断了，点一下继续");
-          });
-
-          trackRef.current = setInterval(() => {
-            if (token !== tokenRef.current || audio.paused) return;
-            applySpan(
-              spanAt(segment.spans, charIndexAt(clip.timeline, audio.currentTime))
-            );
-          }, HIGHLIGHT_INTERVAL_MS);
-
-          prefetchNext();
-        };
-
-        // 缓存命中必须走同步路径：中间但凡有一次 await，后台的 play() 就会被 iOS
-        // 当成新的自动播放请求拦掉。这条也是「1 秒内出声」唯一站得住的依据。
-        const ready = store.peek(segment.text, voiceName);
+        // 2. 按档位取这一段。缓存命中必须走同步路径：中间但凡有一次 await，后台的
+        //    play() 就会被 iOS 当成新的自动播放请求拦掉。
+        const segment = speechSegment(index, cursor, tier, speakText);
+        if (!segment) {
+          holdForResume("当前章节没有可朗读内容");
+          return;
+        }
+        const ready = store.peek(segment.text, voice);
         if (ready) {
-          beginClip(ready);
+          beginClip(segment, ready);
           return;
         }
 
-        // 锁屏后台等网络时绝不能真的停音频，否则 audio session 会被系统回收，
-        // 之后 play() 能成功但发不出声音。改放静音占位撑住会话，取到音频再切换。
-        const waitingAudio = audioRef.current ?? new Audio();
-        audioRef.current = waitingAudio;
+        // 3. 现合成。锁屏后台等网络时绝不能真的停音频，否则 audio session 会被系统
+        //    回收，之后 play() 能成功但发不出声音。改放静音占位撑住会话。
+        const waitingAudio = ensureAudio();
         waitingAudio.onended = null;
         waitingAudio.onerror = null;
         waitingAudio.loop = true;
         waitingAudio.src = silentClipUrl();
-        waitingForClipRef.current = true;
+        waitingRef.current = true;
+        loadedRef.current = null;
         setIsBuffering(true);
         void waitingAudio.play().catch(() => undefined);
 
         const controller = new AbortController();
         abortRef.current = controller;
-
         store
-          .request(segment.text, voiceName, {
-            priority: true,
-            signal: controller.signal,
-          })
+          .request(segment.text, voice, { priority: true, signal: controller.signal })
           .then((clip) => {
-            if (token !== tokenRef.current || !playingRef.current) return;
-            beginClip(clip);
+            if (token !== tokenRef.current) return;
+            if (!playingRef.current) {
+              // 等的时候用户暂停了：音频已经进了缓存，继续时直接命中。
+              waitingRef.current = false;
+              setIsBuffering(false);
+              return;
+            }
+            beginClip(segment, clip);
           })
           .catch((reason: unknown) => {
             if (token !== tokenRef.current || !playingRef.current) return;
             if (isAbortError(reason)) return;
-            // 只有服务真的不可用才拉闸退回系统朗读；单段合成失败下一段还要再试云端，
-            // 否则一句超长文本就能让后面整本书都变成机器音。
             const serviceDown =
               !(reason instanceof SpeechClipError) || reason.serviceDown;
-            edgeDownRef.current = true;
-            waitingForClipRef.current = false;
+            if (serviceDown && attempt === 0) {
+              // 先别急着换声音：大多是一时的网络抖动，等一下再试一次。
+              retryTimerRef.current = setTimeout(() => {
+                if (token !== tokenRef.current || !playingRef.current) return;
+                playAtRef.current?.(bookId, cursor, { tier, attempt: 1 });
+              }, EDGE_RETRY_DELAY_MS);
+              return;
+            }
+            waitingRef.current = false;
             setIsBuffering(false);
-            setError(
-              serviceDown
-                ? "云端语音暂不可用，已切换到系统朗读"
-                : "这一段云端读不了，已切换到系统朗读"
-            );
-            // 云端批次远长于系统 utterance，必须按系统语音的小块重新定位，
-            // 不能把几千字直接塞进 SpeechSynthesisUtterance。
-            playAtRef.current?.(
-              bookId,
-              chapterIndex,
-              startSpan.sentenceIndex,
-              { quick: true }
-            );
+            if (serviceDown) {
+              noteEdgeFailure();
+              setError("云端语音暂时连不上，先用系统声音读，恢复后自动换回");
+              startSystem("fallback");
+            } else {
+              // 这一段文本本身读不出来：这一块用系统声音读过去，下一段照旧走云端。
+              setError("这一段云端读不出来，先用系统声音读过去");
+              startSystem("content");
+            }
           });
       };
 
-      playingRef.current = true;
-      setIsPlaying(true);
-      setIsPaused(false);
-
+      let useEdge = Date.now() >= edgeRetryAtRef.current;
+      if (!useEdge) {
+        // 冷却期间系统朗读那边已经悄悄把云端试通了、音频也备好了，那就直接换回来。
+        const probe = speechSegment(index, cursor, 0, speakText);
+        if (probe && store.has(probe.text, voice)) {
+          noteEdgeSuccess();
+          useEdge = true;
+        }
+      }
       if (useEdge) startEdge();
-      else startSystem();
+      else startSystem("fallback");
     },
     [
-      cancelHandover,
       clearTimers,
       commitSpan,
+      ensureAudio,
+      finishSegment,
       holdForResume,
       noteVoiceUsed,
+      pauseForSleep,
       releaseClip,
-      segmentFor,
       silenceAudio,
+      startTracking,
       stop,
       store,
-      systemVoices,
     ]
   );
 
@@ -792,410 +993,367 @@ export function useSpeechPlayer({
     playAtRef.current = playAt;
   }, [playAt]);
 
-  /**
-   * 换音色：不打断当前播放，先把新音色的短首段备好，就绪后在句子边界交接。
-   *
-   * 准备期间原音色继续读，位置会往前走，所以交接时要拿「此刻」的位置去对齐；
-   * 已经走出这一段的（跨段、跨章）就判定候选音频过期，按现位置重开，
-   * 绝不直接播那段旧音频——那会让用户听见明显的倒退或整段重复。
-   */
-  const runHandover = useCallback(
-    (voiceURI: string) => {
-      const at = locationRef.current;
-      if (!at) return;
-
-      handoverTokenRef.current += 1;
-      const handoverToken = handoverTokenRef.current;
-      handoverAbortRef.current?.abort();
-      handoverAbortRef.current = null;
-      setVoiceError("");
-
-      const useEdge = !edgeDownRef.current && (!voiceURI || isEdgeVoiceURI(voiceURI));
-      // 系统语音本地就能出声，没有可预合成的东西，直接重开这一段最快。
-      if (!useEdge) {
-        handoverPendingRef.current = false;
-        setPendingVoiceURI("");
-        playAt(at.bookId, at.chapterIndex, at.sentenceIndex, { quick: true });
-        return;
-      }
-
-      const book = getBookRef.current(at.bookId);
-      const chapter = book?.chapters[at.chapterIndex];
-      let segment = chapter
-        ? segmentFromChapter(chapter, at.sentenceIndex, "edge", true)
-        : null;
-      if (!chapter || !segment) {
-        handoverPendingRef.current = false;
-        setPendingVoiceURI("");
-        playAt(at.bookId, at.chapterIndex, at.sentenceIndex, { quick: true });
-        return;
-      }
-
-      // 打开面板到点下去这几秒，原音色还在往前读。如果预取那一段仍然盖得住此刻
-      // 这一句、而且确实已经备好了，就回到预取的锚点取音频，再 seek 到当前句——
-      // 这才是预取真正兑现的地方。盖不住（跨段、跨章）就老实重合成。
-      let anchorSentence = at.sentenceIndex;
-      const anchor = prefetchAnchorRef.current;
-      if (
-        anchor &&
-        anchor.bookId === at.bookId &&
-        anchor.chapterIndex === at.chapterIndex &&
-        anchor.sentenceIndex <= at.sentenceIndex
-      ) {
-        const prepared = segmentFromChapter(
-          chapter,
-          anchor.sentenceIndex,
-          "edge",
-          true
-        );
-        if (
-          prepared &&
-          spanForSentence(prepared, at.sentenceIndex) &&
-          store.has(prepared.text, edgeVoiceName(voiceURI))
-        ) {
-          anchorSentence = anchor.sentenceIndex;
-          segment = prepared;
-        }
-      }
-
-      handoverPendingRef.current = true;
-      setPendingVoiceURI(resolvedEdgeVoiceURI(voiceURI));
-
-      const controller = new AbortController();
-      handoverAbortRef.current = controller;
-
-      store
-        .request(segment.text, edgeVoiceName(voiceURI), {
-          priority: true,
-          signal: controller.signal,
-        })
-        .then(() => {
-          if (handoverToken !== handoverTokenRef.current) return;
-          handoverAbortRef.current = null;
-          handoverPendingRef.current = false;
-          setPendingVoiceURI("");
-
-          const now = locationRef.current;
-          if (!now || now.bookId !== at.bookId) return;
-
-          const stillInside =
-            now.chapterIndex === at.chapterIndex &&
-            spanForSentence(segment, now.sentenceIndex) !== null;
-          if (stillInside) {
-            // 音频已经在缓存里，playAt 会同步命中，然后 seek 到此刻这一句。
-            playAt(at.bookId, at.chapterIndex, anchorSentence, {
-              quick: true,
-              seekToSentence: now.sentenceIndex,
-            });
-          } else {
-            playAt(now.bookId, now.chapterIndex, now.sentenceIndex, {
-              quick: true,
-            });
-          }
-        })
-        .catch((reason: unknown) => {
-          if (handoverToken !== handoverTokenRef.current) return;
-          handoverAbortRef.current = null;
-          handoverPendingRef.current = false;
-          setPendingVoiceURI("");
-          if (isAbortError(reason)) return;
-          // 失败就留在原音色上继续读，别把正在听的这段也搞停了。
-          setVoiceError(
-            reason instanceof SpeechClipError && !reason.serviceDown
-              ? "这个音色暂时合成不出来，仍在用原来的声音"
-              : "切换音色失败，仍在用原来的声音"
-          );
-        });
-    },
-    [playAt, store]
-  );
-
-  const runHandoverRef = useRef(runHandover);
-  useEffect(() => {
-    runHandoverRef.current = runHandover;
-  }, [runHandover]);
-
-  // 用户点了另一个音色。播放中立刻走交接；暂停或停止时只记下来，
-  // 等下一次播放才生效——这里擅自起播会把「只是想换个声音」变成「突然出声」。
-  useEffect(() => {
-    const next = settings.voiceURI;
-    if (next === requestedVoiceRef.current) return;
-    requestedVoiceRef.current = next;
-    if (!playingRef.current || !locationRef.current) return;
-    const resolved = isEdgeVoiceURI(next) || !next ? resolvedEdgeVoiceURI(next) : next;
-    if (resolved === activeVoiceRef.current) return;
-    runHandoverRef.current(next);
-  }, [settings.voiceURI]);
-
-  const retryVoiceSwitch = useCallback(() => {
-    setVoiceError("");
-    if (!playingRef.current || !locationRef.current) return;
-    runHandoverRef.current(settingsRef.current.voiceURI);
+  /** 「本章结束后」跟着用户跳到的位置走：跳到哪一章，就在那一章读完时停。 */
+  const retargetSleepChapter = useCallback((book: Book, chapterIndex: number) => {
+    if (sleepModeRef.current !== "chapter") return;
+    sleepLastChapterRef.current = tocRange(
+      tocIndexes(book.chapters),
+      chapterIndex,
+      book.chapters.length
+    ).last;
   }, []);
 
   /**
-   * 打开音色面板时顺手准备几个候选的短首段。
-   * 只准备当前位置附近这一小段，控制在 MAX_VOICE_PREFETCH 个以内，
-   * 并发由 store 把着，正在播放的请求永远插队在前。
+   * 跳到某一句：目标还在已经加载的这段云端音频里就直接改时间轴，不必重新合成；
+   * 否则从那里起播。暂停时只挪位置，继续时从那里读。
    */
-  const prefetchVoices = useCallback(
-    (voiceURIs: string[]) => {
-      const at = locationRef.current;
-      if (!at) return;
-      const book = getBookRef.current(at.bookId);
-      const chapter = book?.chapters[at.chapterIndex];
-      if (!chapter) return;
-      const segment = segmentFromChapter(chapter, at.sentenceIndex, "edge", true);
-      if (!segment) return;
-      prefetchAnchorRef.current = {
-        bookId: at.bookId,
-        chapterIndex: at.chapterIndex,
-        sentenceIndex: at.sentenceIndex,
-      };
-
-      const seen = new Set<string>();
-      for (const voiceURI of voiceURIs) {
-        if (!isEdgeVoiceURI(voiceURI) && voiceURI) continue;
-        const name = edgeVoiceName(voiceURI);
-        if (seen.has(name)) continue;
-        seen.add(name);
-        if (seen.size > MAX_VOICE_PREFETCH) break;
-        if (store.has(segment.text, name)) continue;
-        store.prefetch(segment.text, name);
+  const jumpTo = useCallback(
+    (bookId: string, cursor: SpeechCursor, keepPaused: boolean) => {
+      const book = getBookRef.current(bookId);
+      if (!book) return;
+      retargetSleepChapter(book, cursor.chapterIndex);
+      const loaded = loadedRef.current;
+      const audio = audioRef.current;
+      if (
+        loaded?.clip &&
+        audio &&
+        loaded.bookId === bookId &&
+        loaded.engine === "edge" &&
+        loaded.token === tokenRef.current &&
+        loaded.voice === voiceName() &&
+        audio.src === clipUrlRef.current &&
+        !audio.ended
+      ) {
+        const span = spanForSentence(loaded.segment, cursor);
+        if (span) {
+          try {
+            audio.currentTime = timeAt(loaded.clip.timeline, span.start);
+            commitSpan(book, span);
+            updatePositionState();
+            if (!playingRef.current && !keepPaused) {
+              playingRef.current = true;
+              setIsPlaying(true);
+              setIsPaused(false);
+              void audio.play().catch(() => holdForResume("播放被系统打断了，点一下继续"));
+              startTracking();
+            }
+            return;
+          } catch {
+            // 写不进去（元数据还没到位之类）就老实重开。
+          }
+        }
       }
+      if (keepPaused && !playingRef.current) {
+        // 不在已加载的音频里：只记下位置，继续时从这里起播。
+        loadedRef.current = null;
+        commitCursor(book, cursor);
+        return;
+      }
+      store.cancelPending();
+      playAt(bookId, cursor, { tier: 0 });
     },
-    [store]
+    [commitCursor, commitSpan, holdForResume, playAt, retargetSleepChapter, startTracking, store, updatePositionState]
   );
 
-  const cancelVoicePrefetch = useCallback(() => {
-    store.cancelPending();
-  }, [store]);
+  const resume = useCallback(() => {
+    const at = locationRef.current;
+    if (!at || playingRef.current) return;
+    const loaded = loadedRef.current;
+    const audio = audioRef.current;
+    if (
+      loaded?.clip &&
+      audio &&
+      loaded.engine === "edge" &&
+      loaded.token === tokenRef.current &&
+      loaded.voice === voiceName() &&
+      audio.src === clipUrlRef.current &&
+      !audio.ended
+    ) {
+      playingRef.current = true;
+      setIsPlaying(true);
+      setIsPaused(false);
+      setError("");
+      audio.playbackRate = settingsRef.current.speechRate;
+      void audio.play().catch(() => {
+        if (loaded.token !== tokenRef.current) return;
+        holdForResume("播放被系统打断了，点一下继续");
+      });
+      startTracking();
+      updatePositionState();
+      return;
+    }
+    // 用户亲手点继续：之前的云端失败可能只是一时断网，再给它一次机会。
+    noteEdgeSuccess();
+    playAt(at.bookId, at, { tier: 0 });
+  }, [holdForResume, playAt, startTracking, updatePositionState]);
 
-  /**
-   * 把某个位置的首段提前备好。
-   *
-   * 点下播放键到出声这段等待，几乎全花在首段合成加下载上（实测 360 字约 5 秒）。
-   * 进到播放页多半就是要听，而从进页面到真正点下去总有几秒，正好拿来盖住这段耗时：
-   * 备中了的话 playAt 里 store.peek 会同步命中，立刻出声。
-   * 没备完也不亏——playAt 用同一个缓存键请求时会并进这条正在飞的请求，不会重来一遍。
-   */
-  const prefetchStart = useCallback(
-    (book: Book, position: BookPosition) => {
-      // 正在播的时候没什么可备的，接下一段自有 prefetchNext 管。
-      if (playingRef.current || waitingForClipRef.current) return;
-      // 云端已经不可用（退回了系统朗读），备了也用不上。
-      if (edgeDownRef.current) return;
-      const voiceURI = settingsRef.current.voiceURI;
-      if (voiceURI && !isEdgeVoiceURI(voiceURI)) return;
-      // 这里收整本书而不是 bookId：调用方（播放页）手里本来就是这本书的整本，不用再查一次。
-      const chapter = book.chapters[position.chapterIndex];
-      if (!chapter) return;
-      // 必须和 playAt 起播时算出来的那一段完全一致，否则是另一个缓存键，白备。
-      const segment = segmentFromChapter(
-        chapter,
-        position.sentenceIndex,
-        "edge",
-        true
-      );
-      if (!segment) return;
-      const voiceName = edgeVoiceName(voiceURI);
-      if (store.has(segment.text, voiceName)) return;
-      store.prefetch(segment.text, voiceName);
-    },
-    [store]
-  );
+  const toggle = useCallback(() => {
+    if (playingRef.current || waitingRef.current) pause();
+    else resume();
+  }, [pause, resume]);
 
   const start = useCallback(
     (bookId: string, position?: BookPosition) => {
       const book = getBookRef.current(bookId);
       if (!book) return;
       // 用户主动开播时再给云端一次机会，之前的失败可能只是临时断网。
-      edgeDownRef.current = false;
-      // 拉黑的系统音色多半也是那次断网连累的，一起放出来重试。
+      noteEdgeSuccess();
       blockedVoicesRef.current.clear();
-      cancelHandover();
-      setVoiceError("");
-      const nextPosition =
-        position ?? book.listeningPosition ?? initialPosition(book);
-      playAt(bookId, nextPosition.chapterIndex, nextPosition.sentenceIndex, {
-        quick: true,
-      });
+      const target = position ?? book.listeningPosition ?? initialPosition(book);
+      jumpTo(bookId, { chapterIndex: target.chapterIndex, sentenceIndex: target.sentenceIndex }, false);
     },
-    [cancelHandover, playAt]
+    [jumpTo]
   );
 
-  const toggle = useCallback(() => {
-    const current = locationRef.current;
-    if (!current) return;
-
-    // 暂停期间换过音色：恢复时不能把旧音色那段接着放完。
-    const resolvedRequest = isEdgeVoiceURI(settingsRef.current.voiceURI) ||
-      !settingsRef.current.voiceURI
-      ? resolvedEdgeVoiceURI(settingsRef.current.voiceURI)
-      : settingsRef.current.voiceURI;
-    const voiceChanged =
-      !playingRef.current &&
-      activeVoiceRef.current !== "" &&
-      resolvedRequest !== activeVoiceRef.current;
-
-    if (engineRef.current === "edge") {
-      const audio = audioRef.current;
-      if (playingRef.current) {
-        abortRef.current?.abort();
-        cancelHandover();
-        audio?.pause();
-        playingRef.current = false;
-        setIsPlaying(false);
-        setIsPaused(true);
-        setIsBuffering(false);
-        return;
-      }
-      if (waitingForClipRef.current || voiceChanged) {
-        playAt(current.bookId, current.chapterIndex, current.sentenceIndex, {
-          quick: true,
-        });
-        return;
-      }
-      if (audio?.src && !audio.ended) {
-        playingRef.current = true;
-        setIsPlaying(true);
-        setIsPaused(false);
-        void audio.play().catch(() => undefined);
-        return;
-      }
-      playAt(current.bookId, current.chapterIndex, current.sentenceIndex, {
-        quick: true,
-      });
-      return;
-    }
-
-    if (engineRef.current === "system") {
-      if (voiceChanged) {
-        playAt(current.bookId, current.chapterIndex, current.sentenceIndex, {
-          quick: true,
-        });
-        return;
-      }
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-        playingRef.current = true;
-        setIsPlaying(true);
-        setIsPaused(false);
-      } else if (window.speechSynthesis.speaking) {
-        window.speechSynthesis.pause();
-        // 这行不能漏：保活定时器和 finishSegment 都拿 playingRef 当闸门，
-        // 留着 true 的话 iOS 上十秒内会自己 resume 回去，或者偷偷跳到下一段。
-        playingRef.current = false;
-        setIsPaused(true);
-        setIsPlaying(false);
-      } else {
-        playAt(current.bookId, current.chapterIndex, current.sentenceIndex, {
-          quick: true,
-        });
-      }
-      return;
-    }
-
-    // 已停止，重新起播；顺便给云端一次机会，之前的失败可能只是临时断网。
-    edgeDownRef.current = false;
-    playAt(current.bookId, current.chapterIndex, current.sentenceIndex, {
-      quick: true,
-    });
-  }, [cancelHandover, playAt]);
-
-  const skipSentences = useCallback(
-    (delta: number) => {
-      const current = locationRef.current;
-      if (!current) return;
-      const book = getBookRef.current(current.bookId);
+  const skipSeconds = useCallback(
+    (seconds: number) => {
+      const at = locationRef.current;
+      if (!at || !seconds) return;
+      const book = getBookRef.current(at.bookId);
       if (!book) return;
-      const next = locationAfter(
-        book,
-        current.chapterIndex,
-        current.sentenceIndex,
-        delta
-      );
-      if (!next) return;
-      cancelHandover();
+      const rate = Math.max(settingsRef.current.speechRate, 0.1);
+      const media = seconds * rate;
+      const keepPaused = !playingRef.current;
 
-      // 目标句还在正在播的这段音频里就直接跳时间轴。
-      //
-      // 走 playAt 的话，它会按新起点重新切一段短文本去合成——文本变了缓存键就变了，
-      // 哪怕音频早就在内存里也必然落空，于是每按一次快进都要等一轮云端合成。
-      // 实测稳态播的是 2000 字 / 52 句的长批次，±2 句几乎都落在段内，白等 3~4 秒。
-      // 暂停时不走这条路：那时按快进本来就该顺带起播，交给 playAt 更省事。
-      const playing = playingClipRef.current;
+      const index = speechIndexFor(book.chapters);
+      let from: SpeechCursor = at;
+      let remaining = media;
+
+      // 在已经加载的云端音频里：按真实时间轴跳，落到那一刻正在读的那一句的开头。
+      const loaded = loadedRef.current;
       const audio = audioRef.current;
       if (
-        playing &&
+        loaded?.clip &&
         audio &&
-        playingRef.current &&
-        engineRef.current === "edge" &&
-        !waitingForClipRef.current &&
-        playing.bookId === book.id &&
-        playing.chapterIndex === next.chapterIndex
+        loaded.engine === "edge" &&
+        loaded.token === tokenRef.current &&
+        audio.src === clipUrlRef.current
       ) {
-        const span = spanForSentence(playing.segment, next.sentenceIndex);
-        if (span) {
-          try {
-            audio.currentTime = timeAt(playing.clip.timeline, span.start);
-            commitSpan(book, next.chapterIndex, span);
-            return;
-          } catch {
-            // 写不进去（元数据还没到位之类）就老实重开这一段。
+        const { spans } = loaded.segment;
+        const { timeline } = loaded.clip;
+        const target = audio.currentTime + media;
+        const lastStart = timeAt(timeline, spans[spans.length - 1].start);
+        if (target >= 0 && target < lastStart) {
+          let span = spanAt(spans, charIndexAt(timeline, target));
+          const current = spanForSentence(loaded.segment, at);
+          if (seconds > 0 && current && span.start <= current.start) {
+            // 这一句本身就比跳的秒数还长：至少往前挪到下一句。
+            span = spans[spans.indexOf(current) + 1] ?? span;
           }
+          jumpTo(at.bookId, span, keepPaused);
+          return;
+        }
+        // 跳出了这段音频：从音频的头（尾）开始，剩下的秒数按字数估算接着挪。
+        if (target < 0) {
+          from = spans[0];
+          remaining = target;
+        } else {
+          from = spans[spans.length - 1];
+          remaining = target - lastStart;
         }
       }
 
-      playAt(book.id, next.chapterIndex, next.sentenceIndex, { quick: true });
+      // 不在已加载的音频里：按字数估算往前往后挪。
+      let target = cursorAfterSeconds(index, from, remaining);
+      if (seconds > 0 && target && ordinalOf(index, target) <= ordinalOf(index, at)) {
+        target = cursorAt(index, ordinalOf(index, at) + 1) ?? target;
+      }
+      if (target && !sameCursor(target, at)) jumpTo(at.bookId, target, keepPaused);
+      else if (target && seconds < 0) jumpTo(at.bookId, target, keepPaused);
     },
-    [cancelHandover, commitSpan, playAt]
+    [jumpTo]
   );
 
+  /** 锁屏进度条拖到第几秒（屏幕时钟），落到目录里这一章的哪一句。 */
+  const seekToClock = useCallback(
+    (seconds: number) => {
+      const at = locationRef.current;
+      const book = at ? getBookRef.current(at.bookId) : undefined;
+      if (!at || !book) return;
+      const rate = Math.max(settingsRef.current.speechRate, 0.1);
+      const target = sentenceAtSeconds(listenFor(book, at.chapterIndex), seconds * rate);
+      jumpTo(at.bookId, target, !playingRef.current);
+    },
+    [jumpTo, listenFor]
+  );
+
+  /** 按目录换章：续页并在前一章里，跳的是目录里的上一项、下一项。 */
   const changeChapter = useCallback(
     (delta: number) => {
-      const current = locationRef.current;
-      if (!current) return;
-      const book = getBookRef.current(current.bookId);
+      const at = locationRef.current;
+      if (!at) return;
+      const book = getBookRef.current(at.bookId);
       if (!book) return;
-      const chapterIndex = Math.max(
-        0,
-        Math.min(book.chapters.length - 1, current.chapterIndex + delta)
-      );
-      cancelHandover();
-      // 跳章之后旧位置的预取全都没用了。
-      store.cancelPending();
-      playAt(book.id, chapterIndex, 0, { quick: true });
+      const toc = tocIndexes(book.chapters);
+      const current = toc.indexOf(tocIndexFor(toc, at.chapterIndex));
+      const target = toc[Math.max(0, Math.min(toc.length - 1, current + delta))];
+      if (target === undefined) return;
+      jumpTo(at.bookId, { chapterIndex: target, sentenceIndex: 0 }, false);
     },
-    [cancelHandover, playAt, store]
+    [jumpTo]
   );
 
   const setSleepMode = useCallback(
     (mode: SleepMode) => {
-      if (sleepTimerRef.current) {
-        clearTimeout(sleepTimerRef.current);
-        sleepTimerRef.current = null;
-      }
+      clearSleep();
       sleepModeRef.current = mode;
       setSleepModeState(mode);
-      if (mode === "15" || mode === "30" || mode === "45") {
-        sleepTimerRef.current = setTimeout(() => {
-          stop();
-          sleepModeRef.current = "off";
-          setSleepModeState("off");
-        }, Number(mode) * 60 * 1000);
+      if (mode === "chapter") {
+        const at = locationRef.current;
+        const book = at ? getBookRef.current(at.bookId) : undefined;
+        if (book && at) retargetSleepChapter(book, at.chapterIndex);
+        else sleepLastChapterRef.current = Number.POSITIVE_INFINITY;
+        return;
       }
+      if (mode === "off") return;
+      const minutes = Number(mode);
+      const deadline = Date.now() + minutes * 60 * 1000;
+      sleepDeadlineRef.current = deadline;
+      setSleepDeadline(deadline);
+      // 前台靠这个定时器；熄屏后定时器可能被节流，播放进度回调里也会检查是否到点。
+      sleepTimerRef.current = setTimeout(() => {
+        sleepTimerRef.current = null;
+        if (playingRef.current || waitingRef.current) pauseForSleep(null);
+        else clearSleep();
+      }, minutes * 60 * 1000 + 50);
     },
-    [stop]
+    [clearSleep, pauseForSleep, retargetSleepChapter]
   );
+
+  /**
+   * 进到播放页多半就是要听。先把当前位置那一整格从本机缓存搬进内存（听过的、离线缓存过的），
+   * 搬不到再去合成首段；点下去时能同步命中、立刻出声。
+   */
+  const prefetchStart = useCallback(
+    (book: Book, position: BookPosition) => {
+      if (playingRef.current || waitingRef.current) return;
+      if (Date.now() < edgeRetryAtRef.current) return;
+      const index = speechIndexFor(book.chapters);
+      const cursor = { chapterIndex: position.chapterIndex, sentenceIndex: position.sentenceIndex };
+      if (ordinalOf(index, cursor) < 0) return;
+      const voice = voiceName();
+      const speakText = speakRef.current;
+      const cell = gridSegmentAt(index, cursor, speakText);
+      void (async () => {
+        if (cell && (await store.warm(cell.text, voice))) return;
+        if (playingRef.current) return;
+        const segment = speechSegment(index, cursor, 0, speakText);
+        if (segment && !store.has(segment.text, voice)) store.prefetch(segment.text, voice);
+      })();
+    },
+    [store]
+  );
+
+  const cancelDownload = useCallback(() => {
+    downloadAbortRef.current?.abort();
+    downloadAbortRef.current = null;
+    setDownload((current) => (current ? { ...current, running: false } : current));
+  }, []);
+
+  /**
+   * 离线缓存：从当前位置所在那一格起，到往后数 chapters 个目录项为止，一格一格合成好存进本机。
+   * 一次只下一格（Worker 里一格本身就是 4 路并发），不跟正在播放的抢上游。
+   */
+  const downloadAhead = useCallback(
+    (bookId: string, chapters: number) => {
+      const book = getBookRef.current(bookId);
+      if (!book) return;
+      downloadAbortRef.current?.abort();
+      const controller = new AbortController();
+      downloadAbortRef.current = controller;
+
+      const at = locationRef.current?.bookId === bookId ? locationRef.current : null;
+      const from = at ?? book.listeningPosition ?? initialPosition(book);
+      const index = speechIndexFor(book.chapters);
+      const startOrdinal = Math.max(0, ordinalOf(index, from));
+      const toc = tocIndexes(book.chapters);
+      const tocPosition = toc.indexOf(tocIndexFor(toc, from.chapterIndex));
+      const stopChapter = toc[tocPosition + Math.max(1, chapters)] ?? book.chapters.length;
+      const endOrdinal = index.chapterStarts[stopChapter] ?? index.sentences.length;
+
+      const cells: string[] = [];
+      for (let cell = 0; cell < index.grid.length; cell += 1) {
+        const cellStart = index.grid[cell];
+        const cellEnd = index.grid[cell + 1] ?? index.sentences.length;
+        if (cellEnd <= startOrdinal || cellStart >= endOrdinal) continue;
+        const cursor = cursorAt(index, cellStart);
+        const segment = cursor ? speechSegment(index, cursor, 2, speakRef.current) : null;
+        if (segment) cells.push(segment.text);
+      }
+      const voice = voiceName();
+      const state: SpeechDownload = { bookId, total: cells.length, done: 0, failed: 0, running: true };
+      setDownload(state);
+
+      void (async () => {
+        for (const text of cells) {
+          if (controller.signal.aborted) return;
+          try {
+            await store.download(text, voice, controller.signal);
+            state.done += 1;
+          } catch (reason) {
+            if (controller.signal.aborted || isAbortError(reason)) return;
+            state.failed += 1;
+          }
+          setDownload({ ...state });
+        }
+        if (downloadAbortRef.current === controller) downloadAbortRef.current = null;
+        setDownload({ ...state, running: false });
+      })();
+    },
+    [store]
+  );
+
+  // 云端合成一律按原速，倍速交给 playbackRate，所以调速能在播放中立即生效。
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.defaultPlaybackRate = settings.speechRate;
+      audio.playbackRate = settings.speechRate;
+    }
+    updatePositionState();
+  }, [settings.speechRate, updatePositionState]);
+
+  // 播放中换了音色：从当前这句用新音色重读。暂停时只记下来，继续时生效——
+  // 这里擅自起播会把「只是想换个声音」变成「突然出声」。
+  const requestedVoiceRef = useRef(settings.voiceURI);
+  useEffect(() => {
+    const next = settings.voiceURI;
+    if (next === requestedVoiceRef.current) return;
+    requestedVoiceRef.current = next;
+    const at = locationRef.current;
+    const loaded = loadedRef.current;
+    if (!playingRef.current || !at || loaded?.engine !== "edge") return;
+    if (loaded.voice === edgeVoiceName(next)) return;
+    playAtRef.current?.(at.bookId, at, { tier: 0 });
+  }, [settings.voiceURI]);
+
+  // 从后台回到前台时对一下账：后台期间漏掉的 pause 事件在这里补上。
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      const audio = audioRef.current;
+      const loaded = loadedRef.current;
+      if (playingRef.current && loaded?.engine === "edge" && audio?.paused && !audio.ended) {
+        playingRef.current = false;
+        clearTimers();
+        setIsPlaying(false);
+        setIsPaused(true);
+      }
+      if (sleepDue() && (playingRef.current || waitingRef.current)) pauseForSleep(null);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [clearTimers, pauseForSleep]);
 
   useEffect(
     () => () => {
       if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
       if (keepAliveRef.current) clearInterval(keepAliveRef.current);
       if (trackRef.current) clearInterval(trackRef.current);
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       abortRef.current?.abort();
-      handoverAbortRef.current?.abort();
+      downloadAbortRef.current?.abort();
       audioRef.current?.pause();
       if (clipUrlRef.current) URL.revokeObjectURL(clipUrlRef.current);
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
@@ -1217,10 +1375,10 @@ export function useSpeechPlayer({
 
   // 锁屏和控制中心的那套控件。没有它，系统不把这个页面当成正在放音的播放器，
   // 切后台后一段读完就可能被冻结，再也接不上下一段。
-  const actionsRef = useRef({ toggle, skipSentences, changeChapter, stop });
+  const actionsRef = useRef({ pause, resume, stop, skipSeconds, changeChapter, seekToClock });
   useEffect(() => {
-    actionsRef.current = { toggle, skipSentences, changeChapter, stop };
-  }, [toggle, skipSentences, changeChapter, stop]);
+    actionsRef.current = { pause, resume, stop, skipSeconds, changeChapter, seekToClock };
+  }, [pause, resume, stop, skipSeconds, changeChapter, seekToClock]);
 
   useEffect(() => {
     if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
@@ -1228,17 +1386,26 @@ export function useSpeechPlayer({
     }
     const session = navigator.mediaSession;
     const handlers: [MediaSessionAction, MediaSessionActionHandler][] = [
-      ["play", () => {
-        if (!playingRef.current) actionsRef.current.toggle();
-      }],
-      ["pause", () => {
-        if (playingRef.current) actionsRef.current.toggle();
-      }],
+      // 这里不看 playingRef：被系统打断后它已经同步成 false，按播放就是继续。
+      ["play", () => actionsRef.current.resume()],
+      ["pause", () => actionsRef.current.pause()],
       ["stop", () => actionsRef.current.stop()],
       ["previoustrack", () => actionsRef.current.changeChapter(-1)],
       ["nexttrack", () => actionsRef.current.changeChapter(1)],
-      ["seekbackward", () => actionsRef.current.skipSentences(-2)],
-      ["seekforward", () => actionsRef.current.skipSentences(2)],
+      [
+        "seekbackward",
+        (details) => actionsRef.current.skipSeconds(-(details.seekOffset ?? SKIP_SECONDS)),
+      ],
+      [
+        "seekforward",
+        (details) => actionsRef.current.skipSeconds(details.seekOffset ?? SKIP_SECONDS),
+      ],
+      [
+        "seekto",
+        (details) => {
+          if (typeof details.seekTime === "number") actionsRef.current.seekToClock(details.seekTime);
+        },
+      ],
     ];
     for (const [action, handler] of handlers) {
       // 各家浏览器支持的动作不一样，不认的直接跳过。
@@ -1287,7 +1454,8 @@ export function useSpeechPlayer({
         },
       ],
     });
-  }, [sessionBookId, sessionChapterIndex]);
+    updatePositionState();
+  }, [sessionBookId, sessionChapterIndex, updatePositionState]);
 
   useEffect(() => {
     if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
@@ -1298,7 +1466,8 @@ export function useSpeechPlayer({
       : isPaused
         ? "paused"
         : "none";
-  }, [isPlaying, isPaused]);
+    updatePositionState();
+  }, [isPlaying, isPaused, updatePositionState]);
 
   return {
     voices,
@@ -1309,19 +1478,18 @@ export function useSpeechPlayer({
     currentSentenceId,
     error,
     sleepMode: sleepModeState,
+    sleepDeadline,
     activeVoiceURI,
-    pendingVoiceURI,
-    voiceError,
+    usingFallback,
+    download,
     start,
     toggle,
     stop,
-    skipSentences,
+    skipSeconds,
     changeChapter,
     setSleepMode,
-    retryVoiceSwitch,
-    prefetchVoices,
-    cancelVoicePrefetch,
     prefetchStart,
-    recentVoiceURIs,
+    downloadAhead,
+    cancelDownload,
   };
 }
