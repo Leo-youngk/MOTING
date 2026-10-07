@@ -13,6 +13,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
+  Download,
   FileText,
   Headphones,
   Highlighter,
@@ -63,7 +64,12 @@ import { useAppNavigation } from "../hooks/use-app-navigation";
 import { useAppUpdate } from "../hooks/use-app-update";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
-import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
+import {
+  SKIP_SECONDS,
+  useSpeechPlayer,
+  type SleepMode,
+  type SpeechDownload,
+} from "../hooks/use-speech-player";
 import { AiRequestError, modelHistory, streamAiChat } from "../lib/ai";
 import {
   BookMetadataError,
@@ -198,7 +204,7 @@ import {
   type Placement,
   type Rect,
 } from "../lib/popover-placement";
-import { EDGE_VOICES, resolvedEdgeVoiceURI } from "../lib/edge-voices";
+import { resolvedEdgeVoiceURI } from "../lib/edge-voices";
 import { Bookstore } from "./bookstore";
 import { HomeStore } from "./home-store";
 import { OnlineLibrary } from "./online-library";
@@ -5366,20 +5372,37 @@ interface PlayerControls {
   currentSentenceId: string;
   error: string;
   sleepMode: SleepMode;
+  sleepDeadline: number | null;
   activeVoiceURI: string;
-  pendingVoiceURI: string;
-  voiceError: string;
+  usingFallback: boolean;
+  download: SpeechDownload | null;
   start: (bookId: string, position?: BookPosition) => void;
   toggle: () => void;
   stop: () => void;
-  skipSentences: (delta: number) => void;
+  skipSeconds: (seconds: number) => void;
   changeChapter: (delta: number) => void;
   setSleepMode: (mode: SleepMode) => void;
-  retryVoiceSwitch: () => void;
-  prefetchVoices: (voiceURIs: string[]) => void;
-  cancelVoicePrefetch: () => void;
   prefetchStart: (book: Book, position: BookPosition) => void;
-  recentVoiceURIs: string[];
+  downloadAhead: (bookId: string, chapters: number) => void;
+  cancelDownload: () => void;
+}
+
+/** 离线缓存一次往后缓存几章。 */
+const DOWNLOAD_CHAPTERS = 3;
+
+/** 定时关闭还剩多久，每秒走一下；只在播放页开着、定时开着的时候跑。 */
+function useCountdown(deadline: number | null): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (deadline === null) return;
+    const first = window.setTimeout(() => setNow(Date.now()), 0);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(timer);
+    };
+  }, [deadline]);
+  return deadline === null ? null : Math.max(0, (deadline - now) / 1000);
 }
 
 function PlayerScreen({
@@ -5515,36 +5538,30 @@ function PlayerScreen({
     prefetchStart(book, positionFor(book, prefetchChapter, prefetchSentence));
   }, [book, prefetchChapter, prefetchSentence, playing, prefetchStart]);
 
-  /**
-   * 打开音色面板就顺手把几个候选的短首段备上：用户开面板多半就是要换，
-   * 备好之后点下去能命中缓存、同步起播，这才是 1 秒内出声的来源。
-   * 最近用过的排前面，剩下的按云端音色本身的顺序补齐。
-   */
-  const openVoicePanel = () => {
-    setShowVoice(true);
-    if (!activeForBook) return;
-    const candidates = [
-      ...player.recentVoiceURIs,
-      ...EDGE_VOICES.map((voice) => voice.voiceURI),
-    ].filter((voiceURI) => voiceURI !== player.activeVoiceURI);
-    player.prefetchVoices(candidates);
-  };
-
-  const closeVoicePanel = () => {
-    setShowVoice(false);
-    // 面板一关，没人要的准备任务就该停，别再占着上游连接。
-    player.cancelVoicePrefetch();
-  };
+  const openVoicePanel = () => setShowVoice(true);
+  const closeVoicePanel = () => setShowVoice(false);
 
   const toggleView = () =>
     setViewMode((mode) => (mode === "cover" ? "text" : "cover"));
 
+  const sleepLeft = useCountdown(player.sleepDeadline);
   const sleepLabel =
     player.sleepMode === "off"
       ? "定时"
       : player.sleepMode === "chapter"
         ? "本章结束"
-        : `${player.sleepMode} 分钟`;
+        : sleepLeft !== null
+          ? formatClock(sleepLeft)
+          : `${player.sleepMode} 分钟`;
+
+  const download = player.download?.bookId === book.id ? player.download : null;
+  const downloadLabel = !download
+    ? `离线缓存后面 ${DOWNLOAD_CHAPTERS} 章`
+    : download.running
+      ? `正在缓存 ${Math.round((download.done / Math.max(download.total, 1)) * 100)}%，点此取消`
+      : download.failed
+        ? "有一部分没缓存上，点此重试"
+        : `后面 ${DOWNLOAD_CHAPTERS} 章已缓存，没网也能听`;
 
   return (
     <div className="player-screen">
@@ -5647,14 +5664,14 @@ function PlayerScreen({
           <button
             type="button"
             className="skip-control"
-            aria-label="后退约15秒"
+            aria-label={`后退 ${SKIP_SECONDS} 秒`}
             onClick={() =>
               activeForBook
-                ? player.skipSentences(-2)
+                ? player.skipSeconds(-SKIP_SECONDS)
                 : player.start(book.id, basePosition)
             }
           >
-            <span>15</span>
+            <span>{SKIP_SECONDS}</span>
           </button>
           <button
             type="button"
@@ -5673,14 +5690,14 @@ function PlayerScreen({
           <button
             type="button"
             className="skip-control skip-control--forward"
-            aria-label="前进约15秒"
+            aria-label={`前进 ${SKIP_SECONDS} 秒`}
             onClick={() =>
               activeForBook
-                ? player.skipSentences(2)
+                ? player.skipSeconds(SKIP_SECONDS)
                 : player.start(book.id, basePosition)
             }
           >
-            <span>15</span>
+            <span>{SKIP_SECONDS}</span>
           </button>
         </div>
 
@@ -5711,7 +5728,7 @@ function PlayerScreen({
           </button>
           <button type="button" onClick={openVoicePanel}>
             <AudioLines size={22} />
-            <small>{player.pendingVoiceURI && activeForBook ? "切换中" : "音色"}</small>
+            <small>{player.usingFallback && activeForBook ? "系统声音" : "音色"}</small>
           </button>
         </div>
       </main>
@@ -5740,6 +5757,23 @@ function PlayerScreen({
             >
               <Bookmark size={19} />
               <span>标记这一句</span>
+            </button>
+            <button
+              type="button"
+              className="book-action"
+              aria-busy={download?.running || undefined}
+              onClick={() =>
+                download?.running
+                  ? player.cancelDownload()
+                  : player.downloadAhead(book.id, DOWNLOAD_CHAPTERS)
+              }
+            >
+              {download?.running ? (
+                <LoaderCircle className="player-buffering-icon" size={19} />
+              ) : (
+                <Download size={19} />
+              )}
+              <span>{downloadLabel}</span>
             </button>
             {activeForBook ? (
               <button
@@ -5790,6 +5824,7 @@ function PlayerScreen({
                 ["15", "15 分钟后"],
                 ["30", "30 分钟后"],
                 ["45", "45 分钟后"],
+                ["60", "60 分钟后"],
                 ["chapter", "本章结束后"],
               ] as Array<[SleepMode, string]>
             ).map(([mode, label]) => (
@@ -5827,12 +5862,9 @@ function PlayerScreen({
               />
             </label>
 
-            {player.voiceError && activeForBook ? (
+            {player.usingFallback && activeForBook ? (
               <div className="voice-retry" role="status">
-                <span>{player.voiceError}</span>
-                <button type="button" onClick={player.retryVoiceSwitch}>
-                  重试
-                </button>
+                <span>云端暂时连不上，正在用手机自带的声音读，恢复后会自动换回来。</span>
               </div>
             ) : null}
 
@@ -5843,17 +5875,12 @@ function PlayerScreen({
                 // 「选中」是用户的意愿，「正在播放」是事实。云端失败退回系统朗读时
                 // 这两者会不一致，必须分开显示，不能拿勾当成已经在用这个声音。
                 const playing =
-                  activeForBook && player.activeVoiceURI === voice.voiceURI;
-                const preparing =
-                  activeForBook && player.pendingVoiceURI === voice.voiceURI;
+                  activeForBook && player.isPlaying && player.activeVoiceURI === voice.voiceURI;
                 return (
                   <button
                     type="button"
                     key={voice.voiceURI}
-                    className={`${chosen ? "is-active" : ""} ${
-                      preparing ? "is-preparing" : ""
-                    }`}
-                    aria-busy={preparing}
+                    className={chosen ? "is-active" : ""}
                     onClick={() =>
                       onSettingsChange({
                         ...settings,
@@ -5865,12 +5892,7 @@ function PlayerScreen({
                       <strong>{voice.name}</strong>
                       <small>{voice.lang}</small>
                     </span>
-                    {preparing ? (
-                      <em className="voice-state">
-                        <LoaderCircle className="player-buffering-icon" size={14} />
-                        切换中
-                      </em>
-                    ) : playing ? (
+                    {playing ? (
                       <em className="voice-state is-playing">正在播放</em>
                     ) : chosen ? (
                       <Check size={18} />

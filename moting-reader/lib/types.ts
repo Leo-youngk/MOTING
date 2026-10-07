@@ -185,6 +185,11 @@ export interface ReaderSettings {
   highlightStyle: HighlightStyle;
   speechRate: number;
   voiceURI: string;
+  /**
+   * 朗读时的读法替换（多音字、人名、生僻词）。只改送去合成的文字，不改正文，
+   * 高亮和位置照旧按句子走。同步来的旧设置可能没有这一项。
+   */
+  speechReplacements?: SpeechReplacement[];
   /** 用户自带的 OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1。 */
   aiBaseUrl: string;
   /** 请求经我们的 Worker 转发（绕开跨域限制），密钥随请求过一次服务器，不落盘。 */
@@ -222,8 +227,16 @@ export interface ImportProgress {
   percent: number;
 }
 
+/** 朗读替换规则：正文里的 from 读成 to。 */
+export interface SpeechReplacement {
+  from: string;
+  to: string;
+}
+
 export interface SpeechSpan {
   sentenceId: string;
+  /** 云端长批次可以跨章，每句自己记着是哪一章的。 */
+  chapterIndex: number;
   sentenceIndex: number;
   start: number;
   end: number;
@@ -267,6 +280,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   highlightStyle: "underline",
   speechRate: 1,
   voiceURI: "",
+  speechReplacements: [],
   aiBaseUrl: "",
   aiApiKey: "",
   aiModel: "",

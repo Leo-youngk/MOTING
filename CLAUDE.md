@@ -53,9 +53,7 @@ npm run deploy:dry-run
 
 ## 内容模型
 
-文本按 `Book → Chapter → Paragraph → Sentence` 逐层拆分。朗读时不直接按句子送 TTS，而是通过 `buildSpeechBlocks()` 把相邻句子合并成 `SpeechBlock`（单块上限 240 字），每块内用 `SpeechSpan` 记录每个句子在合并文本中的 `start`/`end` 偏移，用来把 TTS 的朗读进度映射回具体句子做高亮。
-
-从章节中间开始播放时用 `sliceSpeechBlock()` 裁掉前面的部分，并重算偏移量。
+文本按 `Book → Chapter → Paragraph → Sentence` 逐层拆分。朗读时不直接按句子送 TTS，而是把相邻句子合并成 `SpeechBlock`，块内用 `SpeechSpan` 记录每句在合并文本里的 `start`/`end` 偏移和所属章 `chapterIndex`，用来把朗读进度映射回具体句子做高亮。云端分段在 `lib/speech-segments.ts`（可以跨章），系统朗读的小块是 `buildSpeechBlocks()`（一段一块，上限 240 字，不跨章）。
 
 本地库（IndexedDB）里书目和正文分开存：`books` 表只有书目（含从正文算出的目录 `chapterOutline`），正文在 `contents` 表。书库、主页、同步只碰书目；进阅读器、播放器、单书笔记之前才读那一本的正文（`MotingApp` 的 `loadContent`）。
 
@@ -74,6 +72,18 @@ npm run deploy:dry-run
 页头左边那只小熊 `public/bear-mark.png` 和桌面图标 `icon-*.png` 都是从用户给的原图裁出来的，要换就从原图重新裁，不要重画；改了 `public/` 里这些文件要顺手把 `sw.js` 的 `CACHE_NAME` 加一。
 
 发版检查在 `hooks/use-app-update.ts`：service worker 在后台存好新版页面后告诉页面，页面拿缓存那一版的 `/assets/` 清单跟自己开机时加载的比，多出文件就在书架几页底部出「新版本已就绪 · 更新」，设置首页也有「检查更新」。点更新就是重新载入，导航由 SW 从缓存给新版。
+
+## 听书
+
+- 合成走 Worker 转发微软 Edge 朗读（`worker/edge-tts.ts`、`worker/speech.ts`），只认 `turn.end` 才算合成完；单片失败换条连接再试（最多 3 次），读不出来的文本回 422，服务问题回 503。一律按 1× 合成，倍速交给 `playbackRate`。
+- 云端分段分三档（`lib/speech-segments.ts`）：点下去先合成 360 字，开播就预取 1500 字，之后按全书固定的约 4000 字网格走、可以跨章。网格让长批次的文本跟起播位置无关，缓存和离线下载才能复用；一格读十几分钟，后台很少需要换音源（iOS 主屏应用后台换源并不总能成功，WebKit bug 261858）。
+- 段落、标题、换章用 1/2/3 个换行带给 Worker。Edge 不收自定义 SSML，停顿只能在拼接时做：`lib/speech-batch.ts` 按帧裁掉每片结尾约 0.9 秒的自带静音、需要时补数字静音帧，句末约 0.66 秒、换段 0.8、标题前后 1.1、换章 1.8。改了停顿规则要把 Worker 的 `TTS_CACHE_VERSION` 和 `lib/speech-persist.ts` 的缓存名一起加一。
+- 播放器（`hooks/use-speech-player.ts`）从头到尾只用一个 `<audio>`：换源只换 `src`，等网络时放静音占位，缓存命中必须同步起播（中间一 await，后台的 `play()` 就会被 iOS 拦掉）。系统打断不会通知页面，靠监听元素的 `pause` 事件同步状态，锁屏的播放键才按得动。
+- 云端连不上先等 1.5 秒重试，再失败才用系统声音顶上并提示，冷却 30 秒起（连着失败翻倍，最多 5 分钟），冷却期间顺手试一下云端，通了下一块就换回来。
+- 合成结果按（文本, 音色）先进内存（40MB LRU）再落本机 Cache Storage（`moting-tts-v2`，200MB LRU），重开应用、离线缓存都靠它；SW 只清 `moting-shell-*`，不会动它。
+- 前进/后退 15 秒按屏幕时钟（已除倍速）在真实时间轴上跳，跳出当前音频才按字数估算。定时关闭到点是暂停不是停止，「本章结束后」按目录项算（续页算在内），停在换章前的静音里。
+- 读音纠正（`settings.speechReplacements`）只改送去合成的文字，长规则优先、纯字面替换。
+- 改这块要跑 `tests/listen-browser.py`（拦 `/api/tts` 回构造的 MP3，假的 `speechSynthesis`，可拨快的时钟）。
 
 ## AI 对话
 

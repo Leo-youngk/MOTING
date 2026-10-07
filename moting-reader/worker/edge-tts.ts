@@ -8,7 +8,13 @@ import type { WordBoundary } from "../lib/speech-timeline";
 const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const WIN_EPOCH_SECONDS = 11644473600n;
 const ORIGIN = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
-const SYNTHESIS_TIMEOUT_MS = 30000;
+/**
+ * 音频是边合成边推过来的，首帧实测 0.5–0.85 秒就到，之后帧帧相连。
+ * 这么久一条消息都没有就是连接死了，早点断开交给上层重试，比干等总超时强。
+ */
+const SYNTHESIS_IDLE_TIMEOUT_MS = 10000;
+/** 单片总时长兜底。360 字一片实测 9–11 秒，留足余量。 */
+const SYNTHESIS_TIMEOUT_MS = 45000;
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
 
 const EDGE_UPDATES_URL = "https://edgeupdates.microsoft.com/api/products";
@@ -98,8 +104,35 @@ function userAgentFor(version: string): string {
   );
 }
 
-/** 只有握手阶段被拒才值得换版本重试，合成中途出错重试也没用。 */
-class HandshakeError extends Error {}
+/** 握手被拒：版本过期、限流（403/429）或者地区封锁。换版本重试一次，再不行就是服务不可用。 */
+export class HandshakeError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`朗读服务握手失败：HTTP ${status}`);
+    this.name = "HandshakeError";
+    this.status = status;
+  }
+}
+
+/** 连上之后出的事：超时、连接中断、提前关闭、返回格式不对。换一条连接再试多半就好。 */
+export class SynthesisTransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SynthesisTransportError";
+  }
+}
+
+/**
+ * 每条连接带一个随机 muid cookie。edge-tts 7.x 和 Readest 都在 2025 年加上了它，
+ * 不带的请求更容易被当成脚本拒掉。
+ */
+function randomMuid(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+}
 
 /** token 按 5 分钟粒度取整，随 Edge 版本轮换，接口 403 时多半是这里过期了。 */
 async function securityToken(): Promise<string> {
@@ -165,14 +198,13 @@ async function synthesizeOnce(
       "Accept-Language": "en-US,en;q=0.9",
       Pragma: "no-cache",
       "Cache-Control": "no-cache",
+      Cookie: `muid=${randomMuid()};`,
     },
     signal,
   });
 
   const socket = response.webSocket;
-  if (!socket) {
-    throw new HandshakeError(`朗读服务握手失败：HTTP ${response.status}`);
-  }
+  if (!socket) throw new HandshakeError(response.status);
   socket.accept();
 
   const audioFrames: (Blob | ArrayBuffer)[] = [];
@@ -182,20 +214,31 @@ async function synthesizeOnce(
 
   const finished = new Promise<void>((resolve, reject) => {
     let settled = false;
+    let idleHandle: ReturnType<typeof setTimeout> | undefined;
     const settle = (callback: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timerHandle);
+      clearTimeout(idleHandle);
       callback();
     };
     const fail = (error: Error) => settle(() => reject(error));
     const complete = () => settle(resolve);
     const timerHandle = setTimeout(
-      () => fail(new Error("朗读服务响应超时")),
+      () => fail(new SynthesisTransportError("朗读服务响应超时")),
       SYNTHESIS_TIMEOUT_MS
     );
+    const touch = () => {
+      clearTimeout(idleHandle);
+      idleHandle = setTimeout(
+        () => fail(new SynthesisTransportError("朗读服务没有响应")),
+        SYNTHESIS_IDLE_TIMEOUT_MS
+      );
+    };
+    touch();
 
     socket.addEventListener("message", (event: MessageEvent) => {
+      touch();
       if (typeof event.data !== "string") {
         const size =
           event.data instanceof ArrayBuffer
@@ -217,7 +260,7 @@ async function synthesizeOnce(
 
       const separator = event.data.indexOf("\r\n\r\n");
       if (separator < 0) {
-        fail(new Error("朗读服务返回格式错误"));
+        fail(new SynthesisTransportError("朗读服务返回格式错误"));
         return;
       }
       const headers = event.data.slice(0, separator);
@@ -232,7 +275,7 @@ async function synthesizeOnce(
         try {
           payload = JSON.parse(event.data.slice(separator + 4)) as typeof payload;
         } catch {
-          fail(new Error("朗读服务元数据格式错误"));
+          fail(new SynthesisTransportError("朗读服务元数据格式错误"));
           return;
         }
         for (const item of payload.Metadata ?? []) {
@@ -249,15 +292,16 @@ async function synthesizeOnce(
     });
 
     socket.addEventListener("error", () => {
-      fail(new Error("朗读服务连接中断"));
+      fail(new SynthesisTransportError("朗读服务连接中断"));
     });
 
+    // 只认 turn.end。以前收到过几帧音频就把提前关闭当成功，残缺的音频会被当成整段
+    // 缓存一年，以后每次读到这里都会少掉后半截。
     socket.addEventListener("close", (event: CloseEvent) => {
-      if (audioFrames.length) complete();
-      else fail(new Error(`朗读服务提前关闭：${event.code}`));
+      fail(new SynthesisTransportError(`朗读服务提前关闭：${event.code}`));
     });
 
-    onAbort = () => fail(new Error("朗读请求已取消"));
+    onAbort = () => fail(new DOMException("朗读请求已取消", "AbortError"));
     signal.addEventListener("abort", onAbort, { once: true });
   });
 
@@ -298,10 +342,9 @@ async function synthesizeOnce(
     const buffer =
       frame instanceof ArrayBuffer ? frame : await (frame as Blob).arrayBuffer();
     const view = new Uint8Array(buffer);
-    if (view.length < 2) throw new Error("朗读服务返回了无效音频帧");
-    const headerLength = (view[0] << 8) | view[1];
-    if (2 + headerLength > view.length) {
-      throw new Error("朗读服务返回了无效音频帧");
+    const headerLength = view.length >= 2 ? (view[0] << 8) | view[1] : -1;
+    if (headerLength < 0 || 2 + headerLength > view.length) {
+      throw new SynthesisTransportError("朗读服务返回了无效音频帧");
     }
     chunks.push(view.subarray(2 + headerLength));
   }
