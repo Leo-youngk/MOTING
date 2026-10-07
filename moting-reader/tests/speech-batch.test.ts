@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   joinSpeechChunks,
   mp3DurationSeconds,
+  splitMp3Audio,
   splitSpeechText,
 } from "../lib/speech-batch.ts";
 import { TICKS_PER_SECOND } from "../lib/speech-timeline.ts";
@@ -34,6 +35,17 @@ test("长文本优先在句末切分并保留原始下标", () => {
     )
   );
   assert.ok(chunks.every((chunk) => chunk.text.length <= 12));
+});
+
+test("HLS 分片保留每个 MPEG 帧且媒体时间连续，不把短分片重新当成零秒", () => {
+  const audio = fakeMpeg2Layer3(1300);
+  const parts = splitMp3Audio(audio, 6);
+  assert.ok(parts.length > 4);
+  assert.ok(parts.every(part => part.duration > 0 && part.duration <= 6));
+  assert.deepEqual(Buffer.concat(parts.map(part => Buffer.from(part.audio))), Buffer.from(audio));
+  assert.ok(Math.abs(parts.reduce((sum, part) => sum + part.duration, 0) - mp3DurationSeconds(audio)) < 1e-9);
+  for (let i = 1; i < parts.length; i++) assert.ok(Math.abs(parts[i].time - parts[i - 1].time - parts[i - 1].duration) < 1e-9);
+  assert.throws(() => splitMp3Audio(new Uint8Array(20)), /无效/);
 });
 
 test("MP3 逐帧时长用于合并跨片时间轴", () => {
