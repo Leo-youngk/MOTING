@@ -76,10 +76,9 @@ const MPEG2_LAYER3_BITRATES = [
 ];
 const SAMPLE_RATES = [44100, 48000, 32000];
 
-/** 逐帧计算 MP3 时长；比拿最后一个词的结束时间更能覆盖句末静音和编码延迟。 */
-export function mp3DurationSeconds(audio: Uint8Array): number {
+export function mp3Frames(audio: Uint8Array): { offset: number; length: number; duration: number }[] {
   let offset = 0;
-  let seconds = 0;
+  const frames: { offset: number; length: number; duration: number }[] = [];
 
   if (
     audio.length >= 10 &&
@@ -132,11 +131,39 @@ export function mp3DurationSeconds(audio: Uint8Array): number {
       continue;
     }
 
-    seconds += (mpeg1 ? 1152 : 576) / sampleRate;
+    frames.push({ offset, length: frameLength, duration: (mpeg1 ? 1152 : 576) / sampleRate });
     offset += frameLength;
   }
 
-  return seconds;
+  return frames;
+}
+
+/** 逐帧计算 MP3 时长；比拿最后一个词的结束时间更能覆盖句末静音和编码延迟。 */
+export function mp3DurationSeconds(audio: Uint8Array): number {
+  return mp3Frames(audio).reduce((seconds, frame) => seconds + frame.duration, 0);
+}
+
+/** Split on complete MPEG frames without re-encoding or resetting the decoder clock. */
+export function splitMp3Audio(audio: Uint8Array, maxSeconds = 6): { audio: Uint8Array; time: number; duration: number }[] {
+  if (!(maxSeconds >= 0.1 && Number.isFinite(maxSeconds))) throw new RangeError("无效的音频分片时长");
+  const frames = mp3Frames(audio);
+  if (!frames.length) throw new Error("无效的 MP3 音频");
+  const parts: { audio: Uint8Array; time: number; duration: number }[] = [];
+  let first = 0;
+  let duration = 0;
+  let time = 0;
+  const emit = (last: number) => {
+    parts.push({ audio: audio.slice(frames[first].offset, frames[last].offset + frames[last].length), time, duration });
+    time += duration;
+    duration = 0;
+    first = last + 1;
+  };
+  for (let index = 0; index < frames.length; index++) {
+    if (duration && duration + frames[index].duration > maxSeconds) emit(index - 1);
+    duration += frames[index].duration;
+  }
+  if (first < frames.length) emit(frames.length - 1);
+  return parts;
 }
 
 function boundaryDuration(boundaries: WordBoundary[]): number {

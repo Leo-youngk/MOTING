@@ -28,7 +28,7 @@ export interface LiveStatus {
 }
 
 /** A bounded session starts at the exact saved sentence and includes chapter transitions. */
-export function makeLivePlan(book: Book, position: BookPosition, maxChars = 120_000): LivePlan {
+export function makeLivePlan(book: Book, position: BookPosition, maxChars = 1_200_000): LivePlan {
   let text = "";
   const sentences: LiveSentence[] = [];
   outer: for (let chapterIndex = position.chapterIndex; chapterIndex < book.chapters.length; chapterIndex++) {
@@ -52,12 +52,15 @@ export function makeLivePlan(book: Book, position: BookPosition, maxChars = 120_
 
 export function liveLocationAt(plan: LivePlan, status: LiveStatus, time: number): LiveSentence | null {
   if (!plan.sentences.length || !status.segments.length) return plan.sentences[0] ?? null;
-  const segment = status.segments.find(part => time < part.time + part.duration)
+  // Media currentTime is rounded to microseconds; a precise seek must not highlight
+  // the preceding sentence because its timestamp was rounded a fraction downward.
+  const playbackTime = time + 0.0001;
+  const segment = status.segments.find(part => playbackTime < part.time + part.duration)
     ?? status.segments[status.segments.length - 1];
-  const local = Math.max(0, Math.min(segment.duration, time - segment.time));
+  const local = Math.max(0, Math.min(segment.duration, playbackTime - segment.time));
   const char = segment.start + (segment.timeline.length
     ? charIndexAt(segment.timeline, local)
-    : Math.floor((segment.end - segment.start) * local / segment.duration));
+    : Math.floor((segment.end - segment.start) * local / segment.duration + 1e-7));
   let low = 0; let high = plan.sentences.length - 1;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
