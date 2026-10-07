@@ -1,5 +1,5 @@
-import { flattenChapter } from "./content.ts";
 import { charIndexAt, timeAt } from "./speech-timeline.ts";
+import { spokenSentences } from "./speech-text.ts";
 import type { Book, BookPosition, SpeechLocation } from "./types.ts";
 
 export interface LiveSentence extends SpeechLocation {
@@ -27,25 +27,29 @@ export interface LiveStatus {
   segments: LiveSegment[];
 }
 
-/** A bounded session starts at the exact saved sentence and includes chapter transitions. */
-export function makeLivePlan(book: Book, position: BookPosition, maxChars = 1_200_000): LivePlan {
+/**
+ * A bounded session starts at the exact saved sentence and includes chapter transitions.
+ * 文字带段落、标题、换章的结构（见 lib/speech-text.ts），会话按 format 2 建，
+ * Worker 据此在拼接处留合适的停顿；speak 是读音纠正。
+ */
+export function makeLivePlan(
+  book: Book,
+  position: BookPosition,
+  maxChars = 1_200_000,
+  speak: (text: string) => string = (text) => text
+): LivePlan {
   let text = "";
   const sentences: LiveSentence[] = [];
-  outer: for (let chapterIndex = position.chapterIndex; chapterIndex < book.chapters.length; chapterIndex++) {
-    const lines = flattenChapter(book.chapters[chapterIndex]);
-    const first = chapterIndex === position.chapterIndex ? position.sentenceIndex : 0;
-    for (let sentenceIndex = first; sentenceIndex < lines.length; sentenceIndex++) {
-      const line = lines[sentenceIndex];
-      const spoken = (line.speakableText || line.text).trim();
-      if (!spoken) continue;
-      if (text.length + spoken.length + 1 > maxChars) break outer;
-      const start = text.length;
-      text += spoken + "\n";
-      sentences.push({
-        bookId: book.id, chapterIndex, sentenceIndex,
-        sentenceId: line.id, start, end: text.length,
-      });
-    }
+  for (const item of spokenSentences(book.chapters, position.chapterIndex, position.sentenceIndex, speak)) {
+    const separator = sentences.length ? item.separator : "";
+    if (text.length + separator.length + item.text.length > maxChars) break;
+    text += separator;
+    const start = text.length;
+    text += item.text;
+    sentences.push({
+      bookId: book.id, chapterIndex: item.chapterIndex, sentenceIndex: item.sentenceIndex,
+      sentenceId: item.sentence.id, start, end: text.length,
+    });
   }
   return { text, sentences };
 }

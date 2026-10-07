@@ -193,6 +193,11 @@ export interface ReaderSettings {
   speechRate: number;
   voiceURI: string;
   /**
+   * 朗读时的读法替换（多音字、人名、生僻词）。只改送去合成的文字，不改正文，
+   * 高亮和位置照旧按句子走。同步来的旧设置可能没有这一项。
+   */
+  speechReplacements?: SpeechReplacement[];
+  /**
    * 听读同步：听书时正文跟着朗读翻动，听到哪里阅读进度就记到哪里，开始听也从听读两者较新的那处起。
    * 默认关：关着时听和读各记各的，正文在读者手底下不自己动。
    */
@@ -232,6 +237,12 @@ export interface ImportProgress {
   stage: "reading" | "metadata" | "content" | "saving";
   label: string;
   percent: number;
+}
+
+/** 朗读替换规则：正文里的 from 读成 to。 */
+export interface SpeechReplacement {
+  from: string;
+  to: string;
 }
 
 export interface SpeechSpan {
@@ -280,6 +291,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   englishMode: false,
   speechRate: 1,
   voiceURI: "",
+  speechReplacements: [],
   followSpeech: false,
   aiBaseUrl: "",
   aiApiKey: "",

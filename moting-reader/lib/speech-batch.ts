@@ -5,7 +5,41 @@ import type { WordBoundary } from "./speech-timeline.ts";
 export interface SpeechTextChunk {
   text: string;
   start: number;
+  /** 只有结构化切片（splitStructuredSpeech）才有：这一片读完之后接多长的停顿。 */
+  breakAfter?: SpeechBreak;
 }
+
+/**
+ * 结构化文本的停顿类型。新客户端组文本时用换行把结构带过来：
+ * 一个换行是换段，两个是标题前后，三个以上是换章；段内切开的看切在什么标点上。
+ */
+export type SpeechBreak = "none" | "clause" | "sentence" | "paragraph" | "heading" | "chapter";
+
+export const PARAGRAPH_SEPARATOR = "\n";
+export const HEADING_SEPARATOR = "\n\n";
+export const CHAPTER_SEPARATOR = "\n\n\n";
+/** 新客户端发来的文本带这个格式号；老客户端（每句后面一个换行）不带，照旧处理。 */
+export const STRUCTURED_SPEECH_FORMAT = 2;
+
+/**
+ * 从这片最后一个字读完，到下一片第一个字出声，中间一共静多久（1× 下的秒数）。
+ * 句号、逗号两档照云健自己在一次合成里的停顿：2026-10 用 ffmpeg 量过，句末约 0.66 秒、
+ * 逗号约 0.3 秒。不整理的话每片结尾自带约 0.88 秒静音，加上下一片开头 0.18 秒，
+ * 每个拼接处都会多停 0.4 秒左右；真正换段、换章的地方反倒没有额外停顿。
+ */
+export const BREAK_GAP_SECONDS: Record<SpeechBreak, number> = {
+  none: 0.25,
+  clause: 0.3,
+  sentence: 0.66,
+  paragraph: 0.8,
+  heading: 1.1,
+  chapter: 1.8,
+};
+
+/** 每次合成开头自带的静音。开头的帧不能裁（下一帧的比特池可能借用它），只能算进停顿里。 */
+const LEADING_SILENCE_SECONDS = 0.18;
+/** 最后一个词的结束时间离真正收声差几十毫秒，至少留这么多尾巴，免得吃掉字音。 */
+const MIN_TAIL_SECONDS = 0.12;
 
 export interface SpeechChunkResult {
   audio: Uint8Array;
@@ -14,6 +48,106 @@ export interface SpeechChunkResult {
 
 const PRIMARY_BREAK = /[。！？!?；;\n]/;
 const SECONDARY_BREAK = /[，,、：:\s]/;
+const SENTENCE_END = /[。！？!?；;…]/;
+/** 句末标点后面紧跟的收尾引号、括号要跟着这一句走，不能单独甩到下一片开头。 */
+const CLOSING = /[”’」』》）)\]】"']/;
+/** 有字可读：一片里全是标点、星号这类符号时，微软会一个字节都不回。 */
+const SPEAKABLE = /[\p{L}\p{N}]/u;
+
+export function hasSpeakableText(text: string): boolean {
+  return SPEAKABLE.test(text);
+}
+
+/**
+ * 微软的服务不认几个控制字符（OCR 出来的 PDF 里常见垂直制表符），带上就整片报错。
+ * 换成空格，长度不变，下标不受影响。字符范围照 edge-tts 的 remove_incompatible_characters。
+ */
+export function cleanSpeechText(text: string): string {
+  return text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, " ");
+}
+
+function breakOfRun(newlines: number): SpeechBreak {
+  if (newlines >= 3) return "chapter";
+  if (newlines === 2) return "heading";
+  if (newlines === 1) return "paragraph";
+  return "sentence";
+}
+
+/** 整批文本末尾带的分隔符：这一批读完到下一批之间该停多久。 */
+export function trailingBreak(text: string): SpeechBreak {
+  const match = /\n*$/.exec(text);
+  return breakOfRun(match ? match[0].length : 0);
+}
+
+function isSurrogateSplit(text: string, index: number): boolean {
+  const previous = text.charCodeAt(index - 1);
+  const next = text.charCodeAt(index);
+  return previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff;
+}
+
+/** 在 [minimum, end) 里从后往前找切点：换行、句末标点、逗号，实在没有才硬切。 */
+function findCut(
+  text: string,
+  start: number,
+  end: number,
+  minimum: number
+): { cut: number; next: number; breakAfter: SpeechBreak } {
+  for (let index = end - 1; index >= minimum; index -= 1) {
+    if (text[index] === "\n") return { cut: index, next: index + 1, breakAfter: "paragraph" };
+  }
+  for (let index = end - 1; index >= minimum; index -= 1) {
+    if (!SENTENCE_END.test(text[index])) continue;
+    let cut = index + 1;
+    while (cut < text.length && (SENTENCE_END.test(text[cut]) || CLOSING.test(text[cut]))) cut += 1;
+    if (cut > end) cut = index + 1;
+    return { cut, next: cut, breakAfter: "sentence" };
+  }
+  for (let index = end - 1; index >= minimum; index -= 1) {
+    if (SECONDARY_BREAK.test(text[index])) return { cut: index + 1, next: index + 1, breakAfter: "clause" };
+  }
+  let cut = end;
+  if (cut > start + 1 && isSurrogateSplit(text, cut)) cut -= 1;
+  return { cut, next: cut, breakAfter: "none" };
+}
+
+/**
+ * 结构化文本的切片：两个以上换行（标题、换章）一定切开，因为只有在两片之间才能插静音；
+ * 段内切点依次挑换行、句末标点、逗号。分隔用的换行不进任何一片，start 是原文下标。
+ */
+export function splitStructuredSpeech(text: string, maxLength = 360): SpeechTextChunk[] {
+  if (!Number.isFinite(maxLength) || maxLength < 1) {
+    throw new RangeError("maxLength 必须是正整数");
+  }
+  const limit = Math.floor(maxLength);
+  const chunks: SpeechTextChunk[] = [];
+
+  const pushSection = (start: number, end: number, sectionBreak: SpeechBreak) => {
+    let position = start;
+    while (position < end) {
+      while (position < end && text[position] === "\n") position += 1;
+      if (position >= end) break;
+      if (end - position <= limit) {
+        let cut = end;
+        while (cut > position && text[cut - 1] === "\n") cut -= 1;
+        chunks.push({ text: text.slice(position, cut), start: position, breakAfter: sectionBreak });
+        return;
+      }
+      const minimum = position + Math.floor(limit / 2);
+      const { cut, next, breakAfter } = findCut(text, position, position + limit, minimum);
+      chunks.push({ text: text.slice(position, cut), start: position, breakAfter });
+      position = next;
+    }
+  };
+
+  const hard = /\n{2,}/g;
+  let sectionStart = 0;
+  for (let match = hard.exec(text); match; match = hard.exec(text)) {
+    pushSection(sectionStart, match.index, breakOfRun(match[0].length));
+    sectionStart = match.index + match[0].length;
+  }
+  if (sectionStart < text.length) pushSection(sectionStart, text.length, trailingBreak(text));
+  return chunks;
+}
 
 /**
  * 微软的单次合成有长度上限；长批次在服务端按自然停顿切开，但保留每一字符的
@@ -166,6 +300,81 @@ export function splitMp3Audio(audio: Uint8Array, maxSeconds = 6): { audio: Uint8
   return parts;
 }
 
+function frameHeader(audio: Uint8Array, offset: number): { length: number; duration: number } | null {
+  const frames = mp3Frames(audio.subarray(offset, offset + 4096));
+  return frames.length && frames[0].offset === 0 ? frames[0] : null;
+}
+
+/**
+ * 照着这段音频的格式造一帧数字静音：边信息全零（part2_3_length = 0，不带频谱数据），
+ * main_data_begin 也是 0，不借前面的比特池，插在两次合成之间不会把谁解坏。
+ * LAME 编码纯静音时出的就是这种帧。
+ */
+function silentFrameLike(audio: Uint8Array, offset: number): { bytes: Uint8Array; duration: number } | null {
+  const header = frameHeader(audio, offset);
+  if (!header) return null;
+  const padded = (audio[offset + 2] >> 1) & 0x01;
+  const bytes = new Uint8Array(header.length - padded);
+  bytes[0] = 0xff;
+  bytes[1] = audio[offset + 1] | 0x01; // 保护位置 1：不带 CRC。
+  bytes[2] = audio[offset + 2] & ~0x02; // 去掉填充位。
+  bytes[3] = audio[offset + 3];
+  return { bytes, duration: header.duration };
+}
+
+/** 云健的输出格式（MPEG-2 Layer III、24kHz、48kbps、单声道）的一帧数字静音，24 毫秒。 */
+const EDGE_SILENT_FRAME = (() => {
+  const bytes = new Uint8Array(144);
+  bytes.set([0xff, 0xf3, 0x64, 0xc4]);
+  return bytes;
+})();
+
+/** 一段指定长短的数字静音 MP3（给全是符号、读不出声的那一片占时间用）。 */
+export function silentMp3(seconds: number): Uint8Array {
+  const count = Math.max(1, Math.round(seconds / (576 / 24000)));
+  const audio = new Uint8Array(EDGE_SILENT_FRAME.length * count);
+  for (let index = 0; index < count; index += 1) audio.set(EDGE_SILENT_FRAME, index * EDGE_SILENT_FRAME.length);
+  return audio;
+}
+
+/**
+ * 把一片合成结果的结尾整理成想要的停顿：收声之后留够 gap 减去下一片开头自带的静音，
+ * 多出来的整帧裁掉，不够的补静音帧。只动结尾——MP3 的比特池只往前借，从后面截断不会
+ * 把前面的帧解坏。返回整理后的音频和它的时长；词边界的时间不受影响。
+ */
+export function fitChunkAudio(
+  audio: Uint8Array,
+  boundaries: WordBoundary[],
+  gapSeconds: number
+): { audio: Uint8Array; seconds: number } {
+  const frames = mp3Frames(audio);
+  const total = frames.reduce((sum, frame) => sum + frame.duration, 0);
+  const speechEnd = boundaryDuration(boundaries);
+  if (!frames.length || speechEnd <= 0 || speechEnd > total + 0.5) {
+    return { audio, seconds: total || speechEnd };
+  }
+  const target = speechEnd + Math.max(MIN_TAIL_SECONDS, gapSeconds - LEADING_SILENCE_SECONDS);
+  if (target < total) {
+    let seconds = 0;
+    let end = 0;
+    for (const frame of frames) {
+      if (seconds >= target) break;
+      seconds += frame.duration;
+      end = frame.offset + frame.length;
+    }
+    return { audio: audio.subarray(0, end), seconds };
+  }
+  const silence = silentFrameLike(audio, frames[frames.length - 1].offset);
+  const count = silence ? Math.round((target - total) / silence.duration) : 0;
+  if (!silence || count <= 0) return { audio, seconds: total };
+  const padded = new Uint8Array(audio.length + silence.bytes.length * count);
+  padded.set(audio, 0);
+  for (let index = 0; index < count; index += 1) {
+    padded.set(silence.bytes, audio.length + index * silence.bytes.length);
+  }
+  return { audio: padded, seconds: total + silence.duration * count };
+}
+
 function boundaryDuration(boundaries: WordBoundary[]): number {
   return boundaries.reduce(
     (duration, boundary) =>
@@ -174,7 +383,10 @@ function boundaryDuration(boundaries: WordBoundary[]): number {
   );
 }
 
-/** 把多个独立 MP3 及其词级时间轴拼成浏览器眼中的一个长媒体资源。 */
+/**
+ * 把多个独立 MP3 及其词级时间轴拼成浏览器眼中的一个长媒体资源。
+ * 结构化切片（带 breakAfter）的片按停顿类型整理拼接处的静音；没出声的片直接跳过。
+ */
 export function joinSpeechChunks(
   chunks: SpeechTextChunk[],
   results: SpeechChunkResult[]
@@ -183,18 +395,14 @@ export function joinSpeechChunks(
     throw new RangeError("文本分片与语音结果数量不一致");
   }
 
-  const audio = new Uint8Array(
-    new ArrayBuffer(results.reduce((total, result) => total + result.audio.length, 0))
-  );
+  const pieces: Uint8Array[] = [];
   const timeline: SpeechBoundary[] = [];
-  let byteOffset = 0;
   let timeOffset = 0;
 
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index];
     const result = results[index];
-    audio.set(result.audio, byteOffset);
-    byteOffset += result.audio.length;
+    if (!result.audio.length) continue;
 
     for (const boundary of buildBoundaryTimeline(chunk.text, result.boundaries)) {
       timeline.push({
@@ -203,9 +411,23 @@ export function joinSpeechChunks(
       });
     }
 
-    timeOffset +=
-      mp3DurationSeconds(result.audio) || boundaryDuration(result.boundaries);
+    if (chunk.breakAfter) {
+      const fitted = fitChunkAudio(result.audio, result.boundaries, BREAK_GAP_SECONDS[chunk.breakAfter]);
+      pieces.push(fitted.audio);
+      timeOffset += fitted.seconds;
+    } else {
+      pieces.push(result.audio);
+      timeOffset += mp3DurationSeconds(result.audio) || boundaryDuration(result.boundaries);
+    }
   }
 
+  const audio = new Uint8Array(
+    new ArrayBuffer(pieces.reduce((total, piece) => total + piece.length, 0))
+  );
+  let byteOffset = 0;
+  for (const piece of pieces) {
+    audio.set(piece, byteOffset);
+    byteOffset += piece.length;
+  }
   return { audio, timeline };
 }

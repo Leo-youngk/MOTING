@@ -1,6 +1,12 @@
+import { fetchWithTimeout } from "./fetch-utils.ts";
+import { STRUCTURED_SPEECH_FORMAT } from "./speech-batch.ts";
 import type { SpeechBoundary } from "./types";
 
 const MAX_SPEECH_RESPONSE_BYTES = 20 * 1024 * 1024;
+/** 云端大批次合成要几十秒；超过这个时间还没回来就当这次失败，交给上层重试或降级。 */
+const SHORT_REQUEST_TIMEOUT_MS = 40000;
+const LONG_REQUEST_TIMEOUT_MS = 150000;
+const SHORT_TEXT_LENGTH = 1600;
 
 export interface SpeechClip {
   audio: Blob;
@@ -8,8 +14,8 @@ export interface SpeechClip {
 }
 
 /**
- * 4xx 说明是这一段文本本身的问题（太长、空白），换一段还能继续走云端；
- * 网络错误和 5xx 才算服务真的不可用，那时候整场收听退回系统朗读。
+ * 422 这类 4xx 说明是这一段文本本身的问题（全是符号之类），换一段还能继续走云端；
+ * 断网、超时、限流和 5xx 才算服务暂时不可用，那时候先用系统朗读顶着，过一阵再试云端。
  */
 export class SpeechClipError extends Error {
   readonly serviceDown: boolean;
@@ -27,12 +33,24 @@ export async function fetchSpeechClip(
   voice: string,
   signal?: AbortSignal
 ): Promise<SpeechClip> {
-  const response = await fetch("/api/tts", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text, voice }),
-    signal,
-  });
+  let response: Response;
+  try {
+    // format 2：文字带段落、标题、换章的结构，Worker 按结构整理拼接处的停顿。
+    response = await fetchWithTimeout(
+      "/api/tts",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text, voice, format: STRUCTURED_SPEECH_FORMAT }),
+        signal,
+      },
+      text.length <= SHORT_TEXT_LENGTH ? SHORT_REQUEST_TIMEOUT_MS : LONG_REQUEST_TIMEOUT_MS
+    );
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    // 断网、超时：服务端那边可能好好的，但这一刻用不上。
+    throw new SpeechClipError("网络不可用或朗读服务响应太慢", true);
+  }
 
   if (!response.ok) {
     const detail = (await response.json().catch(() => null)) as {
@@ -40,7 +58,7 @@ export async function fetchSpeechClip(
     } | null;
     throw new SpeechClipError(
       detail?.error ?? `朗读服务返回 ${response.status}`,
-      response.status >= 500
+      response.status >= 500 || response.status === 429 || response.status === 408
     );
   }
 

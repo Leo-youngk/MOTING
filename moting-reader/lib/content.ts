@@ -436,7 +436,7 @@ export function flattenChapter(chapter: Chapter): Sentence[] {
  * 拼朗读文本时两句之间放什么。中文句末有标点就直接接上；英文句子之间要空一格，
  * 否则「England;」「he came」拼成「England;he」，会被当成一个怪词读。
  */
-function speechSeparator(text: string, next: string): string {
+export function speechSeparator(text: string, next: string): string {
   if (!text) return "";
   if (LATIN_SENTENCE_END.test(text) && LATIN_SENTENCE_START.test(next)) return " ";
   return /[。！？!?；;…，,、.]$/.test(text) ? "" : " ";
@@ -445,7 +445,10 @@ function speechSeparator(text: string, next: string): string {
 const MAX_SPEECH_BLOCK_LENGTH = 240;
 export const MAX_EDGE_SPEECH_BATCH_LENGTH = 4800;
 
-export function buildSpeechBlocks(chapter: Chapter): SpeechBlock[] {
+export function buildSpeechBlocks(
+  chapter: Chapter,
+  speak: (text: string) => string = (text) => text
+): SpeechBlock[] {
   const blocks: SpeechBlock[] = [];
   let sentenceIndex = 0;
 
@@ -460,7 +463,7 @@ export function buildSpeechBlocks(chapter: Chapter): SpeechBlock[] {
     };
 
     for (const sentence of paragraph.sentences) {
-      const speakable = sentence.speakableText || sentence.text;
+      const speakable = speak(sentence.speakableText || sentence.text);
       if (text && text.length + speakable.length > MAX_SPEECH_BLOCK_LENGTH) {
         flush();
       }

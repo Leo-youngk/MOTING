@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildEdgeSpeechBatches, createChapter } from "../lib/content.ts";
+import { buildEdgeSpeechBatches, createChapter, flattenChapter } from "../lib/content.ts";
+import { speechReplacer } from "../lib/speech-text.ts";
 import {
+  nextTier,
+  TIER_LENGTH,
+  type SpeechTier,
   QUICK_SPEECH_LENGTH,
   segmentFromChapter,
   sentenceAfter,
@@ -111,7 +115,8 @@ test("a short chapter tail and the next chapter share one clip without losing ch
   ];
   const book = { id: "book", chapters } as Book;
   const part = segmentFromBook(book, 0, 1, "edge", true)!;
-  assert.equal(part.text, "章末剩余一句。\n下一章第一句。\n下一章第二句。");
+  // 换章用三个换行（Worker 在那里留 1.8 秒），同一段里的句子直接接上。
+  assert.equal(part.text, "章末剩余一句。\n\n\n下一章第一句。下一章第二句。");
   assert.deepEqual(part.spans.map(span => [span.chapterIndex, span.sentenceIndex]), [[0, 1], [2, 0], [2, 1]]);
   assert.equal(spanForBookSentence(part, 2, 0)?.sentenceId, chapters[2].paragraphs[0].sentences[0].id);
   assert.equal(spanForBookSentence(part, 0, 0), null);
@@ -143,4 +148,53 @@ test("chapter sleep mode and system fallback keep clips confined to one chapter"
   for (const engine of ["edge", "system"] as const) {
     assert.ok(segmentFromBook(book, 0, 1, engine, false, false)!.spans.every(span => span.chapterIndex === 0));
   }
+});
+
+test("结构化文本：换段一个换行、标题前后两个、换章三个，续页章按换段算", () => {
+  const chapters = [
+    createChapter("第一章", [{ kind: "heading", text: "第一章", level: 2 }, { text: "甲。乙。" }, { text: "丙。" }], 0)!,
+    createChapter("未知", [{ text: "丁。" }], 1)!,
+    createChapter("第二章", [{ kind: "heading", text: "第二章", level: 2 }, { text: "戊。" }], 2)!,
+  ];
+  const book = { id: "book", chapters } as Book;
+  const part = segmentFromBook(book, 0, 0, "edge", 2)!;
+  assert.equal(part.text, "第一章\n\n甲。乙。\n丙。\n丁。\n\n\n第二章\n\n戊。");
+  for (const span of part.spans) {
+    const sentence = flattenChapter(chapters[span.chapterIndex])[span.sentenceIndex];
+    assert.equal(part.text.slice(span.start, span.end), sentence.speakableText || sentence.text);
+  }
+});
+
+test("首段 → 第二段 → 长批次逐档变长，接续不重不漏，段尾带上下一句前的换行", () => {
+  const chapters = [chapterOf(40), chapterOf(200)];
+  const book = { id: "book", chapters } as Book;
+  let at: { chapterIndex: number; sentenceIndex: number } | null = { chapterIndex: 0, sentenceIndex: 2 };
+  let tier: SpeechTier = 0;
+  const lengths: number[] = [];
+  const heard: string[] = [];
+  while (at) {
+    const part = segmentFromBook(book, at.chapterIndex, at.sentenceIndex, "edge", tier)!;
+    assert.ok(part.text.replace(/\n+$/, "").length <= TIER_LENGTH[tier] || part.spans.length === 1);
+    lengths.push(part.text.length);
+    heard.push(...part.spans.map(span => `${span.chapterIndex}:${span.sentenceIndex}`));
+    const last = part.spans.at(-1)!;
+    at = nextBookSentence(book, last.chapterIndex, last.sentenceIndex + 1);
+    if (at && at.chapterIndex !== last.chapterIndex) assert.ok(part.text.endsWith("\n\n\n"), "下一句在下一章，段尾带上换章的换行");
+    tier = nextTier(tier);
+  }
+  assert.ok(lengths[0] <= TIER_LENGTH[0] + 3 && lengths[1] > lengths[0] && lengths[1] <= TIER_LENGTH[1] + 3);
+  const expected = chapters.flatMap((chapter, ci) => Array.from({ length: chapter.sentenceCount }, (_, si) => `${ci}:${si}`)).slice(2);
+  assert.deepEqual(heard, expected);
+});
+
+test("读音纠正改的是送去合成的文字，偏移按替换后的文字算；长规则优先", () => {
+  const replace = speechReplacer([{ from: "长", to: "常" }, { from: "长大", to: "涨大" }, { from: "", to: "x" }]);
+  assert.equal(replace("他长大了，长得很长"), "他涨大了，常得很常");
+  const chapters = [createChapter("一", [{ text: "行长说。银行很大。" }], 0)!];
+  const book = { id: "book", chapters } as Book;
+  const part = segmentFromBook(book, 0, 0, "edge", 0, true, speechReplacer([{ from: "行长", to: "航长" }]))!;
+  assert.equal(part.text, "航长说。银行很大。");
+  assert.equal(part.text.slice(part.spans[1].start, part.spans[1].end), "银行很大。");
+  const system = segmentFromBook(book, 0, 0, "system", 0, true, speechReplacer([{ from: "行长", to: "航长" }]))!;
+  assert.equal(system.text, "航长说。银行很大。");
 });
