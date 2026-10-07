@@ -212,3 +212,19 @@ test("按估算时长往前往后挪", () => {
     sentenceIndex: lastSentence,
   });
 });
+
+test("读音纠正把字变多时，长批次也不会超过 Worker 的长度上限", () => {
+  const chapters = book(30);
+  const index = speechIndexFor(chapters);
+  const longer = speechReplacer([{ from: "墨", to: "墨水瓶里的墨" }]);
+  const segment = speechSegment(index, { chapterIndex: 0, sentenceIndex: 0 }, 2, longer);
+  assert.ok(segment);
+  assert.ok(segment.text.length <= 6000, `${segment.text.length}`);
+  const next = segment.next && speechSegment(index, segment.next, 2, longer);
+  assert.ok(next);
+  assert.equal(
+    ordinalOf(index, next.spans[0]),
+    ordinalOf(index, segment.spans[segment.spans.length - 1]) + 1,
+    "截短之后接着读下一句，不漏"
+  );
+});

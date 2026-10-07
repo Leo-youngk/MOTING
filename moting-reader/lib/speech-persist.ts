@@ -99,17 +99,23 @@ export function createSpeechPersistence(
           new Response(body, { headers: { "content-type": "application/octet-stream" } })
         );
 
+        // 读索引、挑要淘汰的、写回索引在同一个同步片段里做完，再去删缓存：
+        // 中间夹着 await 的话，同时落盘的两段会互相覆盖对方写进索引的记录。
         const entries = touch(hash, body.size);
         let total = Object.values(entries).reduce((sum, [bytes]) => sum + bytes, 0);
+        const victims: string[] = [];
         const oldest = Object.entries(entries).sort((a, b) => a[1][1] - b[1][1]);
         for (const [victim, [bytes]] of oldest) {
           if (total <= budget) break;
           if (victim === hash) continue;
           delete entries[victim];
           total -= bytes;
-          await cache.delete(requestFor(victim)).catch(() => false);
+          victims.push(victim);
         }
         writeIndex(entries);
+        await Promise.all(
+          victims.map((victim) => cache.delete(requestFor(victim)).catch(() => false))
+        );
       } catch {
         // 本机存储满了或者不让存：不影响这一次播放。
       }

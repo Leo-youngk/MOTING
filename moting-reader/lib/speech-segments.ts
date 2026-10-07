@@ -43,6 +43,11 @@ export const TIER_LENGTH = [360, 1500] as const;
 export const GRID_LENGTH = 4000;
 /** 从格子中间开始时剩下的太短，就连下一格一起读，免得刚接上又要换。 */
 export const GRID_MIN_REMAINDER = 1200;
+/**
+ * 一段送去合成的文字最多这么长，Worker 那边的上限是 6000（MAX_TTS_TEXT_LENGTH）。
+ * 网格本身不会超，但读音纠正可能把字变多（「AI」读成「人工智能」），这里兜住。
+ */
+const MAX_SEGMENT_LENGTH = 5600;
 
 export interface SpeechSegment extends SpeechBlock {
   tier: SpeechTier;
@@ -245,7 +250,7 @@ export function speechSegment(
   if (chars < GRID_MIN_REMAINDER && end < index.sentences.length) {
     end = gridCellAt(index, end).end;
   }
-  return build(index, start, end, Number.POSITIVE_INFINITY, 2, speak);
+  return build(index, start, end, MAX_SEGMENT_LENGTH, 2, speak);
 }
 
 /** cursor 所在那一整格（从格子开头起）。本地已经有这一格的音频时，直接拿它从中间播。 */
