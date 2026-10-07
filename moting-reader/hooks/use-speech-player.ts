@@ -90,14 +90,7 @@ function voiceScore(voice: SpeechSynthesisVoice): number {
 const CJK_CHARS_PER_SECOND = 5.2;
 const LATIN_CHARS_PER_SECOND = 15;
 const HIGHLIGHT_INTERVAL_MS = 100;
-const LIVE_CLIENT_VERSION = "2026-10-07-continuous-v4";
-function supportsNativeSpeechHls(): boolean {
-  // Use Apple's native pipeline for EVENT audio and background playback.
-  // Other browsers retain the established clip engine.
-  return /iPhone|iPad|iPod/.test(navigator.userAgent) ||
-    (/Macintosh/.test(navigator.userAgent) && /Safari/.test(navigator.userAgent) && !/Chrome|Chromium|Edg\//.test(navigator.userAgent))
-    ? !!document.createElement("audio").canPlayType("application/vnd.apple.mpegurl") : false;
-}
+const LIVE_CLIENT_VERSION = "2026-10-08-rollback-v5";
 function reusableAudio(ref: { current: HTMLAudioElement | null }): HTMLAudioElement {
   return ref.current ?? new Audio();
 }
@@ -250,7 +243,7 @@ export function useSpeechPlayer({
   const locationRef = useRef<SpeechLocation | null>(null);
   const playingRef = useRef(false);
   const tokenRef = useRef(0);
-  const engineRef = useRef<SpeechEngine | "live" | "live-pending" | null>(null);
+  const engineRef = useRef<SpeechEngine | "live" | null>(null);
   const sleepModeRef = useRef<SleepMode>("off");
   const sleepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -259,7 +252,6 @@ export function useSpeechPlayer({
   const blockedVoicesRef = useRef(new Set<string>());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const liveRef = useRef<{ bookId: string; plan: LivePlan; id: string; status: LiveStatus } | null>(null);
-  const pendingLiveStartRef = useRef<{ bookId: string; position: BookPosition; key: string } | null>(null);
   const preparedLiveRef = useRef<{
     key: string;
     plan: LivePlan;
@@ -271,9 +263,6 @@ export function useSpeechPlayer({
     controller: AbortController;
   } | null>(null);
   const promoteLiveRef = useRef<(prepared: NonNullable<typeof preparedLiveRef.current>) => void>(() => undefined);
-  const startRef = useRef<(bookId: string, position?: BookPosition) => void>(() => undefined);
-  const resumeLiveRef = useRef<() => void>(() => undefined);
-  const liveRecoveryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clipUrlRef = useRef("");
   /**
    * 正在播的这一段音频、它对应的文本和时间轴。
@@ -357,10 +346,6 @@ export function useSpeechPlayer({
   const voices: PlayerVoice[] = EDGE_VOICES;
 
   const clearTimers = useCallback(() => {
-    if (liveRecoveryRef.current) {
-      clearTimeout(liveRecoveryRef.current);
-      liveRecoveryRef.current = null;
-    }
     if (keepAliveRef.current) {
       clearInterval(keepAliveRef.current);
       keepAliveRef.current = null;
@@ -430,7 +415,6 @@ export function useSpeechPlayer({
     tokenRef.current += 1;
     playingRef.current = false;
     engineRef.current = null;
-    pendingLiveStartRef.current = null;
     waitingForClipRef.current = false;
     clearTimers();
     cancelHandover();
@@ -546,7 +530,6 @@ export function useSpeechPlayer({
       tokenRef.current += 1;
       const token = tokenRef.current;
       liveRef.current = null;
-      pendingLiveStartRef.current = null;
       if (audioRef.current) {
         audioRef.current.ontimeupdate = null;
         audioRef.current.onplaying = null;
@@ -883,10 +866,6 @@ export function useSpeechPlayer({
       }
 
       const book = getBookRef.current(at.bookId);
-      if (book && (engineRef.current === "live" || engineRef.current === "live-pending")) {
-        startRef.current(book.id, positionFor(book, at.chapterIndex, at.sentenceIndex));
-        return;
-      }
       const chapter = book?.chapters[at.chapterIndex];
       let segment = chapter
         ? segmentFor(book!, at.chapterIndex, at.sentenceIndex, "edge", true)
@@ -1057,7 +1036,7 @@ export function useSpeechPlayer({
       }
       const voiceName = edgeVoiceName(voiceURI);
       const supportsHls = typeof document !== "undefined" &&
-        sleepModeRef.current !== "chapter" && supportsNativeSpeechHls();
+        !!document.createElement("audio").canPlayType("application/vnd.apple.mpegurl");
       reportLiveClient("prewarm", supportsHls ? "native-hls" : "no-native-hls", supportsHls);
       if (supportsHls) {
         const key = `${book.id}:${position.chapterIndex}:${position.sentenceIndex}:${voiceName}`;
@@ -1093,25 +1072,16 @@ export function useSpeechPlayer({
                 await new Promise<void>(resolve => setTimeout(resolve, attempt < 15 ? 1000 : 2000));
               }
               prepared.failed = true;
-              throw new Error("连续音频准备超时");
             } catch (error) {
               if (!prepared.controller.signal.aborted) {
                 prepared.failed = true;
                 reportLiveClient("prewarm-failed", error instanceof Error ? error.message : "request-failed", true);
-                const pending = pendingLiveStartRef.current;
-                if (pending?.key === key && playingRef.current) {
-                  pendingLiveStartRef.current = null;
-                  playAtRef.current?.(pending.bookId, pending.position.chapterIndex, pending.position.sentenceIndex, { quick: true });
-                }
               }
               // Offline and unauthenticated readers retain the existing TTS player.
             }
           })();
         } else reportLiveClient("prewarm-failed", "no-sentences", true);
       }
-      // Native playback has one continuous source from the opening. A second short clip
-      // would force an audible source replacement several seconds into listening.
-      if (supportsHls) return;
       // 这里收整本书而不是 bookId：调用方（播放页）手里本来就是这本书的整本，不用再查一次。
       const chapter = book.chapters[position.chapterIndex];
       if (!chapter) return;
@@ -1131,7 +1101,7 @@ export function useSpeechPlayer({
       : prepared.plan.sentences[0];
     if (!first) return false;
     const seekTime = liveTimeAtChar(prepared.status, Math.min(first.end - 1, first.start + offset));
-    if (seekTime === null || (!prepared.status.complete && prepared.status.duration - seekTime < 24)) return false;
+    if (seekTime === null || (!prepared.status.complete && prepared.status.duration - seekTime < 10)) return false;
     tokenRef.current++;
     clearTimers();
     abortRef.current?.abort();
@@ -1140,7 +1110,6 @@ export function useSpeechPlayer({
     releaseClip();
     playingClipRef.current = null;
     // Reuse the element activated by the user's play gesture; a fresh element loses that grant on iOS.
-    pendingLiveStartRef.current = null;
     const audio = reusableAudio(audioRef);
     audio.onended = null;
     audio.onerror = null;
@@ -1151,9 +1120,7 @@ export function useSpeechPlayer({
     audio.onstalled = null;
     audio.onplaying = null;
     audio.loop = false;
-    const nativePlaylist = prepared.url.includes(".m3u8");
-    const sourceAt = (time: number) => nativePlaylist ? `${prepared.url}${prepared.url!.includes("?") ? "&" : "?"}start=${time.toFixed(6)}` : prepared.url!;
-    audio.src = sourceAt(seekTime);
+    audio.src = prepared.url;
     audio.playbackRate = settingsRef.current.speechRate;
     audioRef.current = audio;
     const id = prepared.id;
@@ -1162,8 +1129,6 @@ export function useSpeechPlayer({
     let awaitingSeek = seekTime > 0 || !!position;
     let lastTime = seekTime;
     let lastAdvance = Date.now();
-    let recoveries = 0;
-    let resumeTime = seekTime;
     liveRef.current = live;
     engineRef.current = "live";
     playingRef.current = true;
@@ -1209,54 +1174,20 @@ export function useSpeechPlayer({
     };
     const applySeek = () => {
       if (liveRef.current !== live) return;
-      // Safari can expose metadata before an EVENT stream has a seekable range.
-      // EXT-X-START selects the right segment without stranding it at readyState=1.
-      if (nativePlaylist) return;
-      try { audio.currentTime = resumeTime; } catch { /* Retry when metadata arrives. */ }
+      try { audio.currentTime = seekTime; } catch { /* Retry when metadata arrives. */ }
     };
     if (seekTime > 0) {
       applySeek();
       audio.addEventListener("loadedmetadata", applySeek, { once: true });
     }
     audio.ontimeupdate = update;
-    const resume = () => {
-      if (liveRef.current !== live || !playingRef.current || !audio.paused || liveRecoveryRef.current) return;
-      void audio.play().catch((reason: unknown) => {
-        if (liveRef.current !== live || !playingRef.current) return;
-        if (reason instanceof DOMException && reason.name === "NotAllowedError") {
-          setError("系统暂时中断播放，可从锁屏播放键或回到应用继续");
-        }
-      });
-    };
-    resumeLiveRef.current = resume;
-    const reconnect = (reason: string) => {
-      if (liveRef.current !== live || !playingRef.current || liveRecoveryRef.current) return;
-      update();
-      resumeTime = Math.max(resumeTime, audio.currentTime);
-      setIsBuffering(true);
-      reportLiveClient("legacy-start", `native-retry:${reason}`, true);
-      liveRecoveryRef.current = setTimeout(() => {
-        liveRecoveryRef.current = null;
-        if (liveRef.current !== live || !playingRef.current) return;
-        awaitingSeek = resumeTime > 0;
-        started = false;
-        lastAdvance = Date.now();
-        audio.src = sourceAt(resumeTime);
-        if (!nativePlaylist && resumeTime > 0) audio.addEventListener("loadedmetadata", applySeek, { once: true });
-        void audio.play().catch(() => { /* OS interruptions retain the session and playback intent. */ });
-      }, Math.min(1000 * 2 ** recoveries++, 15_000));
-    };
     audio.onplay = () => reportLiveEvent(id, audio, "play");
-    audio.onpause = () => {
-      lastAdvance = Date.now(); reportLiveEvent(id, audio, "pause");
-      if (playingRef.current && !audio.ended && !audio.error) resume();
-    };
+    audio.onpause = () => { lastAdvance = Date.now(); reportLiveEvent(id, audio, "pause"); };
     audio.onstalled = () => reportLiveEvent(id, audio, "stalled");
     audio.onplaying = () => {
       started = true;
       lastAdvance = Date.now();
-      recoveries = 0;
-      if (liveRef.current === live) { setIsBuffering(false); setError(""); }
+      if (liveRef.current === live) setIsBuffering(false);
       reportLiveEvent(id, audio, "playing");
     };
     audio.onwaiting = () => {
@@ -1265,25 +1196,23 @@ export function useSpeechPlayer({
     };
     audio.onerror = () => {
       reportLiveEvent(id, audio, "error");
-      if (audio.error?.code === 4) fallback("unsupported-format");
-      else reconnect("media-error");
+      fallback("media-error");
     };
     audio.onended = () => {
       reportLiveEvent(id, audio, "ended");
       if (liveRef.current !== live || !playingRef.current) return;
       update();
-      if (!live.status.complete || audio.currentTime < live.status.duration - 1) { reconnect("early-end"); return; }
+      if (!live.status.complete || audio.currentTime < live.status.duration - 1) { fallback("early-end"); return; }
       const last = live.plan.sentences.at(-1)!;
       const next = nextBookSentence(book, last.chapterIndex, last.sentenceIndex + 1);
-      if (next) startRef.current(book.id, positionFor(book, next.chapterIndex, next.sentenceIndex));
+      if (next) playAtRef.current?.(book.id, next.chapterIndex, next.sentenceIndex, { quick: true });
       else stop();
     };
     trackRef.current = setInterval(() => {
       if (liveRef.current !== live || document.visibilityState !== "visible") return;
       update();
       void refresh();
-      if (playingRef.current && audio.paused && !audio.ended) resume();
-      if (playingRef.current && Date.now() - lastAdvance > 45_000) reconnect("stalled");
+      if (playingRef.current && !audio.paused && Date.now() - lastAdvance > 12_000) fallback("stalled");
     }, 3000);
     // Called in the same user gesture as start(): Safari can activate native playback.
     void audio.play().catch(() => {
@@ -1292,20 +1221,15 @@ export function useSpeechPlayer({
     setTimeout(() => {
       if (liveRef.current !== live || !playingRef.current || started || document.visibilityState !== "visible") return;
       reportLiveEvent(id, audio, "error");
-      // Retry a stalled native startup without discarding its durable session.
-      reconnect("startup-timeout");
-    }, 20000);
+      // Native HLS can be advertised as "maybe" but never reach HAVE_CURRENT_DATA.
+      // The old player is still warmed and can be reused without trapping the user.
+      fallback("startup-timeout");
+    }, 8000);
     return true;
   }, [cancelHandover, clearTimers, commitSpan, holdForResume, noteVoiceUsed, releaseClip, stop]);
 
   useEffect(() => {
     promoteLiveRef.current = (prepared) => {
-      const pending = pendingLiveStartRef.current;
-      if (pending?.key === prepared.key && preparedLiveRef.current === prepared && playingRef.current && engineRef.current === "live-pending") {
-        const book = getBookRef.current(pending.bookId);
-        if (book) startLive(book, prepared, pending.position);
-        return;
-      }
       if (prepared.failed || preparedLiveRef.current !== prepared || !playingRef.current || engineRef.current !== "edge" ||
           prepared.voice !== edgeVoiceName(settingsRef.current.voiceURI) || handoverPendingRef.current) return;
       const at = locationRef.current;
@@ -1324,7 +1248,6 @@ export function useSpeechPlayer({
       const live = liveRef.current;
       const audio = audioRef.current;
       if (live && audio) reportLiveEvent(live.id, audio, "visibility");
-      if (live && playingRef.current && document.visibilityState === "visible") resumeLiveRef.current();
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
@@ -1347,37 +1270,6 @@ export function useSpeechPlayer({
       const prepared = preparedLiveRef.current;
       const key = `${book.id}:${nextPosition.chapterIndex}:${nextPosition.sentenceIndex}:${edgeVoiceName(settingsRef.current.voiceURI)}`;
       if (prepared?.key === key && startLive(book, prepared)) return;
-      if (prepared?.key === key && !prepared.failed && sleepModeRef.current !== "chapter") {
-        tokenRef.current++;
-        clearTimers();
-        abortRef.current?.abort();
-        liveRef.current = null;
-        playingClipRef.current = null;
-        pendingLiveStartRef.current = { bookId, position: nextPosition, key };
-        engineRef.current = "live-pending";
-        playingRef.current = true;
-        waitingForClipRef.current = true;
-        setIsPlaying(true);
-        setIsPaused(false);
-        setIsBuffering(true);
-        setError("");
-        const sentence = flattenChapter(book.chapters[nextPosition.chapterIndex])[nextPosition.sentenceIndex];
-        if (sentence) commitSpan(book, nextPosition.chapterIndex, {
-          sentenceIndex: nextPosition.sentenceIndex, sentenceId: sentence.id, start: 0, end: sentence.text.length,
-        });
-        // Activate this one element in the user's gesture. The actual native stream will
-        // reuse it as soon as the first 24 seconds have been generated by the Queue.
-        const audio = reusableAudio(audioRef);
-        audioRef.current = audio;
-        audio.onended = null; audio.onerror = null; audio.ontimeupdate = null;
-        audio.onplay = null; audio.onpause = null; audio.onplaying = null;
-        audio.onwaiting = null; audio.onstalled = null;
-        audio.loop = true;
-        audio.src = silentClipUrl();
-        releaseClip();
-        void audio.play().catch(() => { /* Activation will be checked by native playback. */ });
-        return;
-      }
       reportLiveClient("legacy-start", !prepared ? "no-prewarm" : prepared.key !== key ? "position-changed" :
         !prepared.id ? "session-pending" : !prepared.status?.ready ? `buffer-${Math.round(prepared.status?.duration ?? 0)}` : "not-playable",
         !!document.createElement("audio").canPlayType("application/vnd.apple.mpegurl"));
@@ -1385,47 +1277,26 @@ export function useSpeechPlayer({
         quick: true,
       });
     },
-    [cancelHandover, clearTimers, commitSpan, playAt, prefetchStart, releaseClip, startLive]
+    [cancelHandover, playAt, prefetchStart, startLive]
   );
-
-  useEffect(() => { startRef.current = start; }, [start]);
 
   const toggle = useCallback(() => {
     const current = locationRef.current;
     if (!current) return;
 
-    if (engineRef.current === "live" || engineRef.current === "live-pending") {
+    if (engineRef.current === "live") {
       const audio = audioRef.current;
       if (!audio) return;
       if (playingRef.current) {
-        playingRef.current = false;
-        if (liveRecoveryRef.current) { clearTimeout(liveRecoveryRef.current); liveRecoveryRef.current = null; }
         audio.pause();
+        playingRef.current = false;
         setIsPlaying(false);
         setIsPaused(true);
         setIsBuffering(false);
       } else {
-        if (activeVoiceRef.current && activeVoiceRef.current !== resolvedEdgeVoiceURI(settingsRef.current.voiceURI)) {
-          const book = getBookRef.current(current.bookId);
-          if (book) startRef.current(book.id, positionFor(book, current.chapterIndex, current.sentenceIndex));
-          return;
-        }
-        if (audio.error || audio.ended) {
-          const book = getBookRef.current(current.bookId);
-          const prepared = preparedLiveRef.current;
-          if (book && prepared && startLive(book, prepared, positionFor(book, current.chapterIndex, current.sentenceIndex))) return;
-          if (book) startRef.current(book.id, positionFor(book, current.chapterIndex, current.sentenceIndex));
-          return;
-        }
         playingRef.current = true;
         setIsPlaying(true);
         setIsPaused(false);
-        if (engineRef.current === "live-pending") {
-          const prepared = preparedLiveRef.current;
-          setIsBuffering(true);
-          if (prepared?.failed) { startRef.current(current.bookId, positionFor(getBookRef.current(current.bookId)!, current.chapterIndex, current.sentenceIndex)); return; }
-          if (prepared?.status?.ready) { promoteLiveRef.current(prepared); return; }
-        }
         void audio.play().catch(() => holdForResume("播放被系统拦下，点一下继续"));
       }
       return;
@@ -1506,7 +1377,7 @@ export function useSpeechPlayer({
     playAt(current.bookId, current.chapterIndex, current.sentenceIndex, {
       quick: true,
     });
-  }, [cancelHandover, holdForResume, playAt, startLive]);
+  }, [cancelHandover, holdForResume, playAt]);
 
   const skipSentences = useCallback(
     (delta: number) => {
@@ -1564,9 +1435,9 @@ export function useSpeechPlayer({
         }
       }
 
-      start(book.id, positionFor(book, next.chapterIndex, next.sentenceIndex));
+      playAt(book.id, next.chapterIndex, next.sentenceIndex, { quick: true });
     },
-    [cancelHandover, commitSpan, start]
+    [cancelHandover, commitSpan, playAt]
   );
 
   const changeChapter = useCallback(
@@ -1622,10 +1493,6 @@ export function useSpeechPlayer({
 
   useEffect(
     () => () => {
-      playingRef.current = false;
-      liveRef.current = null;
-      pendingLiveStartRef.current = null;
-      if (liveRecoveryRef.current) clearTimeout(liveRecoveryRef.current);
       if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
       if (keepAliveRef.current) clearInterval(keepAliveRef.current);
       if (trackRef.current) clearInterval(trackRef.current);

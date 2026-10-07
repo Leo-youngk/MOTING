@@ -1,17 +1,15 @@
 import { buildBoundaryTimeline } from "../lib/speech-timeline.ts";
-import { mp3DurationSeconds, splitMp3Audio, splitSpeechText } from "../lib/speech-batch.ts";
+import { mp3DurationSeconds, splitSpeechText } from "../lib/speech-batch.ts";
 import { synthesizeSpeech } from "./edge-tts.ts";
 import { packedAudio } from "./hls.ts";
-import { transportAudio } from "./audio-transport.ts";
 
 const PREFIX = "live-hls-v1/";
 const TTL = 48 * 3600_000;
 // Short jobs let a newly started session get audio before long background preparation.
 const GROUP_SIZE = 2;
 const LEGACY_GROUP_SIZE = 5;
-const MAX_TEXT = 1_200_000;
-const TARGET_DURATION = 6;
-const START_BUFFER = 24;
+const MAX_TEXT = 120_000;
+const TARGET_DURATION = 60;
 // Only prepare the opening minute until the user actually starts listening.
 // Segment GETs (issued by the native player) trigger the rolling 20-minute window.
 const INITIAL_AHEAD = 90;
@@ -38,12 +36,8 @@ type State = {
   updated: number;
   error?: string;
   segments: Segment[];
-  // v2 has a continuous media clock and short frame-aligned media parts.
+  // Rejected v4 transport sessions must not be mutated by this rollback producer.
   format?: 2;
-  parts?: { number: number; time: number; duration: number }[];
-  target?: number;
-  transport?: "mpegts";
-  counter?: number;
 };
 type Session = { text: string; voice: string };
 export type LiveHlsJob = { id: string; group: number; target: number };
@@ -93,14 +87,14 @@ export async function processLiveHlsJob(
   const [state, source] = await Promise.all([
     readState(bucket, job.id), bucket.get(base + "session.json"),
   ]);
-  if (!state || !source || state.complete) return;
+  if (!state || !source || state.complete || state.format === 2) return;
   const session = await source.json<Session>();
   const chunks = splitSpeechText(session.text, 120);
   // Existing queued sessions retain their original segment numbering.
   const groupSize = state.groupSize === GROUP_SIZE ? GROUP_SIZE : LEGACY_GROUP_SIZE;
   if (job.group !== state.group) {
-    // Old duplicate messages must not perpetually replenish the Queue.
-    if (job.group < state.group && state.duration < job.target && job.target > (state.target ?? 0)) {
+    // A duplicate message is harmless; a newer target still extends the producer.
+    if (job.group < state.group && state.duration < job.target) {
       await queue.send({ id: job.id, group: state.group, target: job.target });
     }
     return;
@@ -116,7 +110,7 @@ export async function processLiveHlsJob(
     }
     const segments = group.map((part, index): Segment => {
       const duration = mp3DurationSeconds(results[index].audio);
-      if (!(duration > 0 && duration <= 60)) throw new Error("无效或过长的语音分片");
+      if (!(duration > 0 && duration <= TARGET_DURATION)) throw new Error("无效或过长的 HLS 分片");
       return {
         number: job.group * groupSize + index,
         start: part.start,
@@ -126,41 +120,26 @@ export async function processLiveHlsJob(
         timeline: buildBoundaryTimeline(part.text, results[index].boundaries),
       };
     });
-    const next = structuredClone(state);
-    const media: { number: number; time: number; duration: number; audio: Uint8Array }[] = [];
-    for (const [index, part] of segments.entries()) {
-      part.time = next.duration;
-      if (state.format === 2) {
-        for (const framePart of splitMp3Audio(results[index].audio, TARGET_DURATION)) {
-          const packed = state.transport === "mpegts" ? transportAudio(framePart.audio, part.time + framePart.time, next.counter ?? 0, (next.parts?.length ?? 0) + media.length) : null;
-          if (packed) next.counter = packed.counter;
-          media.push({ number: (next.parts?.length ?? 0) + media.length,
-            time: part.time + framePart.time, duration: framePart.duration,
-            audio: packed?.audio ?? packedAudio(framePart.audio, part.time + framePart.time) });
-        }
-      } else {
-        media.push({ number: part.number, time: part.time, duration: part.duration, audio: packedAudio(results[index].audio, 0) });
-      }
-      next.duration += part.duration;
-      next.segments.push(part);
+    // Segment objects are durable before the playlist advertises their URLs.
+    await Promise.all(segments.map((part, index) =>
+      bucket.put(base + `segment-${part.number}.mp3`, packedAudio(results[index].audio, 0), {
+        httpMetadata: { contentType: "audio/mpeg" },
+      })
+    ));
+    for (const part of segments) {
+      part.time = state.duration;
+      state.duration += part.duration;
+      state.segments.push(part);
     }
-    // Publish only durable media; all parts use the same monotonically increasing 90 kHz clock.
-    const extension = state.transport === "mpegts" ? "ts" : "mp3";
-    await Promise.all(media.map(part => bucket.put(base + `segment-${part.number}.${extension}`, part.audio, {
-      httpMetadata: { contentType: state.transport === "mpegts" ? "video/mp2t" : "audio/mpeg" },
-    })));
-    if (state.format === 2) (next.parts ??= []).push(...media.map(({ number, time, duration }) => ({ number, time, duration })));
-    next.group++;
-    next.target = Math.max(job.target, next.target ?? 0);
-    next.updated = Date.now();
-    delete next.error;
-    next.complete = next.group * groupSize >= chunks.length;
-    await bucket.put(base + "state.json", JSON.stringify(next));
-    Object.assign(state, next);
-    console.log("live_hls_ready", { id: job.id, group: job.group, duration: next.duration });
-    await record(db, job.id, "prepared", { group: job.group, duration: next.duration, complete: next.complete });
-    if (!next.complete && next.duration < next.target) {
-      await queue.send({ id: job.id, group: next.group, target: next.target });
+    state.group++;
+    state.updated = Date.now();
+    delete state.error;
+    state.complete = state.group * groupSize >= chunks.length;
+    await bucket.put(base + "state.json", JSON.stringify(state));
+    console.log("live_hls_ready", { id: job.id, group: job.group, duration: state.duration });
+    await record(db, job.id, "prepared", { group: job.group, duration: state.duration, complete: state.complete });
+    if (!state.complete && state.duration < job.target) {
+      await queue.send({ id: job.id, group: state.group, target: job.target });
     }
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
@@ -172,15 +151,15 @@ export async function processLiveHlsJob(
   }
 }
 
-export function livePlaylist(state: State, start = 0): string {
+export function livePlaylist(state: State): string {
   const lines = [
     "#EXTM3U", "#EXT-X-VERSION:4",
-    `#EXT-X-TARGETDURATION:${state.format === 2 ? TARGET_DURATION : 60}`, "#EXT-X-MEDIA-SEQUENCE:0",
-    "#EXT-X-PLAYLIST-TYPE:EVENT", `#EXT-X-START:TIME-OFFSET=${start.toFixed(6)},PRECISE=YES`,
+    `#EXT-X-TARGETDURATION:${TARGET_DURATION}`, "#EXT-X-MEDIA-SEQUENCE:0",
+    "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-START:TIME-OFFSET=0,PRECISE=YES",
   ];
-  (state.parts ?? state.segments).forEach((segment, index) => {
-    if (index && state.format !== 2) lines.push("#EXT-X-DISCONTINUITY");
-    lines.push(`#EXTINF:${segment.duration.toFixed(6)},`, `segment-${segment.number}.${state.transport === "mpegts" ? "ts" : "mp3"}`);
+  state.segments.forEach((segment, index) => {
+    if (index) lines.push("#EXT-X-DISCONTINUITY");
+    lines.push(`#EXTINF:${segment.duration.toFixed(6)},`, `segment-${segment.number}.mp3`);
   });
   if (state.complete) lines.push("#EXT-X-ENDLIST");
   return lines.join("\n") + "\n";
@@ -216,14 +195,14 @@ export async function handleLiveHls(
     let body: { text?: unknown; voice?: unknown };
     try {
       const bytes = await request.arrayBuffer();
-      if (bytes.byteLength > 4_000_000) return json({ error: "正文过长" }, 413);
+      if (bytes.byteLength > 400_000) return json({ error: "正文过长" }, 413);
       body = JSON.parse(new TextDecoder().decode(bytes));
     } catch { return json({ error: "请求内容无效" }, 400); }
     if (typeof body?.text !== "string" || !body.text.trim() || body.text.length > MAX_TEXT ||
         typeof body.voice !== "string" || !VOICE.test(body.voice)) return json({ error: "正文或音色无效" }, 400);
     const id = `${Date.now()}-${crypto.randomUUID().replaceAll("-", "")}`;
     const base = root(id);
-    const state: State = { id, created: Date.now(), updated: Date.now(), group: 0, groupSize: GROUP_SIZE, duration: 0, complete: false, segments: [], format: 2, parts: [], target: INITIAL_AHEAD, transport: "mpegts", counter: 0 };
+    const state: State = { id, created: Date.now(), updated: Date.now(), group: 0, groupSize: GROUP_SIZE, duration: 0, complete: false, segments: [] };
     await Promise.all([
       bucket.put(base + "session.json", JSON.stringify({ text: body.text, voice: body.voice })),
       bucket.put(base + "state.json", JSON.stringify(state)),
@@ -257,11 +236,12 @@ export async function handleLiveHls(
     return json({ ok: true });
   }
   if (request.method !== "GET" && request.method !== "HEAD") return json({ error: "请求方法无效" }, 405);
-  const match = /^(\d{13}-[a-f0-9]{32})\/(status|diagnostics|playlist\.m3u8|segment-(\d+)\.(?:mp3|ts))$/.exec(action);
+  const match = /^(\d{13}-[a-f0-9]{32})\/(status|diagnostics|playlist\.m3u8|segment-(\d+)\.mp3)$/.exec(action);
   if (!match || !validId(match[1])) return json({ error: "音频会话过期" }, 404);
   const state = await readState(bucket, match[1]);
   if (!state) return json({ error: "音频会话不存在" }, 404);
-  if (match[2] === "status") return json({ ...state, ready: state.complete || state.duration >= (state.format === 2 ? START_BUFFER : 75) });
+  if (state.format === 2) return json({ error: "音频播放方案已更新，请重新开始听书" }, 410);
+  if (match[2] === "status") return json({ ...state, ready: state.complete || state.duration >= 75 });
   if (match[2] === "diagnostics") {
     let cursor: string | undefined;
     let keys: string[] = [];
@@ -277,27 +257,24 @@ export async function handleLiveHls(
     return json({ state, events: recent.filter(Boolean) });
   }
   if (match[2] === "playlist.m3u8") {
-    const offset = Number(new URL(request.url).searchParams.get("start") ?? 0);
-    const playlist = livePlaylist(state, Number.isFinite(offset) && offset >= 0 ? Math.min(offset, Math.max(0, state.duration - (state.complete ? 0 : TARGET_DURATION * 3))) : 0);
+    const playlist = livePlaylist(state);
     return new Response(request.method === "HEAD" ? null : playlist, {
       headers: { ...BASE_HEADERS, "content-type": "application/vnd.apple.mpegurl" },
     });
   }
   const number = Number(match[3]);
-  const segment = (state.parts ?? state.segments)[number];
+  const segment = state.segments[number];
   if (!segment || segment.number !== number) return json({ error: "片段尚未就绪" }, 404);
-  const target = Math.max(state.duration, segment.time + REPLENISH_TO);
-  if (queue && state.duration - segment.time - segment.duration < REPLENISH_AT && !state.complete && target > (state.target ?? 0)) {
+  if (queue && state.duration - segment.time - segment.duration < REPLENISH_AT && !state.complete) {
     ctx?.waitUntil(queue.send({
       id: state.id, group: state.group,
-      target,
+      target: Math.max(state.duration, segment.time + REPLENISH_TO),
     }).catch(error => console.warn("live_hls_replenish_failed", { id: state.id, error: String(error) })));
   }
-  const extension = state.transport === "mpegts" ? "ts" : "mp3";
-  const key = root(state.id) + `segment-${number}.${extension}`;
+  const key = root(state.id) + `segment-${number}.mp3`;
   const head = await bucket.head(key);
   if (!head) return json({ error: "音频片段暂时不可用" }, 503);
-  const headers = new Headers({ ...BASE_HEADERS, "cache-control": "private, max-age=172800, immutable", "content-type": state.transport === "mpegts" ? "video/mp2t" : "audio/mpeg", "accept-ranges": "bytes" });
+  const headers = new Headers({ ...BASE_HEADERS, "content-type": "audio/mpeg", "accept-ranges": "bytes" });
   const requested = request.headers.get("range");
   let range: { offset: number; length: number } | undefined;
   if (requested) {

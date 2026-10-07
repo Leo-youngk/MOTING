@@ -28,17 +28,6 @@ test("a listening session starts at the saved sentence and tracks across chapter
   assert.equal(liveTimeFor(plan, status, 0, 0), null);
 });
 
-test("seeking to a sentence cannot round back into the previous sentence", () => {
-  const chapters = [createChapter("章", [{ text: "甲。".repeat(400) }], 0)!];
-  const book = { id: "book", chapters } as Book;
-  const plan = makeLivePlan(book, positionFor(book, 0, 0));
-  const status = { ready: true, complete: true, duration: 90, updated: 0,
-    segments: [{ number: 0, start: 0, end: plan.text.length, time: 0, duration: 90, timeline: [] }] } as LiveStatus;
-  for (const sentence of plan.sentences) {
-    assert.equal(liveLocationAt(plan, status, liveTimeFor(plan, status, 0, sentence.sentenceIndex)!)?.sentenceId, sentence.sentenceId);
-  }
-});
-
 test("HLS handover locates the current character, including a sentence split between native segments", () => {
   const status = { segments: [
     { start: 0, end: 100, time: 0, duration: 20, timeline: [{ time: 0, charIndex: 0 }, { time: 20, charIndex: 100 }] },
@@ -46,13 +35,4 @@ test("HLS handover locates the current character, including a sentence split bet
   ] } as LiveStatus;
   assert.equal(liveTimeAtChar(status, 125), 25);
   assert.equal(liveTimeAtChar(status, 250), null, "do not hand over to an unprepared section");
-});
-
-test("a long book is not cut off at the old 120000-character session limit", () => {
-  const body = ("长".repeat(1000) + "。").repeat(100);
-  const book = { id: "long", chapters: [createChapter("一", [{ text: body }], 0)!, createChapter("二", [{ text: body }], 1)!] } as Book;
-  const plan = makeLivePlan(book, positionFor(book, 0, 0));
-  assert.ok(plan.text.length > 120_000);
-  assert.equal(plan.sentences.at(-1)?.chapterIndex, 1);
-  assert.equal(plan.sentences.at(-1)?.sentenceIndex, book.chapters[1].sentenceCount - 1);
 });
