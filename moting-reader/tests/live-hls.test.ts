@@ -31,16 +31,14 @@ function fixture() {
   };
   const jobs: { id: string; group: number; target: number }[] = [];
   const queue = { async send(job: (typeof jobs)[number]) { jobs.push(job); } };
-  const waits: Promise<unknown>[] = [];
   const run = (path: string, init?: RequestInit) => handleLiveHls(
     new Request(`https://test/api/sync/live/${path}`, init),
-    bucket as unknown as R2Bucket, queue as unknown as Queue,
-    { waitUntil(promise: Promise<unknown>) { waits.push(promise); } } as unknown as ExecutionContext
+    bucket as unknown as R2Bucket, queue as unknown as Queue
   );
-  return { bucket, queue, jobs, run, waits };
+  return { bucket, queue, jobs, run };
 }
 
-test("independent Queue creates a growing EVENT playlist with valid MPEG-TS audio and completed manifest", async () => {
+test("independent Queue creates a growing EVENT playlist with valid packed MP3 and completed manifest", async () => {
   const { bucket, queue, jobs, run } = fixture();
   const session = await (await run("session", {
     method: "POST", body: JSON.stringify({ text: "测试。" .repeat(250), voice: "zh-CN-YunjianNeural" }),
@@ -54,10 +52,10 @@ test("independent Queue creates a growing EVENT playlist with valid MPEG-TS audi
   const state = await (await run(`${session.id}/status`)).json() as { ready: boolean; segments: unknown[] };
   assert.equal(state.ready, false, "a short opening must not advertise an unsafe HLS buffer");
   assert.equal(state.segments.length, 2);
-  const clip = await run(`${session.id}/segment-0.ts`, { headers: { range: "bytes=0-63" } });
+  const clip = await run(`${session.id}/segment-0.mp3`, { headers: { range: "bytes=0-63" } });
   assert.equal(clip.status, 206);
   assert.equal((await clip.arrayBuffer()).byteLength, 64);
-  assert.equal((await run(`${session.id}/segment-99.ts`)).status, 404);
+  assert.equal((await run(`${session.id}/segment-99.mp3`)).status, 404);
   while (jobs.length) await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
   const after = await (await run(`${session.id}/playlist.m3u8`)).text();
   assert.match(after, /#EXT-X-ENDLIST/);
@@ -65,7 +63,7 @@ test("independent Queue creates a growing EVENT playlist with valid MPEG-TS audi
   try {
     const count = (after.match(/#EXTINF:/g) ?? []).length;
     for (let i = 0; i < count; i++) {
-      writeFileSync(join(directory, `segment-${i}.ts`), new Uint8Array(await (await run(`${session.id}/segment-${i}.ts`)).arrayBuffer()));
+      writeFileSync(join(directory, `segment-${i}.mp3`), new Uint8Array(await (await run(`${session.id}/segment-${i}.mp3`)).arrayBuffer()));
     }
     writeFileSync(join(directory, "playlist.m3u8"), after);
     execFileSync("ffmpeg", ["-v", "error", "-allowed_extensions", "ALL", "-i", join(directory, "playlist.m3u8"), "-f", "null", "-"]);
@@ -80,7 +78,7 @@ test("unready and malformed sessions do not expose media or enqueue synthesis", 
   const session = await (await run("session", { method: "POST", body: JSON.stringify({ text: "文字".repeat(400), voice: "zh-CN-YunjianNeural" }) })).json() as { id: string };
   const status = await (await run(`${session.id}/status`)).json() as { ready: boolean };
   assert.equal(status.ready, false);
-  assert.equal((await run(`${session.id}/segment-0.ts`)).status, 404);
+  assert.equal((await run(`${session.id}/segment-0.mp3`)).status, 404);
 });
 
 test("already queued sessions retain five-segment numbering after the producer is upgraded", async () => {
@@ -89,10 +87,6 @@ test("already queued sessions retain five-segment numbering after the producer i
   const key = `live-hls-v1/${session.id}/state.json`;
   const stored = JSON.parse(new TextDecoder().decode(bucket.objects.get(key)!));
   delete stored.groupSize; // The deployed v2 producer did not persist this field.
-  delete stored.transport;
-  delete stored.format;
-  delete stored.parts;
-  delete stored.target;
   await bucket.put(key, JSON.stringify(stored));
   const synth = async () => ({ audio, boundaries: [] });
   await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
@@ -104,76 +98,44 @@ test("already queued sessions retain five-segment numbering after the producer i
   assert.deepEqual(last.segments.map(part => part.number), last.segments.map((_part, index) => index));
 });
 
-const longAudio = new Uint8Array(execFileSync("ffmpeg", [
-  "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=21",
-  "-ar", "24000", "-ac", "1", "-b:a", "48k", "-f", "mp3", "pipe:1",
-]));
-
-test("new native stream has six-second parts and continuous transport timestamps across Queue jobs", async () => {
+test("rollback rejects v4 media sessions without replacing their transport state", async () => {
   const { bucket, queue, jobs, run } = fixture();
-  const { id } = await (await run("session", { method: "POST", body: JSON.stringify({ text: "连续听书。".repeat(90), voice: "zh-CN-YunjianNeural" }) })).json() as { id: string };
-  const synth = async () => ({ audio: longAudio, boundaries: [] });
-  while (jobs.length) await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
-  const playlist = await (await run(`${id}/playlist.m3u8?start=12`)).text();
-  assert.match(playlist, /#EXT-X-TARGETDURATION:6/);
-  assert.match(playlist, /#EXT-X-START:TIME-OFFSET=12.000000,PRECISE=YES/);
-  assert.doesNotMatch(playlist, /#EXT-X-DISCONTINUITY/);
-  const state = await (await run(`${id}/status`)).json() as { ready: boolean; parts: { number: number; time: number; duration: number }[] };
-  assert.equal(state.ready, true);
-  let end = 0;
-  const directory = mkdtempSync(join(tmpdir(), "moting-continuous-hls-"));
-  try {
-    for (const part of state.parts) {
-      assert.ok(part.duration <= 6 && part.duration > 0);
-      assert.ok(Math.abs(part.time - end) < 1e-9);
-      const response = await run(`${id}/segment-${part.number}.ts`);
-      assert.match(response.headers.get("cache-control")!, /private.*immutable/);
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      assert.equal(bytes.length % 188, 0);
-      assert.equal(bytes[376], 0x47);
-      const start = 376 + 5 + bytes[380] + 9;
-      const pts = bytes.slice(start, start+5);
-      const ticks = (BigInt((pts[0] >> 1) & 7) << 30n) | (BigInt(pts[1]) << 22n) | (BigInt(pts[2] >> 1) << 15n) | (BigInt(pts[3]) << 7n) | BigInt(pts[4] >> 1);
-      assert.equal(ticks, BigInt(Math.round(part.time * 90_000)));
-      end = part.time + part.duration;
-      writeFileSync(join(directory, `segment-${part.number}.ts`), bytes);
-    }
-    writeFileSync(join(directory, "playlist.m3u8"), playlist);
-    const result = execFileSync("ffmpeg", ["-v", "error", "-xerror", "-allowed_extensions", "ALL", "-i", join(directory, "playlist.m3u8"), "-f", "null", "-"]);
-    assert.equal(result.length, 0);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  const { id } = await (await run("session", {
+    method: "POST", body: JSON.stringify({ text: "格式兼容。".repeat(100), voice: "zh-CN-YunjianNeural" }),
+  })).json() as { id: string };
+  const key = `live-hls-v1/${id}/state.json`;
+  const state = JSON.parse(new TextDecoder().decode(bucket.objects.get(key)!));
+  const serialized = JSON.stringify({ ...state, format: 2, transport: "mpegts", parts: [] });
+  await bucket.put(key, serialized);
+  let synthesized = false;
+  await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, async () => {
+    synthesized = true;
+    return { audio, boundaries: [] };
+  });
+  assert.equal(synthesized, false);
+  assert.equal(jobs.length, 0);
+  assert.equal(new TextDecoder().decode(bucket.objects.get(key)!), serialized);
+  for (const endpoint of ["status", "playlist.m3u8", "segment-0.mp3"]) {
+    const response = await run(`${id}/${endpoint}`);
+    assert.equal(response.status, 410);
+    assert.match((await response.json() as { error: string }).error, /重新开始听书/);
+  }
 });
 
-test("native media GET replenishes the background Queue and drops stale duplicate jobs", async () => {
-  const { bucket, queue, jobs, run, waits } = fixture();
-  const { id } = await (await run("session", { method: "POST", body: JSON.stringify({ text: "缓存连续听书。".repeat(1200), voice: "zh-CN-YunjianNeural" }) })).json() as { id: string };
-  const synth = async () => ({ audio: longAudio, boundaries: [] });
-  const first = jobs.shift()!;
-  await processLiveHlsJob(first, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
-  await run(`${id}/segment-0.ts`);
-  await Promise.all(waits);
-  assert.ok(jobs.some(job => job.target === 1200), "refill is triggered by native media requests without a JS heartbeat");
-  while (jobs.length) await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
-  const state = await (await run(`${id}/status`)).json() as { duration: number };
-  assert.ok(state.duration >= 1200);
-  const size = jobs.length;
-  await processLiveHlsJob({ ...first, target: 1200 }, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
-  assert.equal(jobs.length, size, "the already satisfied target must not create another duplicate job");
-});
-
-test("failed R2 media publication cannot advertise missing segments or advance the source cursor", async () => {
-  const { bucket, queue, jobs, run } = fixture();
-  const { id } = await (await run("session", { method: "POST", body: JSON.stringify({ text: "音频不能丢。".repeat(90), voice: "zh-CN-YunjianNeural" }) })).json() as { id: string };
-  const put = bucket.put.bind(bucket);
-  bucket.put = async (key, body) => { if (key.endsWith("segment-2.ts")) throw new Error("R2 unavailable"); await put(key, body); };
-  const synth = async () => ({ audio: longAudio, boundaries: [] });
-  const job = jobs.shift()!;
-  await assert.rejects(processLiveHlsJob(job, bucket as unknown as R2Bucket, queue as unknown as Queue, synth), /R2 unavailable/);
-  const state = await (await run(`${id}/status`)).json() as { group: number; segments: unknown[]; parts: unknown[] };
-  assert.equal(state.group, 0);
-  assert.deepEqual(state.segments, []);
-  assert.deepEqual(state.parts, []);
-  bucket.put = put;
-  await processLiveHlsJob(job, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
-  assert.equal((await (await run(`${id}/status`)).json() as { group: number }).group, 1);
+test("rollback retains bounded actual buffer and decoder error diagnostics", async () => {
+  const { bucket, run } = fixture();
+  const { id } = await (await run("session", {
+    method: "POST", body: JSON.stringify({ text: "事件记录。", voice: "zh-CN-YunjianNeural" }),
+  })).json() as { id: string };
+  const response = await run(`${id}/event`, {
+    method: "POST", body: JSON.stringify({
+      type: "stalled", ct: 0, rs: 1, visibility: "visible", mediaError: 3,
+      buffered: [[17.928, 31.152], ["invalid", 4], [2, 3], [4, 5], [6, 7]],
+    }),
+  });
+  assert.equal(response.status, 200);
+  const key = [...bucket.objects.keys()].find(name => name.startsWith(`live-hls-v1/${id}/events/`))!;
+  const event = JSON.parse(new TextDecoder().decode(bucket.objects.get(key)!));
+  assert.deepEqual(event.buffered, [[17.928, 31.152], [2, 3], [4, 5]]);
+  assert.equal(event.mediaError, 3);
 });

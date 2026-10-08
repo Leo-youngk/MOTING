@@ -94,13 +94,13 @@ test("结构化会话：换章、标题、句末按设计的停顿整理每片�
   }
 });
 
-test("结构化会话的 MPEG-TS 能被 ffmpeg 完整解码", async () => {
+test("结构化会话整理过停顿的分片（packed MP3）能被 ffmpeg 完整解码", async () => {
   const { playlist, run, id } = await prepare(TEXT, 2);
   const directory = mkdtempSync(join(tmpdir(), "moting-live-structure-"));
   try {
     const count = (playlist.match(/#EXTINF:/g) ?? []).length;
     for (let i = 0; i < count; i++) {
-      writeFileSync(join(directory, `segment-${i}.ts`), new Uint8Array(await (await run(`${id}/segment-${i}.ts`)).arrayBuffer()));
+      writeFileSync(join(directory, `segment-${i}.mp3`), new Uint8Array(await (await run(`${id}/segment-${i}.mp3`)).arrayBuffer()));
     }
     writeFileSync(join(directory, "playlist.m3u8"), playlist);
     execFileSync("ffmpeg", ["-v", "error", "-allowed_extensions", "ALL", "-i", join(directory, "playlist.m3u8"), "-f", "null", "-"]);

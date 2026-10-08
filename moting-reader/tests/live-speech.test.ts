@@ -47,12 +47,3 @@ test("HLS handover locates the current character, including a sentence split bet
   assert.equal(liveTimeAtChar(status, 125), 25);
   assert.equal(liveTimeAtChar(status, 250), null, "do not hand over to an unprepared section");
 });
-
-test("a long book is not cut off at the old 120000-character session limit", () => {
-  const body = ("长".repeat(1000) + "。").repeat(100);
-  const book = { id: "long", chapters: [createChapter("一", [{ text: body }], 0)!, createChapter("二", [{ text: body }], 1)!] } as Book;
-  const plan = makeLivePlan(book, positionFor(book, 0, 0));
-  assert.ok(plan.text.length > 120_000);
-  assert.equal(plan.sentences.at(-1)?.chapterIndex, 1);
-  assert.equal(plan.sentences.at(-1)?.sentenceIndex, book.chapters[1].sentenceCount - 1);
-});

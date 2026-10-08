@@ -81,9 +81,9 @@ npm run deploy:dry-run
 
 ## 听书
 
-- 两条路，共用一个 `<audio>`（换源只换 `src`）：iPhone、iPad 和桌面 Safari 走原生 HLS 连续音频——客户端 POST `/api/sync/live/session` 建会话，Queue `moting-audio` 后台按 120 字一片合成、切成 MPEG-TS 写进 R2 `live-hls-v1/`（`worker/live-hls.ts`），备好 24 秒就起播；其余浏览器、未登录、会话失败时走老的 `/api/tts` 分段（`use-speech-player.ts` 的 `playAt`）。
+- 两条路，共用一个 `<audio>`（换源只换 `src`）：点下去先走 `/api/tts` 分段（`use-speech-player.ts` 的 `playAt`）出声；能放原生 HLS 的（iPhone、iPad、Safari）同时 POST `/api/sync/live/session` 建连续音频会话，Queue `moting-audio` 后台按 120 字一片合成、每片一个 packed MP3 写进 R2 `live-hls-v1/`（`worker/live-hls.ts`，片与片之间 `EXT-X-DISCONTINUITY`），备好 75 秒后在当前这句接过去。接过去 8 秒还没出声、卡住 12 秒、媒体出错都退回分段。PR #20 自写的 MPEG-TS 封装和「直接从原生 HLS 起播」已经撤回（`docs/LISTENING_REGRESSION_2026-10-08.md`），那批会话的 `state.format === 2`，接口回 410；Chromium 里用 MP3 替身跑通的测试不能当 iPhone 验收。
 - 合成走 Worker 转发微软 Edge 朗读（`worker/edge-tts.ts`），只认 `turn.end` 才算合成完；单片失败换条连接再试（`worker/speech.ts`，最多 3 次），`/api/tts` 读不出来的文本回 422、服务问题回 503。一律按 1× 合成，倍速交给 `playbackRate`。
-- 送去合成的文字带结构（format 2，`lib/speech-text.ts`）：段落、标题、换章用 1/2/3 个换行。Edge 不收自定义 SSML，停顿只能在拼接时做（`lib/speech-batch.ts` 的 `fitChunkAudio`）：按帧裁掉每片结尾多余的自带静音、需要时补静音帧，句末约 0.66 秒、换段 0.8、标题前后 1.1、换章 1.8。会话和 `/api/tts` 请求都带 `format: 2`；不带的是还没更新的老客户端，照旧切片、原样拼接。改了停顿规则要换 `/api/tts` 的缓存键（`worker/index.ts` 的 `cacheKeyFor`）。
+- 送去合成的文字带结构（`lib/speech-text.ts`）：段落、标题、换章用 1/2/3 个换行。Edge 不收自定义 SSML，停顿只能在拼接时做（`lib/speech-batch.ts` 的 `fitChunkAudio`）：按帧裁掉每片结尾多余的自带静音、需要时补静音帧，句末约 0.66 秒、换段 0.8、标题前后 1.1、换章 1.8。会话和 `/api/tts` 请求都带 `format: 2`（会话里存成 `session.json` 的 `textFormat`，跟上面那个撤回标记 `state.format` 无关）；不带的是还没更新的老客户端，照旧切片、原样拼接。改了停顿规则要换 `/api/tts` 的缓存键（`worker/index.ts` 的 `cacheKeyFor`）。
 - 老路径分段三档（`lib/speech-segments.ts`）：起播 360 字、开播就预取 1500 字，之后 4800 字一批，可以跨章。
 - 系统打断（来电、Siri、拔耳机）只暂停元素、不通知页面：两条路都监听元素的 `pause` 事件同步成暂停，**不自动续播**（拔了耳机不该外放），锁屏的播放键才按得动。
 - 云端连不上先等 1.5 秒重试一次，再失败才用系统声音顶上并提示；冷却 30 秒起（连着失败翻倍，最多 5 分钟），冷却到点后系统朗读每读一块顺手试一次云端，通了下一块自动换回。用户点继续、重新开播也直接再试云端。

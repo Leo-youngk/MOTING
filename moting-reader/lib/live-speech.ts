@@ -35,7 +35,7 @@ export interface LiveStatus {
 export function makeLivePlan(
   book: Book,
   position: BookPosition,
-  maxChars = 1_200_000,
+  maxChars = 120_000,
   speak: (text: string) => string = (text) => text
 ): LivePlan {
   let text = "";
@@ -56,8 +56,7 @@ export function makeLivePlan(
 
 export function liveLocationAt(plan: LivePlan, status: LiveStatus, time: number): LiveSentence | null {
   if (!plan.sentences.length || !status.segments.length) return plan.sentences[0] ?? null;
-  // Media currentTime is rounded to microseconds; a precise seek must not highlight
-  // the preceding sentence because its timestamp was rounded a fraction downward.
+  // 媒体的 currentTime 按微秒取整：精确跳到一句的开头时，往下舍的那一点不能让高亮落回上一句。
   const playbackTime = time + 0.0001;
   const segment = status.segments.find(part => playbackTime < part.time + part.duration)
     ?? status.segments[status.segments.length - 1];
