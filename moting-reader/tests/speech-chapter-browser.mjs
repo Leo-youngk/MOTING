@@ -35,13 +35,15 @@ try {
     assert.ok(ready, logs.slice(-3000));
   }
   browser = await chromium.launch({ headless: true, executablePath: process.env.MOTING_CHROMIUM_EXECUTABLE, args: ["--no-sandbox", "--disable-dev-shm-usage", "--autoplay-policy=no-user-gesture-required"] });
-  const setup = async (hls = false, { failTts = 0 } = {}) => {
+  const setup = async (hls = false, { failTts = 0, handover = hls } = {}) => {
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: "block" });
     const page = await context.newPage();
     const errors = [], requests = [], sessions = [];
     let ready = false;
     page.on("pageerror", error => { if (errors.length < 10) errors.push(error.message); if (errors.length === 1) console.log("browser error:", error.stack); });
-    await page.addInitScript((hls) => {
+    await page.addInitScript(({ hls, handover }) => {
+      // 原生 HLS 接手默认关着，测它的场景在这台「设备」上手动打开。
+      if (handover) localStorage.setItem("moting:live-hls", "1");
       // 可拨快的时钟：定时关闭按 Date.now() 判断到点。
       window.clockOffset = 0;
       const realNow = Date.now.bind(Date);
@@ -71,7 +73,7 @@ try {
       } });
       const original = HTMLMediaElement.prototype.canPlayType;
       HTMLMediaElement.prototype.canPlayType = function(type) { return type === "application/vnd.apple.mpegurl" ? (hls ? "maybe" : "") : original.call(this, type); };
-    }, hls);
+    }, { hls, handover });
     await page.route("**/__speech-harness", route => route.fulfill({ contentType: "text/html", body: '<div id="root"></div><script type="module">import RefreshRuntime from "/@react-refresh"; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$ = () => {}; window.$RefreshSig$ = () => type => type; window.__vite_plugin_react_preamble_installed__ = true; await import("/@vite/client"); await import("/tests/speech-player-harness.tsx");</script>' }));
     // No HMR websocket is needed by this isolated fixture; keep application module errors visible.
     await page.route("**/@vite/client", route => route.fulfill({ contentType: "text/javascript", body: 'export const createHotContext=()=>({data:{},accept(){},dispose(){},prune(){},invalidate(){},send(){},on(){},off(){}}); export const injectQuery=(url)=>url; export const updateStyle=()=>{}; export const removeStyle=()=>{};' }));
@@ -140,6 +142,17 @@ try {
   }, before));
   check("legacy_path_has_no_browser_errors", legacy.errors.length === 0);
   await legacy.context.close();
+
+  // 默认：设备能放原生 HLS，也不建连续音频会话、不中途换源，分段一路播下去。
+  const plain = await setup(true, { handover: false });
+  plain.allowReady();
+  await plain.start();
+  await plain.page.waitForFunction(() => speechHarness.player.isPlaying && audioSources.some(part => part.type === "audio/mpeg"), { timeout: 15000 });
+  await plain.page.waitForTimeout(3000);
+  check("handover_off_by_default_creates_no_session", plain.sessions.length === 0);
+  check("handover_off_by_default_never_switches_to_native", await plain.page.evaluate(() => !audioSources.some(part => part.src.includes("__native.mp3")) && speechHarness.player.isPlaying && !speechHarness.player.isBuffering));
+  check("handover_off_path_has_no_browser_errors", plain.errors.length === 0);
+  await plain.context.close();
 
   const live = await setup(true);
   await live.start();
