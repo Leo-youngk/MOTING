@@ -3,6 +3,7 @@
 import { RECORD_LABELS, type PushFailure } from "../lib/sync-record";
 
 import {
+  ArrowRight,
   BookOpen,
   Check,
   ChevronLeft,
@@ -41,6 +42,7 @@ import type {
   PlayerVoice,
   ReaderSettings,
   SettingsSection,
+  SpeechReplacement,
 } from "../lib/types";
 import { Modal } from "./sheet";
 import { SoftRange } from "./soft-range";
@@ -199,6 +201,77 @@ function Section({
   );
 }
 
+/**
+ * 读音纠正：多音字、人名、生僻词读错了就在这里告诉它怎么读。只改送去合成的文字，
+ * 正文、高亮和位置都不受影响。「读作」留空表示这几个字不读（比如书里夹的广告词）。
+ */
+function SpeechReplacementEditor({
+  rules,
+  onChange,
+}: {
+  rules: SpeechReplacement[];
+  onChange: (rules: SpeechReplacement[]) => void;
+}) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const source = from.trim();
+  const target = to.trim();
+
+  const add = (event: FormEvent) => {
+    event.preventDefault();
+    if (!source || source === target) return;
+    onChange([...rules.filter((rule) => rule.from !== source), { from: source, to: target }]);
+    setFrom("");
+    setTo("");
+  };
+
+  return (
+    <div className="settings-card">
+      {rules.map((rule) => (
+        <div className="speech-rule" key={rule.from}>
+          <span className="speech-rule__text">
+            <strong>{rule.from}</strong>
+            <ArrowRight size={16} aria-hidden />
+            <span className={rule.to ? "" : "is-muted"}>{rule.to || "不读"}</span>
+          </span>
+          <button
+            type="button"
+            className="speech-rule__remove"
+            aria-label={`删除「${rule.from}」的读法`}
+            onClick={() => onChange(rules.filter((item) => item.from !== rule.from))}
+          >
+            <Trash2 size={18} />
+          </button>
+        </div>
+      ))}
+      <form className="speech-rule-form" onSubmit={add}>
+        <span className="settings-input">
+          <input
+            type="text"
+            aria-label="原文"
+            placeholder="原文，如：行长"
+            value={from}
+            onChange={(event) => setFrom(event.target.value)}
+          />
+        </span>
+        <ArrowRight size={16} aria-hidden className="speech-rule-form__arrow" />
+        <span className="settings-input">
+          <input
+            type="text"
+            aria-label="读作"
+            placeholder="读作，如：航长"
+            value={to}
+            onChange={(event) => setTo(event.target.value)}
+          />
+        </span>
+        <button type="submit" disabled={!source || source === target}>
+          添加
+        </button>
+      </form>
+    </div>
+  );
+}
+
 export function SettingsScreen({
   section,
   settings,
@@ -247,9 +320,9 @@ export function SettingsScreen({
   if (section === "voice") {
     return (
       <div className="settings-screen">
-        <PageBar title="朗读音色" subtitle="听书默认用这个声音" onBack={onBack} />
+        <PageBar title="朗读音色" subtitle="听书用的声音和读法" onBack={onBack} />
         <main className="settings-main">
-          <Section foot="断网或云端暂时不可用时，会自动改用手机自带的朗读声音，播放页上会提示。">
+          <Section foot="断网或云端暂时不可用时，会先用手机自带的声音接着读，云端恢复后自动换回来。">
             <div className="settings-card">
               {voices.map((voice) => (
                 <OptionRow
@@ -261,6 +334,15 @@ export function SettingsScreen({
                 />
               ))}
             </div>
+          </Section>
+          <Section
+            title="读音纠正"
+            foot="多音字、人名读错了，在这里告诉它怎么读，比如「行长」读作「航长」。只改朗读，不改正文；读作留空就跳过不读。"
+          >
+            <SpeechReplacementEditor
+              rules={settings.speechReplacements ?? []}
+              onChange={(speechReplacements) => onChange({ ...settings, speechReplacements })}
+            />
           </Section>
         </main>
       </div>
@@ -457,6 +539,11 @@ export function SettingsScreen({
             <LinkRow
               icon={<Headphones size={24} strokeWidth={1.7} />}
               label="朗读音色"
+              detail={
+                settings.speechReplacements?.length
+                  ? `读音纠正 ${settings.speechReplacements.length} 条`
+                  : undefined
+              }
               value={voiceName}
               onClick={() => onOpen("voice")}
             />

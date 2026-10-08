@@ -79,6 +79,19 @@ npm run deploy:dry-run
 
 发版检查在 `hooks/use-app-update.ts`：service worker 在后台存好新版页面后告诉页面，页面拿缓存那一版的 `/assets/` 清单跟自己开机时加载的比，多出文件就在书架几页底部出「新版本已就绪 · 更新」，设置首页也有「检查更新」。点更新就是重新载入，导航由 SW 从缓存给新版。
 
+## 听书
+
+- 两条路，共用一个 `<audio>`（换源只换 `src`）：点下去先走 `/api/tts` 分段（`use-speech-player.ts` 的 `playAt`）出声；能放原生 HLS 的（iPhone、iPad、Safari）同时 POST `/api/sync/live/session` 建连续音频会话，Queue `moting-audio` 后台按 120 字一片合成、每片一个 packed MP3 写进 R2 `live-hls-v1/`（`worker/live-hls.ts`，片与片之间 `EXT-X-DISCONTINUITY`），备好 75 秒后在当前这句接过去。接过去 8 秒还没出声、卡住 12 秒、媒体出错都退回分段。PR #20 自写的 MPEG-TS 封装和「直接从原生 HLS 起播」已经撤回（`docs/LISTENING_REGRESSION_2026-10-08.md`），那批会话的 `state.format === 2`，接口回 410；Chromium 里用 MP3 替身跑通的测试不能当 iPhone 验收。
+- 合成走 Worker 转发微软 Edge 朗读（`worker/edge-tts.ts`），只认 `turn.end` 才算合成完；单片失败换条连接再试（`worker/speech.ts`，最多 3 次），`/api/tts` 读不出来的文本回 422、服务问题回 503。一律按 1× 合成，倍速交给 `playbackRate`。
+- 送去合成的文字带结构（`lib/speech-text.ts`）：段落、标题、换章用 1/2/3 个换行。Edge 不收自定义 SSML，停顿只能在拼接时做（`lib/speech-batch.ts` 的 `fitChunkAudio`）：按帧裁掉每片结尾多余的自带静音、需要时补静音帧，句末约 0.66 秒、换段 0.8、标题前后 1.1、换章 1.8。会话和 `/api/tts` 请求都带 `format: 2`（会话里存成 `session.json` 的 `textFormat`，跟上面那个撤回标记 `state.format` 无关）；不带的是还没更新的老客户端，照旧切片、原样拼接。改了停顿规则要换 `/api/tts` 的缓存键（`worker/index.ts` 的 `cacheKeyFor`）。
+- 老路径分段三档（`lib/speech-segments.ts`）：起播 360 字、开播就预取 1500 字，之后 4800 字一批，可以跨章。
+- 系统打断（来电、Siri、拔耳机）只暂停元素、不通知页面：两条路都监听元素的 `pause` 事件同步成暂停，**不自动续播**（拔了耳机不该外放），锁屏的播放键才按得动。
+- 云端连不上先等 1.5 秒重试一次，再失败才用系统声音顶上并提示；冷却 30 秒起（连着失败翻倍，最多 5 分钟），冷却到点后系统朗读每读一块顺手试一次云端，通了下一块自动换回。用户点继续、重新开播也直接再试云端。
+- 前进/后退 15 秒按真实时间轴跳（屏幕时间，已除倍速），落在那一刻正在读的那句开头；跳出已加载的音频才按字数估算（`sentenceAfterSeconds`）。锁屏进度条跟播放页一样按目录项一章一章算，能拖。
+- 定时关闭到点是暂停不是停止；「本章结束后」按目录项算（续页算在内），在换章前的静音里停、位置挪到下一章开头，连续音频不用为它换源。
+- 读音纠正（`settings.speechReplacements`）只改送去合成的文字，长规则优先、纯字面替换；规则进分段和会话的缓存键。
+- 改这块要跑 `tests/speech-chapter-browser.mjs`（真实《豆棚閒話》文本 + Chromium 真解码 MP3；HLS 控制流程用 MP3 替身，不等于 iPhone 实测），命令写在文件头。
+
 ## AI 对话
 
 - 排版照 Claude app：常驻顶栏；提问是右侧气泡，回答满宽无框；发出的问题滚到顶栏下面停住，回答在它下面长，不跟着滚；回答末尾在屏幕外时输入框上方浮「回到最新」。

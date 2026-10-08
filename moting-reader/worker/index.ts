@@ -2,30 +2,17 @@
 import handler from "vinext/server/app-router-entry";
 import { AI_REQUEST_LIMITS } from "../lib/ai";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
-import { joinSpeechChunks, splitSpeechText } from "../lib/speech-batch";
+import { STRUCTURED_SPEECH_FORMAT } from "../lib/speech-batch";
 import { aiAttemptPlan, aiFailureMessage, requestWithRetry } from "./ai-upstream";
 import { synthesizeSpeech } from "./edge-tts";
 import { processLiveHlsJob, type LiveHlsJob } from "./live-hls";
+import { SpeechBatchError, synthesizeBatch } from "./speech";
 import { forwardSync, handleSync } from "./sync";
 import { handleWeread } from "./weread";
 import { handleZlibrary } from "./zlibrary";
 
-const MAX_TTS_TEXT_LENGTH = 5000;
-const TTS_CHUNK_LENGTH = 360;
-/**
- * 点下播放键之后听到声音的时间，几乎全花在这一次合成上，而合成耗时基本跟字数走
- * （实测约「固定开销 + 18ms/字」）。首段刚好也是 360 字，按 TTS_CHUNK_LENGTH 切只有
- * 一片，下面那个并发度等于没用上。切细到 120 字让它真正并发：同样 360 字，
- * 1 片要 17.8s，3 片并发只要 3.6s。
- */
-const QUICK_TTS_CHUNK_LENGTH = 120;
-/**
- * 超过这个长度的就是播放中后台预取的长批次，早几秒晚几秒用户感觉不到，
- * 继续用粗分片——4800 字按 120 切要 40 个子请求，会顶到 Workers 的 subrequest 上限。
- */
-const QUICK_SYNTH_MAX_LENGTH = 600;
-const TTS_CONCURRENCY = 4;
-const MAX_TTS_AUDIO_BYTES = 20 * 1024 * 1024;
+/** 客户端一批最多 4800 来字，加上分隔换行和读音纠正的余量，留到 6000。 */
+const MAX_TTS_TEXT_LENGTH = 6000;
 const MAX_AI_MODELS_BODY_BYTES = 32 * 1024;
 const MAX_AI_CHAT_BODY_BYTES = 512 * 1024;
 const MAX_TTS_BODY_BYTES = 64 * 1024;
@@ -309,15 +296,23 @@ async function handleAiChat(request: Request): Promise<Response> {
   });
 }
 
-async function cacheKeyFor(text: string, voice: string): Promise<Request> {
+/**
+ * 合成结果按（格式, 音色, 文本）缓存一年。结构化文本的拼接处要整理停顿，跟老格式的音频不一样，
+ * 所以格式号进键；老格式的键保持原样，已有缓存继续命中。
+ */
+async function cacheKeyFor(text: string, voice: string, format: number): Promise<Request> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(`${voice}|${text}`)
+    new TextEncoder().encode(format === STRUCTURED_SPEECH_FORMAT ? `v${format}|${voice}|${text}` : `${voice}|${text}`)
   );
   const hash = Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
   return new Request(`https://moting-reader.internal/tts/${hash}`);
+}
+
+function logSpeech(event: string, detail: Record<string, unknown>) {
+  console.warn(event, detail);
 }
 
 /** 响应体是 [4 字节大端元数据长度][元数据 JSON][MP3]，避免 base64 多出三分之一体积。 */
@@ -333,43 +328,6 @@ function frameResponse(
   body.set(metadata, 4);
   body.set(audio, 4 + metadata.length);
   return body;
-}
-
-async function synthesizeLongSpeech(
-  text: string,
-  voice: string,
-  signal: AbortSignal
-) {
-  const chunks = splitSpeechText(
-    text,
-    text.length <= QUICK_SYNTH_MAX_LENGTH
-      ? QUICK_TTS_CHUNK_LENGTH
-      : TTS_CHUNK_LENGTH
-  );
-  const results = new Array<Awaited<ReturnType<typeof synthesizeSpeech>>>(
-    chunks.length
-  );
-  let cursor = 0;
-  let audioBytes = 0;
-
-  // 限制并发，既缩短长音频首播等待，也避免同时开太多上游 WebSocket。
-  const workers = Array.from(
-    { length: Math.min(TTS_CONCURRENCY, chunks.length) },
-    async () => {
-      while (cursor < chunks.length) {
-        const index = cursor;
-        cursor += 1;
-        const result = await synthesizeSpeech(chunks[index].text, voice, signal);
-        audioBytes += result.audio.byteLength;
-        if (audioBytes > MAX_TTS_AUDIO_BYTES) {
-          throw new Error("朗读音频过大");
-        }
-        results[index] = result;
-      }
-    }
-  );
-  await Promise.all(workers);
-  return joinSpeechChunks(chunks, results);
 }
 
 async function handleSpeech(
@@ -392,8 +350,11 @@ async function handleSpeech(
     );
   }
 
-  const text = typeof payload.text === "string" ? payload.text.trim() : "";
-  if (!text) {
+  const format = payload.format === STRUCTURED_SPEECH_FORMAT ? STRUCTURED_SPEECH_FORMAT : 1;
+  const raw = typeof payload.text === "string" ? payload.text : "";
+  // 结构化文本不 trim：句子下标按客户端发来的原文算，结尾的换行还表示这批读完之后停多久。
+  const text = format === STRUCTURED_SPEECH_FORMAT ? raw : raw.trim();
+  if (!text.trim()) {
     return Response.json({ error: "缺少朗读文本" }, { status: 400 });
   }
   if (text.length > MAX_TTS_TEXT_LENGTH) {
@@ -406,26 +367,31 @@ async function handleSpeech(
       : DEFAULT_EDGE_VOICE;
 
   const cache = caches.default;
-  const key = await cacheKeyFor(text, voice);
+  const key = await cacheKeyFor(text, voice, format);
   const cached = await cache.match(key);
   if (cached) return cached;
 
-  let audio: Uint8Array;
-  let timeline;
+  let result;
   try {
-    ({ audio, timeline } = await synthesizeLongSpeech(text, voice, request.signal));
+    result = await synthesizeBatch(text, voice, request.signal, {
+      synthesize: synthesizeSpeech,
+      log: logSpeech,
+      structured: format === STRUCTURED_SPEECH_FORMAT,
+    });
   } catch (error) {
+    if (request.signal.aborted) return new Response(null, { status: 499 });
+    const failure =
+      error instanceof SpeechBatchError
+        ? error
+        : new SpeechBatchError(error instanceof Error ? error.message : "朗读服务不可用", "service");
+    logSpeech("tts_failed", { status: failure.status, error: failure.message, length: text.length, format, voice });
     return Response.json(
-      { error: error instanceof Error ? error.message : "朗读服务不可用" },
-      { status: 502 }
+      { error: failure.message },
+      { status: failure.status, headers: failure.kind === "service" ? { "retry-after": "5" } : undefined }
     );
   }
 
-  if (!audio.length) {
-    return Response.json({ error: "朗读服务没有返回音频" }, { status: 502 });
-  }
-
-  const body = frameResponse(timeline, audio);
+  const body = frameResponse(result.timeline, result.audio);
   const response = new Response(body, {
     headers: {
       "content-type": "application/octet-stream",

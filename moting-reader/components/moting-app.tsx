@@ -5739,6 +5739,7 @@ interface PlayerControls {
   currentSentenceId: string;
   error: string;
   sleepMode: SleepMode;
+  sleepDeadline: number | null;
   activeVoiceURI: string;
   pendingVoiceURI: string;
   voiceError: string;
@@ -5746,6 +5747,7 @@ interface PlayerControls {
   toggle: () => void;
   stop: () => void;
   skipSentences: (delta: number) => void;
+  skipSeconds: (seconds: number) => void;
   changeChapter: (delta: number) => void;
   setSleepMode: (mode: SleepMode) => void;
   retryVoiceSwitch: () => void;
@@ -5753,6 +5755,24 @@ interface PlayerControls {
   cancelVoicePrefetch: () => void;
   prefetchStart: (book: Book, position: BookPosition) => void;
   recentVoiceURIs: string[];
+}
+
+/** 播放页前进、后退一次跳几秒（屏幕上的时间，已经除过倍速）。 */
+const SKIP_SECONDS = 15;
+
+/** 定时关闭还剩多久，每秒走一下；只在播放页开着、定时开着的时候跑。 */
+function useCountdown(deadline: number | null): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (deadline === null) return;
+    const first = window.setTimeout(() => setNow(Date.now()), 0);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(timer);
+    };
+  }, [deadline]);
+  return deadline === null ? null : Math.max(0, (deadline - now) / 1000);
 }
 
 function PlayerScreen({
@@ -5914,12 +5934,15 @@ function PlayerScreen({
   const toggleView = () =>
     setViewMode((mode) => (mode === "cover" ? "text" : "cover"));
 
+  const sleepLeft = useCountdown(player.sleepDeadline);
   const sleepLabel =
     player.sleepMode === "off"
       ? "定时"
       : player.sleepMode === "chapter"
         ? "本章结束"
-        : `${player.sleepMode} 分钟`;
+        : sleepLeft !== null
+          ? formatClock(sleepLeft)
+          : `${player.sleepMode} 分钟`;
 
   return (
     <div className="player-screen">
@@ -6022,14 +6045,14 @@ function PlayerScreen({
           <button
             type="button"
             className="skip-control"
-            aria-label="后退约15秒"
+            aria-label={`后退 ${SKIP_SECONDS} 秒`}
             onClick={() =>
               activeForBook
-                ? player.skipSentences(-2)
+                ? player.skipSeconds(-SKIP_SECONDS)
                 : player.start(book.id, basePosition)
             }
           >
-            <span>15</span>
+            <span>{SKIP_SECONDS}</span>
           </button>
           <button
             type="button"
@@ -6048,14 +6071,14 @@ function PlayerScreen({
           <button
             type="button"
             className="skip-control skip-control--forward"
-            aria-label="前进约15秒"
+            aria-label={`前进 ${SKIP_SECONDS} 秒`}
             onClick={() =>
               activeForBook
-                ? player.skipSentences(2)
+                ? player.skipSeconds(SKIP_SECONDS)
                 : player.start(book.id, basePosition)
             }
           >
-            <span>15</span>
+            <span>{SKIP_SECONDS}</span>
           </button>
         </div>
 
@@ -6165,6 +6188,7 @@ function PlayerScreen({
                 ["15", "15 分钟后"],
                 ["30", "30 分钟后"],
                 ["45", "45 分钟后"],
+                ["60", "60 分钟后"],
                 ["chapter", "本章结束后"],
               ] as Array<[SleepMode, string]>
             ).map(([mode, label]) => (

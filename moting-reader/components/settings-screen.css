@@ -617,3 +617,107 @@
   font-size: var(--text-md);
   text-align: center;
 }
+
+/* 读音纠正：一条规则一行，「原文 → 读作」，右边删除；最后一行是添加表单。 */
+.speech-rule {
+  position: relative;
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 8px 6px 18px;
+}
+
+.speech-rule + .speech-rule::before,
+.speech-rule + .speech-rule-form::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 18px;
+  height: 0.5px;
+  background: var(--line);
+  content: "";
+}
+
+.speech-rule__text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-callout);
+}
+
+.speech-rule__text strong,
+.speech-rule__text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.speech-rule__text strong {
+  font-weight: 600;
+}
+
+.speech-rule__text svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.speech-rule__text .is-muted {
+  color: var(--muted);
+}
+
+.speech-rule__remove {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+}
+
+.speech-rule__remove:active {
+  background: color-mix(in srgb, var(--ink) 6%, var(--surface));
+}
+
+.speech-rule-form {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px 16px;
+}
+
+.speech-rule-form .settings-input {
+  min-height: 44px;
+  padding-left: 12px;
+}
+
+.speech-rule-form .settings-input input {
+  padding: 10px 0;
+}
+
+.speech-rule-form__arrow {
+  color: var(--muted);
+}
+
+.speech-rule-form button[type="submit"] {
+  grid-column: 1 / -1;
+  min-height: 44px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--text-callout);
+  font-weight: 600;
+}
+
+.speech-rule-form button[type="submit"]:disabled {
+  background: var(--accent-soft);
+  color: var(--muted);
+}

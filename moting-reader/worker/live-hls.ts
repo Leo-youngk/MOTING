@@ -1,6 +1,17 @@
 import { buildBoundaryTimeline } from "../lib/speech-timeline.ts";
-import { mp3DurationSeconds, splitSpeechText } from "../lib/speech-batch.ts";
+import {
+  BREAK_GAP_SECONDS,
+  cleanSpeechText,
+  fitChunkAudio,
+  hasSpeakableText,
+  mp3DurationSeconds,
+  silentMp3,
+  splitSpeechText,
+  splitStructuredSpeech,
+  STRUCTURED_SPEECH_FORMAT,
+} from "../lib/speech-batch.ts";
 import { synthesizeSpeech } from "./edge-tts.ts";
+import { synthesizeChunk } from "./speech.ts";
 import { packedAudio } from "./hls.ts";
 
 const PREFIX = "live-hls-v1/";
@@ -39,7 +50,11 @@ type State = {
   // Rejected v4 transport sessions must not be mutated by this rollback producer.
   format?: 2;
 };
-type Session = { text: string; voice: string };
+/**
+ * textFormat 2：新客户端的结构化文本（换行表示换段、标题、换章），切片和停顿按结构来；
+ * 没有的是老客户端建的会话，照旧切片、原样拼接。跟 State.format（撤回的 v4 封装）无关。
+ */
+type Session = { text: string; voice: string; textFormat?: number };
 export type LiveHlsJob = { id: string; group: number; target: number };
 type Synth = typeof synthesizeSpeech;
 
@@ -89,7 +104,11 @@ export async function processLiveHlsJob(
   ]);
   if (!state || !source || state.complete || state.format === 2) return;
   const session = await source.json<Session>();
-  const chunks = splitSpeechText(session.text, 120);
+  // 老会话（老客户端建的）保持原来的切法，编号、时长都不能变。
+  const structured = session.textFormat === STRUCTURED_SPEECH_FORMAT;
+  const chunks = structured
+    ? splitStructuredSpeech(cleanSpeechText(session.text), 120)
+    : splitSpeechText(session.text, 120);
   // Existing queued sessions retain their original segment numbering.
   const groupSize = state.groupSize === GROUP_SIZE ? GROUP_SIZE : LEGACY_GROUP_SIZE;
   if (job.group !== state.group) {
@@ -103,10 +122,28 @@ export async function processLiveHlsJob(
   if (!group.length) return;
   try {
     const results: Awaited<ReturnType<Synth>>[] = [];
+    const synthesizePart = async (part: (typeof group)[number], index: number) => {
+      // 全是符号的片微软一个字节都不回：给它一小段静音占住时间，别让整个任务失败、会话卡死。
+      if (structured && !hasSpeakableText(part.text)) {
+        return { audio: silentMp3(BREAK_GAP_SECONDS[part.breakAfter ?? "sentence"]), boundaries: [] };
+      }
+      // 单片临时失败先换条连接重试，不用等整组任务被队列重放。
+      const result = await synthesizeChunk(part.text, session.voice, AbortSignal.timeout(90_000), {
+        synthesize: (text, voice, signal) => synth(text, voice, signal),
+        log: (event, detail) => console.warn(event, { id: job.id, group: job.group, ...detail }),
+      }, job.group * groupSize + index);
+      if (!structured) return result;
+      if (!result.audio.length) {
+        // 有字却连着两次没回音频：这一片跳过去（记日志），不然整组任务会被队列反复重放、会话卡住。
+        console.warn("live_hls_chunk_silent", { id: job.id, group: job.group, length: part.text.length });
+        return { audio: silentMp3(BREAK_GAP_SECONDS[part.breakAfter ?? "sentence"]), boundaries: [] };
+      }
+      // 整理这片结尾的停顿：裁掉多余的自带静音、该长的地方补静音帧。词边界的时间不变。
+      const fitted = fitChunkAudio(result.audio, result.boundaries, BREAK_GAP_SECONDS[part.breakAfter ?? "sentence"]);
+      return { ...result, audio: fitted.audio };
+    };
     for (let i = 0; i < group.length; i += 3) {
-      results.push(...await Promise.all(group.slice(i, i + 3).map(part =>
-        synth(part.text, session.voice, AbortSignal.timeout(30_000))
-      )));
+      results.push(...await Promise.all(group.slice(i, i + 3).map((part, offset) => synthesizePart(part, i + offset))));
     }
     const segments = group.map((part, index): Segment => {
       const duration = mp3DurationSeconds(results[index].audio);
@@ -192,7 +229,7 @@ export async function handleLiveHls(
   }
   if (request.method === "POST" && action === "session") {
     if (!queue) return json({ error: "音频任务服务未启用" }, 503);
-    let body: { text?: unknown; voice?: unknown };
+    let body: { text?: unknown; voice?: unknown; format?: unknown };
     try {
       const bytes = await request.arrayBuffer();
       if (bytes.byteLength > 400_000) return json({ error: "正文过长" }, 413);
@@ -204,7 +241,10 @@ export async function handleLiveHls(
     const base = root(id);
     const state: State = { id, created: Date.now(), updated: Date.now(), group: 0, groupSize: GROUP_SIZE, duration: 0, complete: false, segments: [] };
     await Promise.all([
-      bucket.put(base + "session.json", JSON.stringify({ text: body.text, voice: body.voice })),
+      bucket.put(base + "session.json", JSON.stringify({
+        text: body.text, voice: body.voice,
+        ...(body.format === STRUCTURED_SPEECH_FORMAT ? { textFormat: STRUCTURED_SPEECH_FORMAT } : {}),
+      })),
       bucket.put(base + "state.json", JSON.stringify(state)),
     ]);
     await queue.send({ id, group: 0, target: INITIAL_AHEAD });
