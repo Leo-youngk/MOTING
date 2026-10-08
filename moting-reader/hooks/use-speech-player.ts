@@ -137,7 +137,7 @@ const CHAPTER_STOP_LEAD_SECONDS = 1.5;
 const POSITION_STATE_INTERVAL_MS = 5000;
 /** 锁屏、耳机上的快进快退没给秒数时按这个跳，跟播放页的按钮一致。 */
 const SKIP_SECONDS = 15;
-const LIVE_CLIENT_VERSION = "2026-10-08-rollback-structured-v6";
+const LIVE_CLIENT_VERSION = "2026-10-08-handover-off-v7";
 
 type Cursor = { chapterIndex: number; sentenceIndex: number };
 
@@ -175,8 +175,23 @@ function liveSentenceAfterChapter(plan: LivePlan, chapterIndex: number): LiveSen
 function reusableAudio(ref: { current: HTMLAudioElement | null }): HTMLAudioElement {
   return ref.current ?? new Audio();
 }
+/**
+ * 原生 HLS 连续音频的接手默认关着。线上遥测（D1 audio_telemetry）：2026-10-02 起 7 次接手
+ * 全部停在 readyState=1、buffered 为空，一次都没出过声，每次白卡 8 秒再退回分段，听着就是
+ * 「听一会儿停一下、转圈加载」。分段一路播下去不会这样。代码留着，排查时在那台设备上执行
+ * localStorage.setItem("moting:live-hls", "1") 再重开应用即可打开。
+ */
+function liveHandoverEnabled(): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem("moting:live-hls") === "1";
+  } catch {
+    return false;
+  }
+}
 let liveClientId = "";
 function reportLiveClient(stage: "prewarm" | "prewarm-failed" | "legacy-start", reason: string, hls: boolean) {
+  // 接手关着时没有可诊断的东西，不发这些遥测。
+  if (!liveHandoverEnabled()) return;
   liveClientId ||= crypto.randomUUID().replaceAll("-", "");
   void fetch("/api/sync/live/client", {
     method: "POST", headers: { "content-type": "application/json" },
@@ -1397,7 +1412,7 @@ export function useSpeechPlayer({
         return;
       }
       const voiceName = edgeVoiceName(voiceURI);
-      const supportsHls = typeof document !== "undefined" &&
+      const supportsHls = liveHandoverEnabled() && typeof document !== "undefined" &&
         !!document.createElement("audio").canPlayType("application/vnd.apple.mpegurl");
       reportLiveClient("prewarm", supportsHls ? "native-hls" : "no-native-hls", supportsHls);
       if (supportsHls) {
