@@ -1,4 +1,5 @@
 import type { AiChatTurn } from "./types";
+import { aiStreamEvents } from "./ai-stream.ts";
 
 /**
  * 请求经我们自己的 Worker 转发到用户填的 OpenAI 兼容接口——很多服务商的接口
@@ -124,72 +125,60 @@ export interface AiChatOptions {
   onModel?: (model: string) => void;
 }
 
-/** 逐块把增量内容喂给 onDelta，content 和 reasoning_content（深度思考）分开传。 */
+/** 超过输出长度上限时续写一次；断线保留正文并报告失败，不把半截回答当完成。 */
 export async function streamAiChat(options: AiChatOptions, onDelta: (delta: AiStreamDelta) => void): Promise<void> {
-  const { baseUrl, apiKey, model, fallbackModel, messages, deepThinking, signal } = options;
-
-  let response: Response;
-  try {
-    response = await fetch("/api/ai/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ baseUrl, apiKey, model, fallbackModel, messages, deepThinking }),
-      signal,
-    });
-  } catch (err) {
-    if ((err as Error)?.name === "AbortError") throw err;
-    throw new AiRequestError("连不上服务器，稍后再试");
-  }
-
-  if (!response.ok || !response.body) {
-    throw new AiRequestError((await errorMessage(response)) ?? `AI 服务返回 ${response.status}`);
-  }
-  options.onModel?.(response.headers.get("x-ai-model") || model);
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let answered = false;
-
-  const processLine = (line: string): boolean => {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("data:")) return false;
-    const payload = trimmed.slice(5).trim();
-    if (payload === "[DONE]") return true;
-    let parsed: {
-      choices?: { delta?: { content?: string; reasoning_content?: string } }[];
-      error?: { message?: string };
-    } | null = null;
+  const { baseUrl, apiKey, fallbackModel, deepThinking, signal } = options;
+  let messages = options.messages;
+  let model = options.model;
+  let content = "";
+  for (let continuation = 0; continuation <= 1; continuation++) {
+    let response: Response;
     try {
-      parsed = JSON.parse(payload);
-    } catch {
-      return false;
+      response = await fetch("/api/ai/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseUrl, apiKey, model, fallbackModel, messages, deepThinking }),
+        signal,
+      });
+    } catch (err) {
+      if (signal?.aborted || (err as Error)?.name === "AbortError") throw err;
+      throw new AiRequestError(content ? "回答中途断开，已保留收到的内容，可继续回答" : "连不上服务器，稍后再试");
     }
-    // 有的服务商先回 200、再在流里塞一条错误（限流、过载），不接住就是一个空回答。
-    if (parsed?.error) throw new AiRequestError(parsed.error.message || "AI 服务出错，稍后再试");
-    const delta = parsed?.choices?.[0]?.delta;
-    if (delta?.content) answered = true;
-    if (delta && (delta.content || delta.reasoning_content)) {
-      onDelta({ content: delta.content, reasoning: delta.reasoning_content });
+    if (!response.ok || !response.body) {
+      throw new AiRequestError((await errorMessage(response)) ?? `AI 服务返回 ${response.status}`);
     }
-    return false;
-  };
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      if (lines.some(processLine)) break;
-      if (done) {
-        if (buffer) processLine(buffer);
-        break;
+    model = response.headers.get("x-ai-model") || model;
+    options.onModel?.(model);
+    let answered = false;
+    let ended = false;
+    let finishReason = "";
+    try {
+      for await (const event of aiStreamEvents(response.body, signal)) {
+        if (event.error) throw new AiRequestError(event.error.message);
+        if (event.content?.trim()) answered = true;
+        content += event.content ?? "";
+        if (event.content || event.reasoning) onDelta({ content: event.content, reasoning: event.reasoning });
+        if (event.finishReason) finishReason = event.finishReason;
+        if (event.done || event.finishReason) {
+          ended = true;
+          break;
+        }
       }
+    } catch (err) {
+      if (err instanceof AiRequestError || signal?.aborted) throw err;
+      throw new AiRequestError(content ? "回答中途断开或长时间没有输出，已保留收到的内容，可继续回答" : "AI 长时间没有返回回答，请重试");
     }
-  } finally {
-    reader.releaseLock();
+    if (finishReason === "content_filter") throw new AiRequestError("AI 服务拦截了这次回答，请调整提问");
+    if (finishReason && finishReason !== "stop" && finishReason !== "length") {
+      throw new AiRequestError("模型提前结束了回答，已保留收到的内容，可继续回答");
+    }
+    if (!answered) throw new AiRequestError("AI 这次没有给出回答，请重试");
+    if (!ended) throw new AiRequestError("回答中途断开，已保留收到的内容，可继续回答");
+    if (finishReason !== "length") return;
+    if (continuation || content.length > AI_REQUEST_LIMITS.messageChars || messages.length + 2 > AI_REQUEST_LIMITS.messages) {
+      throw new AiRequestError("回答达到输出长度上限，已保留收到的内容，可继续回答");
+    }
+    messages = [...messages, { role: "assistant", content },
+      { role: "user", content: "请从中断处继续完成回答，不要重复已经给出的内容。" }];
   }
-  // 连接正常结束却一个字都没给：多半是服务繁忙、被安全策略拦下，或者只返回了思考。
-  if (!answered) throw new AiRequestError("AI 这次没有给出回答，可能是服务繁忙，点重试再来一次");
 }

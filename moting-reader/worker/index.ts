@@ -3,7 +3,7 @@ import handler from "vinext/server/app-router-entry";
 import { AI_REQUEST_LIMITS } from "../lib/ai";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
 import { STRUCTURED_SPEECH_FORMAT } from "../lib/speech-batch";
-import { aiAttemptPlan, aiFailureMessage, requestWithRetry } from "./ai-upstream";
+import { aiAttemptPlan, aiFailureMessage, aiThinkingOptions, requestWithRetry } from "./ai-upstream";
 import { synthesizeSpeech } from "./edge-tts";
 import { processLiveHlsJob, type LiveHlsJob } from "./live-hls";
 import { SpeechBatchError, synthesizeBatch } from "./speech";
@@ -19,7 +19,6 @@ const MAX_TTS_BODY_BYTES = 64 * 1024;
 const MAX_AI_MODELS_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_AI_ERROR_RESPONSE_BYTES = 64 * 1024;
 const AI_MODELS_TIMEOUT_MS = 30000;
-const AI_CHAT_TIMEOUT_MS = 120000;
 /** 上游忙时所有重试加起来最多等这么久。一次 503 本身就要三秒上下，再长用户就以为卡死了。 */
 const AI_RETRY_BUDGET_MS = 30000;
 // 音色名会拼进 SSML 属性，必须限死格式，否则等于把 SSML 注入点暴露出去。
@@ -252,7 +251,8 @@ async function handleAiChat(request: Request): Promise<Response> {
       plan: aiAttemptPlan(model, fallbackModel),
       signal: request.signal,
       budgetMs: AI_RETRY_BUDGET_MS,
-      send: (attemptModel) =>
+      attemptTimeoutMs: payload.deepThinking ? 20000 : 12000,
+      send: (attemptModel, signal) =>
         fetch(`${baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
@@ -263,14 +263,15 @@ async function handleAiChat(request: Request): Promise<Response> {
             model: attemptModel,
             messages,
             stream: true,
-            ...(payload.deepThinking ? { enable_thinking: true } : {}),
+            ...aiThinkingOptions(baseUrl, attemptModel, payload.deepThinking === true),
           }),
-          signal: AbortSignal.any([request.signal, AbortSignal.timeout(AI_CHAT_TIMEOUT_MS)]),
+          signal,
         }),
       readError: (response) => readResponseText(response, MAX_AI_ERROR_RESPONSE_BYTES),
       // 退路要看得见：每次重试、换备用模型都进 Workers 日志，出了问题能查到底是哪边忙。
       onRetry: (attempt, next) =>
         console.warn("ai upstream retry", { failed: attempt, next: next.model }),
+      onStreamEnd: (model, outcome) => console.log("ai stream ended", { model, outcome }),
     });
   } catch {
     // 用户在等待重试时关掉了对话框，连接已经断了，这个响应不会有人收。

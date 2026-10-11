@@ -220,6 +220,8 @@ export interface AiChatTurn {
   role: "user" | "assistant";
   content: string;
   reasoning?: string;
+  /** 保留不完整回答时一并保存失败原因，重开对话后仍可继续。 */
+  error?: string;
   /** 触发这轮提问时选中的原文片段，只在换了新片段的那一轮才有值。 */
   quote?: string;
   /** 这条回答是备用模型答的时候记下它的名字（主模型答的不记）。 */

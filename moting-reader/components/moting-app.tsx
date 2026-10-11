@@ -3031,6 +3031,7 @@ function AiAskPanel({
     let content = "";
     let reasoning = "";
     let answeredBy = "";
+    let failure = "";
     streamTextRef.current = { content: "", reasoning: "" };
     try {
       await askAi({
@@ -3050,8 +3051,9 @@ function AiAskPanel({
         },
       });
     } catch (err) {
-      if (err instanceof AiRequestError) setError(err.message);
-      else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
+      failure = err instanceof AiRequestError ? err.message
+        : controller.signal.aborted ? "回答已停止，可继续回答" : "请求失败，稍后再试";
+      setError(failure);
     } finally {
       if (streamFrameRef.current !== null) {
         window.cancelAnimationFrame(streamFrameRef.current);
@@ -3060,11 +3062,12 @@ function AiAskPanel({
       streamTextRef.current = { content, reasoning };
       const next: AiChatTurn[] = [
         ...history,
-        { id: assistantId, replyTo, role: "assistant", content, reasoning, ...fallbackMark(answeredBy, settings) },
+        { id: assistantId, replyTo, role: "assistant", content, reasoning,
+          ...(failure ? { error: failure } : {}), ...fallbackMark(answeredBy, settings) },
       ];
       setTurns(next);
       setBusy(false);
-      // 没答上来的这一轮只留在眼前（带着「重试」），不写进这本书的对话记录。
+      // 空回答不保存；已有正文的半截回答连同失败原因保留，重开后仍能继续。
       onTurnsChange(next.filter(isAnsweredTurn));
     }
   };
@@ -3081,6 +3084,7 @@ function AiAskPanel({
       );
     }
     const streaming = busy && turn.id === activeAnswerId;
+    const failure = turn.error || (turn.id === activeAnswerId ? error : "");
     const reasoningOpen = openReasoning.has(index);
     return (
       <div className="ai-ask__turn-assistant" key={turn.id ?? index}>
@@ -3126,15 +3130,16 @@ function AiAskPanel({
             {turn.model ? <span className="ai-ask__via">主模型太忙，由备用模型 {turn.model} 回答</span> : null}
           </div>
         ) : null}
-        {turn.id === activeAnswerId && error && !busy ? (
+        {failure && !streaming ? (
           <div className="ai-ask__failed">
-            <p className="ai-ask__error">{error}</p>
-            {turn.content ? null : (
-              <button type="button" className="ai-ask__retry" onClick={retry}>
+            <p className="ai-ask__error">{failure}</p>
+            {index === turns.length - 1 ? (
+              <button type="button" className="ai-ask__retry" disabled={busy}
+                onClick={() => turn.content ? ask("请从中断处继续完成回答，不要重复已经给出的内容。") : retry()}>
                 <RefreshCw size={14} />
-                重试
+                {turn.content ? "继续回答" : "重试"}
               </button>
-            )}
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -3298,6 +3303,7 @@ function AiInlineAsk({
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [via, setVia] = useState<string | undefined>();
+  const historyRef = useRef<AiChatTurn[]>([]);
   const controllerRef = useRef<AbortController | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -3309,13 +3315,14 @@ function AiInlineAsk({
     []
   );
 
-  const run = async (preset?: string) => {
+  const run = async (preset?: string, retry = false) => {
     if (busy || !configured) return;
     const userText = (preset ?? question).trim() || "帮我讲讲这段话";
-    const history: AiChatTurn[] = [
+    const history: AiChatTurn[] = retry ? historyRef.current : [
       ...turns,
       { id: makeId("turn"), role: "user", content: userText, quote: text },
     ];
+    historyRef.current = history;
     setAsked(userText);
     setQuestion("");
     setAnswer("");
@@ -3326,6 +3333,7 @@ function AiInlineAsk({
     let content = "";
     let reasoning = "";
     let answeredBy = "";
+    let failure = "";
     const assistantId = makeId("turn");
     const replyTo = history.at(-1)?.id;
     setVia(undefined);
@@ -3348,15 +3356,17 @@ function AiInlineAsk({
         },
       });
     } catch (err) {
-      if (err instanceof AiRequestError) setError(err.message);
-      else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
+      failure = err instanceof AiRequestError ? err.message
+        : controller.signal.aborted ? "回答已停止，可继续回答" : "请求失败，稍后再试";
+      setError(failure);
     } finally {
       setBusy(false);
       // 这一轮照样进这本书的常驻对话，正文里的批注只是它的即时视图。没答上来的空回答不留。
       onTurnsChange(
         [
           ...history,
-          { id: assistantId, replyTo, role: "assistant" as const, content, reasoning, ...fallbackMark(answeredBy, settings) },
+          { id: assistantId, replyTo, role: "assistant" as const, content, reasoning,
+            ...(failure ? { error: failure } : {}), ...fallbackMark(answeredBy, settings) },
         ].filter(isAnsweredTurn)
       );
     }
@@ -3458,6 +3468,9 @@ function AiInlineAsk({
 
       {answer !== null && !busy ? (
         <div className="ai-inline__actions">
+          {error && !answer ? (
+            <button type="button" onClick={() => void run(asked, true)}><RefreshCw size={13} />重试</button>
+          ) : null}
           <button type="button" onClick={() => void copy()}>
             {copied ? <Check size={13} /> : <Copy size={13} />}
             {copied ? "已复制" : "复制"}
