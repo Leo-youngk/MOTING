@@ -82,7 +82,7 @@ export async function downloadZlibrary(book: OnlineBook, onProgress: (label: str
     reader.releaseLock();
   }
   if (!received || (total && received !== total)) throw new Error("文件下载不完整，请重试");
-  signal.throwIfAborted();
+  if (signal.aborted) throw signal.reason ?? new DOMException("下载已取消", "AbortError");
   const encoded = response.headers.get("x-book-filename");
   let filename = `${book.title}.${book.extension}`;
   try { if (encoded) filename = decodeURIComponent(encoded); } catch { /* 无效文件名不影响下载。 */ }
