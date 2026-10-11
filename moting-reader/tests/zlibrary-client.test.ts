@@ -43,6 +43,14 @@ test("a malformed optional filename header falls back to the book filename", asy
   assert.equal(file.name, "下载测试.txt");
 });
 
+test("completed downloads work with older AbortSignal implementations", async (t) => {
+  const signal = new AbortController().signal;
+  Object.defineProperty(signal, "throwIfAborted", { value: undefined });
+  t.mock.method(globalThis, "fetch", async () => new Response("book"));
+  const file = await downloadZlibrary(book, () => {}, signal);
+  assert.equal(await file.text(), "book");
+});
+
 test("idle read timeout cancels upstream and does not wait forever", async () => {
   let canceled = false;
   const reader = new ReadableStream<Uint8Array>({ cancel() { canceled = true; } }).getReader();
