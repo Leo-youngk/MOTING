@@ -201,7 +201,7 @@ import { useTextSelection, wordAtPoint } from "../hooks/use-text-selection";
 import { isEnglishText, isMidSentence, lookupSpans } from "../lib/dictionary";
 import { SelectionLayer } from "./selection-layer";
 import { WordGlossCard, glossKey, type GlossTarget } from "./word-gloss";
-import { Modal, SheetCancelButton, scrollWhenUnlocked, useScrollLock } from "./sheet";
+import { Modal, PageActiveContext, SheetCancelButton, scrollWhenUnlocked, useScrollLock } from "./sheet";
 import { SoftRange } from "./soft-range";
 import { SettingsScreen } from "./settings-screen";
 import {
@@ -6377,10 +6377,6 @@ export default function MotingApp() {
   const pendingSyncedSettingsRef = useRef<ReaderSettings | null>(null);
   const [stats, setStats] = useState<ReadingStats>(DEFAULT_STATS);
   const [sessions, setSessions] = useState<ReadingSession[]>([]);
-  // 导航接在 History API 上：返回回到来处、刷新/被系统回收后还在原地、
-  // 系统返回手势也能用。切板块是平级移动，下钻才进历史栈。
-  const { view, backgroundView, navigate, selectTab, replace: replaceView, goBack } =
-    useAppNavigation();
   const [ready, setReady] = useState(false);
   // 老用户第一次打开新版时，本地库要把正文从书目里搬出去，这一次会多等几秒。
   const [upgrading, setUpgrading] = useState(false);
@@ -6392,6 +6388,18 @@ export default function MotingApp() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [thoughtTarget, setThoughtTarget] = useState<BookNote | null>(null);
   const [thoughtDraft, setThoughtDraft] = useState("");
+  // 切页时取消尚未完成的打开操作，关闭属于上一页的弹层。
+  const openTokenRef = useRef(0);
+  const closePageOverlays = useCallback(() => {
+    openTokenRef.current += 1;
+    setMetadataBook(null);
+    setDeleteTarget(null);
+    setChatBook(null);
+    setConfirmClear(false);
+    setThoughtTarget(null);
+  }, []);
+  const { view, backgroundView, navigate, selectTab, replace: replaceView, goBack } =
+    useAppNavigation(closePageOverlays);
   const [toast, setToast] = useState<{
     id: number;
     message: string;
@@ -7812,9 +7820,6 @@ export default function MotingApp() {
     setBooks((current) => [metaOf(book), ...current]);
   };
 
-  /** 连点，或者点了 A 马上又点 B：只认最后一次，前面那次读完正文也不跳。 */
-  const openTokenRef = useRef(0);
-
   /** 先把这本书的正文读进来，再进页面；页面第一帧就是完整的。 */
   const withContent = async (bookId: string, refreshProgress = false): Promise<Book | null> => {
     const token = ++openTokenRef.current;
@@ -8298,6 +8303,7 @@ export default function MotingApp() {
 
           <section className="app-content">
             <div className={`app-tab-content${tabSuspended ? " is-suspended" : ""}`} aria-hidden={tabSuspended} inert={tabSuspended}>
+            <PageActiveContext.Provider value={!frameSuspended && !tabSuspended}>
             {frameView === "home" ? (
               <HomeScreen
                 books={books}
@@ -8341,6 +8347,7 @@ export default function MotingApp() {
                 onOpenChat={setChatBook}
               />
             )}
+            </PageActiveContext.Provider>
             </div>
             {view.name === "history" ? (
               <HistoryScreen sessions={sessions} onBack={() => goBack({ name: "home" })} />

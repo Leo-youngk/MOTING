@@ -33,6 +33,13 @@ export function scrollWhenUnlocked(scroll: () => void) {
   else scroll();
 }
 
+export function pageScrollY() {
+  return scrollLockCount > 0 ? lockedScrollY : window.scrollY;
+}
+
+/** 保留的列表页可以隐藏，但它的 Portal 弹层必须随页面退场。 */
+export const PageActiveContext = createContext(true);
+
 // 浮层是 position: fixed，挡不住底下的 body 一起被拖动——尤其是弹键盘的时候，
 // 背景页面跟着 focus 一起窜，整个 UI 看着在晃。开着的时候把 body 锁死，关掉再还原。
 // iOS standalone 下 overflow: hidden 拦不住 focus 触发的整页上推，只有 position: fixed 拦得住。
@@ -67,19 +74,30 @@ export function SheetCancelButton({ children }: { children: ReactNode }) {
   );
 }
 
-export function Modal({
-  title,
-  children,
-  onClose,
-  wide = false,
-  className = "",
-}: {
+interface ModalProps {
   title: string;
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
   className?: string;
-}) {
+}
+
+export function Modal(props: ModalProps) {
+  const active = useContext(PageActiveContext);
+  const { onClose } = props;
+  useLayoutEffect(() => {
+    if (!active) onClose();
+  }, [active, onClose]);
+  return active ? <ModalSheet {...props} /> : null;
+}
+
+function ModalSheet({
+  title,
+  children,
+  onClose,
+  wide = false,
+  className = "",
+}: ModalProps) {
   // 关闭先走退场动画（面板滑下去、遮罩淡掉），放完再真正卸掉。
   // 以前一关就啪地消失，跟滑上来的进场一对比，像是被硬拔掉的。
   const [closing, setClosing] = useState(false);

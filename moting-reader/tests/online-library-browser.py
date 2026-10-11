@@ -5,6 +5,7 @@ Requires a running app and Playwright with Edge installed.
 """
 import io
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -28,7 +29,7 @@ def epub_fixture():
 
 
 with sync_playwright() as playwright:
-    browser = playwright.chromium.launch(channel="msedge", headless=True)
+    browser = playwright.chromium.launch(headless=True, **({"executable_path": os.environ["BROWSER_PATH"]} if os.environ.get("BROWSER_PATH") else {"channel": "msedge"}))
     context = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True, device_scale_factor=2, service_workers="block")
     page = context.new_page()
     errors = []
