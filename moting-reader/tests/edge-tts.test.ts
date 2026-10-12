@@ -70,11 +70,27 @@ test("streaming emits ordered Blob frames before turn.end and rejects truncated 
   let ready = new Promise<void>(resolve => { socketReady = resolve; });
   class Socket extends EventTarget {
     accept() {}
-    send() { socketReady(); }
+    send(message: string) {
+      if (message.includes("Path:speech.config")) {
+        const config = JSON.parse(message.split("\r\n\r\n")[1]);
+        assert.deepEqual(config.context.synthesis.audio.metadataoptions,
+          { sentenceBoundaryEnabled: false, wordBoundaryEnabled: true });
+      }
+      socketReady();
+    }
     close() {}
   }
   Object.defineProperty(globalThis, "caches", { configurable: true, value: { default: { match: async () => new Response("150.0.4078.105") } } });
-  globalThis.fetch = async () => { const socket = new Socket(); sockets.push(socket); return { webSocket: socket } as unknown as Response; };
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    assert.equal(url.hostname, "api.msedgeservices.com");
+    assert.equal(url.pathname, "/tts/cognitiveservices/websocket/v1");
+    assert.ok(url.searchParams.has("Ocp-Apim-Subscription-Key"));
+    assert.equal(url.searchParams.has("TrustedClientToken"), false);
+    assert.equal(new Headers(init?.headers).get("Sec-WebSocket-Version"), "13");
+    const socket = new Socket(); sockets.push(socket);
+    return { webSocket: socket } as unknown as Response;
+  };
   const frame = (n: number) => new Blob([new Uint8Array([0, 0, n])]);
   try {
     const received: number[] = [];
