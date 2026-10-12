@@ -6252,8 +6252,7 @@ function PlayerScreen({
               {player.voices.map((voice) => {
                 // 没选过（空串）就是默认音色，折算之后再比，默认那一个才会打勾。
                 const chosen = resolvedEdgeVoiceURI(settings.voiceURI) === voice.voiceURI;
-                // 「选中」是用户的意愿，「正在播放」是事实。云端失败退回系统朗读时
-                // 这两者会不一致，必须分开显示，不能拿勾当成已经在用这个声音。
+                // 「选中」是用户的意愿，「正在播放」是事实。音色还在准备时要分开显示。
                 const playing =
                   activeForBook && player.activeVoiceURI === voice.voiceURI;
                 const preparing =
@@ -7861,8 +7860,12 @@ export default function MotingApp() {
   };
 
   const openPlayer = async (meta: BookMeta, startPlaying = false) => {
+    if (startPlaying) player.preparePlayback();
     const book = await withContent(meta.id, true);
-    if (!book) return;
+    if (!book) {
+      if (startPlaying) player.stop();
+      return;
+    }
     navigate({ name: "player", bookId: book.id });
     if (startPlaying) {
       // 听读同步：在别处（比如另一台设备）读到更后面了，就从读到的地方接着听。

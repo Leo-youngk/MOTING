@@ -117,6 +117,14 @@ export class SpeechClipStore {
     return this.cache.has(clipKey(text, voice));
   }
 
+  /** 解码失败的音频不能留着，否则每次重试都会再次命中它。 */
+  evict(text: string, voice: string): void {
+    const key = clipKey(text, voice);
+    const entry = this.cache.get(key);
+    if (entry) this.bytes -= entry.bytes;
+    this.cache.delete(key);
+  }
+
   request(
     text: string,
     voice: string,
@@ -245,14 +253,27 @@ export class SpeechClipStore {
       launch = resolve;
     });
 
+    // 取消当场摘掉；同一拍的重播必须拿到新请求，而不是等 finally 才能重开。
+    controller.signal.addEventListener("abort", () => {
+      if (this.inflight.get(key) === entry) this.inflight.delete(key);
+      const waiting = this.pending.get(key);
+      if (waiting?.entry === entry) {
+        this.pending.delete(key);
+        waiting.start();
+      }
+    }, { once: true });
     entry.promise = gate
-      .then(() => this.fetcher(text, voice, controller.signal))
+      .then(() => {
+        if (controller.signal.aborted) throw abortError();
+        return this.fetcher(text, voice, controller.signal);
+      })
       .then((clip) => {
+        if (controller.signal.aborted) throw abortError();
         this.store(key, clip);
         return clip;
       })
       .finally(() => {
-        this.inflight.delete(key);
+        if (this.inflight.get(key) === entry) this.inflight.delete(key);
         if (entry.counted) {
           entry.counted = false;
           this.running -= 1;

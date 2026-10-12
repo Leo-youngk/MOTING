@@ -17,6 +17,9 @@ function Harness() {
     Object.assign(window, { speechHarness: { player, book, history,
       from: positionFor(book, 0, book.chapters[0].sentenceCount - 1) } });
   }, [player]);
-  return null;
+  return <button id="delayed-start" onClick={() => {
+    player.preparePlayback();
+    setTimeout(() => player.start(book.id, positionFor(book, 0, book.chapters[0].sentenceCount - 1)), 100);
+  }}>读取正文后播放</button>;
 }
 createRoot(document.getElementById("root")!).render(<Harness />);
