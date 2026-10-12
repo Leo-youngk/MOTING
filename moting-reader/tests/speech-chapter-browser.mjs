@@ -64,6 +64,27 @@ try {
       const blobTypes = new Map();
       const createUrl = URL.createObjectURL.bind(URL);
       URL.createObjectURL = (blob) => { const url = createUrl(blob); blobTypes.set(url, blob.type); return url; };
+      const activated = new WeakSet();
+      const play = HTMLMediaElement.prototype.play;
+      HTMLMediaElement.prototype.play = function () {
+        if (window.event?.type === "click") activated.add(this);
+        if (window.requireClickActivation && !activated.has(this)) {
+          return Promise.reject(new DOMException("needs a click", "NotAllowedError"));
+        }
+        if (blobTypes.get(this.src) === "audio/mpeg" && window.rejectNextClip) {
+          window.rejectNextClip = false;
+          return Promise.reject(new DOMException("interrupted", "NotAllowedError"));
+        }
+        if (blobTypes.get(this.src) === "audio/mpeg" && window.lateRejectNextClip) {
+          window.lateRejectNextClip = false;
+          return new Promise((resolve, reject) => setTimeout(() => reject(new DOMException("old play interrupted", "AbortError")), 200));
+        }
+        if (blobTypes.get(this.src) === "audio/mpeg" && window.freezeNextClip) {
+          window.freezeNextClip = false;
+          return Promise.resolve(); // 模拟 play() 成功但媒体时钟没有启动。
+        }
+        return play.call(this);
+      };
       const ids = new WeakMap(); let next = 0;
       const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "src");
       Object.defineProperty(HTMLMediaElement.prototype, "src", { ...descriptor, set(value) {
@@ -238,30 +259,74 @@ try {
   check("legacy_sleep_path_has_no_browser_errors", legacySleep.errors.length === 0);
   await legacySleep.context.close();
 
-  // 云端连不上：先等一下再试一次，再失败才用系统声音顶上；用户点继续时再给云端一次机会。
-  const outage = await setup(false, { failTts: 2 });
+  // 首页入口先异步读取正文：点击那一刻激活同一个媒体元素，后续云端音频继续用它。
+  const delayed = await setup();
+  await delayed.page.evaluate(() => { window.requireClickActivation = true; });
+  await delayed.page.locator("#delayed-start").click();
+  await delayed.page.waitForFunction(() => !speechHarness.player.isBuffering && speechHarness.player.isPlaying && audioElements[0].currentTime > 0.1);
+  check("async_book_loading_keeps_the_click_activated_audio", await delayed.page.evaluate(() => audioElements.length === 1 && speechHarness.player.activeVoiceURI === "edge:zh-CN-YunjianNeural"));
+  check("async_start_has_no_browser_errors", delayed.errors.length === 0);
+  await delayed.context.close();
+
+  const cancelled = await setup();
+  await cancelled.start();
+  await cancelled.page.waitForFunction(() => speechHarness.player.isBuffering);
+  await cancelled.page.evaluate(() => { speechHarness.player.toggle(); speechHarness.player.toggle(); });
+  await cancelled.page.waitForFunction(() => speechHarness.player.isPlaying && !speechHarness.player.isBuffering && audioElements[0].currentTime > 0.1);
+  check("pause_and_immediate_resume_during_preparation_plays_cloud_audio", await cancelled.page.evaluate(() => speechHarness.player.activeVoiceURI === "edge:zh-CN-YunjianNeural" && window.spoken.length === 0));
+  check("cancelled_start_has_no_browser_errors", cancelled.errors.length === 0);
+  await cancelled.context.close();
+
+  // 云端持续失败：共三次尝试，暂停在原地，禁止系统朗读；下一次点击重新请求云端。
+  const outage = await setup(false, { failTts: 3 });
   await outage.start();
-  await outage.page.waitForFunction(() => window.spoken.length > 0, { timeout: 10000 });
-  check("cloud_failure_is_retried_once_before_falling_back", outage.requests.length === 2);
-  check("fallback_uses_the_system_voice_and_says_so", await outage.page.evaluate(() => speechHarness.player.isPlaying && /系统声音/.test(speechHarness.player.error)));
-  await outage.page.waitForTimeout(1500);
-  check("cooldown_keeps_the_system_voice_without_retrying_the_cloud", outage.requests.length === 2 && await outage.page.evaluate(() => !audioSources.some(part => part.type === "audio/mpeg")));
-  // 冷却到点：系统朗读那边顺手试通云端，下一块自动换回云端声音，提示也撤掉。
-  await outage.page.evaluate(() => { window.clockOffset = 31_000; });
-  await outage.page.waitForFunction(() => audioSources.some(part => part.type === "audio/mpeg"), { timeout: 15000 });
-  check("cloud_voice_comes_back_by_itself_after_cooldown", await outage.page.evaluate(() => speechHarness.player.isPlaying && speechHarness.player.error === ""));
-  // 再断一次：这回用户自己点暂停、继续，直接再试云端。
-  outage.failTts(2);
-  await outage.page.evaluate(() => speechHarness.player.changeChapter(1));
-  await outage.page.waitForFunction(() => /系统声音/.test(speechHarness.player.error), { timeout: 10000 });
-  const cloudSources = await outage.page.evaluate(() => audioSources.filter(part => part.type === "audio/mpeg").length);
+  await outage.page.waitForFunction(() => speechHarness.player.isPaused && /云端语音/.test(speechHarness.player.error), { timeout: 10000 });
+  check("cloud_failure_retries_without_changing_voice", outage.ttsBodies.length === 3 && outage.ttsBodies.every(body => body.voice === "zh-CN-YunjianNeural"));
+  check("persistent_outage_never_uses_system_speech", await outage.page.evaluate(() => window.spoken.length === 0 && !speechHarness.player.isPlaying && !speechHarness.player.isBuffering && audioElements[0].paused && speechHarness.player.location !== null));
   await outage.page.evaluate(() => speechHarness.player.toggle());
-  await outage.page.waitForFunction(() => speechHarness.player.isPaused, { timeout: 3000 });
-  await outage.page.evaluate(() => speechHarness.player.toggle());
-  await outage.page.waitForFunction((count) => audioSources.filter(part => part.type === "audio/mpeg").length > count, cloudSources, { timeout: 10000 });
-  check("manual_resume_returns_to_the_cloud_voice", await outage.page.evaluate(() => speechHarness.player.isPlaying && speechHarness.player.error === ""));
+  await outage.page.waitForFunction(() => speechHarness.player.isPlaying && !speechHarness.player.isBuffering && audioElements[0].currentTime > 0.1);
+  check("retry_after_outage_plays_mp3_instead_of_the_silent_placeholder", await outage.page.evaluate(() => speechHarness.player.error === "" && audioSources.at(-1).type === "audio/mpeg" && speechHarness.player.activeVoiceURI === "edge:zh-CN-YunjianNeural" && window.spoken.length === 0));
   check("outage_path_has_no_browser_errors", outage.errors.length === 0);
   await outage.context.close();
+
+  const rejected = await setup();
+  await rejected.page.evaluate(() => { window.rejectNextClip = true; });
+  await rejected.start();
+  await rejected.page.waitForFunction(() => speechHarness.player.isPaused && speechHarness.player.error.length > 0);
+  const beforeRetry = rejected.requests.length;
+  await rejected.page.evaluate(() => speechHarness.player.toggle());
+  await rejected.page.waitForFunction(() => speechHarness.player.isPlaying && !speechHarness.player.isBuffering && audioElements[0].currentTime > 0.1);
+  check("blocked_play_can_resume_the_cached_cloud_clip", rejected.requests.length === beforeRetry && await rejected.page.evaluate(() => window.spoken.length === 0 && speechHarness.player.error === ""));
+  // 模拟媒体解码报错：下一次重试不能反复命中同一坏缓存。
+  const firstText = rejected.requests[0];
+  await rejected.page.evaluate(() => audioElements[0].dispatchEvent(new Event("error")));
+  await rejected.page.waitForFunction(() => speechHarness.player.isPaused);
+  await rejected.page.evaluate(() => speechHarness.player.toggle());
+  await rejected.page.waitForFunction(() => speechHarness.player.isPlaying && !speechHarness.player.isBuffering && audioElements[0].currentTime > 0.1);
+  check("decode_error_evicts_the_clip_and_retry_fetches_fresh_audio", rejected.requests.filter(text => text === firstText).length === 2);
+  await rejected.page.evaluate(async () => {
+    const paused = new Promise(resolve => audioElements[0].addEventListener("pause", resolve, { once: true }));
+    speechHarness.player.toggle();
+    await paused;
+  });
+  await rejected.page.evaluate(() => { window.lateRejectNextClip = true; speechHarness.player.toggle(); });
+  await rejected.page.waitForTimeout(40);
+  await rejected.page.evaluate(() => { speechHarness.player.toggle(); speechHarness.player.toggle(); });
+  await rejected.page.waitForTimeout(350);
+  check("late_rejection_from_an_old_resume_does_not_stop_the_new_playback", await rejected.page.evaluate(() => speechHarness.player.isPlaying && !speechHarness.player.isPaused && !speechHarness.player.isBuffering && speechHarness.player.error === "" && !audioElements[0].paused));
+  check("media_error_path_has_no_browser_errors", rejected.errors.length === 0);
+  await rejected.context.close();
+
+  const frozen = await setup();
+  await frozen.page.evaluate(() => { window.freezeNextClip = true; });
+  await frozen.start();
+  await frozen.page.waitForFunction(() => speechHarness.player.isPaused && /未能开始播放/.test(speechHarness.player.error), { timeout: 11000 });
+  check("resolved_play_without_media_progress_returns_to_a_retryable_state", await frozen.page.evaluate(() => !speechHarness.player.isPlaying && !speechHarness.player.isBuffering && speechHarness.player.location !== null && window.spoken.length === 0));
+  await frozen.page.evaluate(() => speechHarness.player.toggle());
+  await frozen.page.waitForFunction(() => speechHarness.player.isPlaying && !speechHarness.player.isBuffering && audioElements[0].currentTime > 0.1);
+  check("silent_start_can_recover_using_the_same_cloud_voice", await frozen.page.evaluate(() => speechHarness.player.activeVoiceURI === "edge:zh-CN-YunjianNeural" && speechHarness.player.error === ""));
+  check("silent_start_has_no_browser_errors", frozen.errors.length === 0);
+  await frozen.context.close();
 
   const report = { passed: true, checks, realBook: "豆棚閒話 · Gutenberg #25328", transport: "actual Chromium MP3 playback; native HLS control flow uses MP3 stand-in", production_data_written: false };
   await mkdir(`${root}outputs/speech-chapter`, { recursive: true });

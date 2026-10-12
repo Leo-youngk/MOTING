@@ -73,12 +73,14 @@ interface SpeechPlayerState {
   sleepMode: SleepMode;
   /** 定时关闭到点的时刻（毫秒时间戳），播放页拿它倒计时；「本章结束后」和关闭时是 null。 */
   sleepDeadline: number | null;
-  /** 真正在出声的那个音色，已折算成具体音色；云端退回系统朗读时这里是系统音色。 */
+  /** 真正在出声的云端音色，已折算成具体音色。 */
   activeVoiceURI: string;
   /** 用户刚点、正在准备的音色。空串表示没有正在进行的切换。 */
   pendingVoiceURI: string;
   /** 切换失败的原因。原音色会继续播，用户可以重试。 */
   voiceError: string;
+  /** 在点击事件里先激活媒体元素，再异步读取正文。 */
+  preparePlayback: () => void;
   start: (bookId: string, position?: BookPosition) => void;
   toggle: () => void;
   stop: () => void;
@@ -98,40 +100,9 @@ interface SpeechPlayerState {
   recentVoiceURIs: string[];
 }
 
-const NATURAL_VOICE_PATTERN =
-  /natural|neural|premium|enhanced|online|siri|自然|在线/i;
-/**
- * 各平台公认好听的中文系统音色（取自 Readium Speech 的推荐表）：苹果的 Lilian、Yue、
- * Lili、Han，Edge 浏览器自带的 Xiaoxiao 等，Chrome 的 Google 普通话。
- */
-const RECOMMENDED_VOICE_PATTERN =
-  /lilian|\byue\b|\blili\b|\bhan\b|xiaoxiao|xiaoyi|yunxi|yunjian|yunyang|google 普通话/i;
-
-function voiceScore(voice: SpeechSynthesisVoice): number {
-  const lang = voice.lang.toLowerCase().replace(/_/g, "-");
-  let score = 0;
-  if (lang === "zh" || /^zh-(cn|hans|sg)/.test(lang) || /^cmn-cn/.test(lang)) score += 100;
-  else if (lang.startsWith("zh") || lang.startsWith("cmn")) score += 60;
-  // 苹果把「增强」「高级」写在 voiceURI 里（com.apple.voice.premium.zh-CN.Lili），名字里没有。
-  if (NATURAL_VOICE_PATTERN.test(`${voice.name} ${voice.voiceURI}`)) score += 30;
-  if (RECOMMENDED_VOICE_PATTERN.test(voice.name)) score += 20;
-  // 退回系统朗读多半是因为网不好，本机就能出声的更靠得住。
-  if (voice.localService) score += 10;
-  return score;
-}
-
-function isAndroid(): boolean {
-  return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
-}
-
-const CJK_CHARS_PER_SECOND = 5.2;
-const LATIN_CHARS_PER_SECOND = 15;
 const HIGHLIGHT_INTERVAL_MS = 100;
 /** 云端失败后先等这么久再试一次，大多是一时的网络抖动。 */
 const EDGE_RETRY_DELAY_MS = 1500;
-/** 退回系统朗读之后过多久再悄悄试云端；连着失败就翻倍，最多等这么久。 */
-const EDGE_COOLDOWN_MS = 30_000;
-const EDGE_MAX_COOLDOWN_MS = 5 * 60_000;
 /** 「本章结束后」停在换章前的静音里：拼接时章与章之间留了 1.8 秒，提前这么多秒停。 */
 const CHAPTER_STOP_LEAD_SECONDS = 1.5;
 const POSITION_STATE_INTERVAL_MS = 5000;
@@ -216,15 +187,6 @@ function reportLiveEvent(id: string, audio: HTMLAudioElement, type: string) {
 /** 面板打开时最多顺手准备几个音色。再多就是在替用户瞎猜，白烧合成次数。 */
 const MAX_VOICE_PREFETCH = 3;
 
-function estimateCharsPerSecond(text: string, rate: number): number {
-  const cjk = text.match(/[㐀-鿿]/g)?.length ?? 0;
-  const ratio = text.length ? cjk / text.length : 1;
-  return (
-    (ratio * CJK_CHARS_PER_SECOND + (1 - ratio) * LATIN_CHARS_PER_SECOND) *
-    Math.max(rate, 0.1)
-  );
-}
-
 function locationAfter(
   book: Book,
   chapterIndex: number,
@@ -305,15 +267,13 @@ function silentClipUrl(): string {
 interface PlayOptions {
   /**
    * 云端分段档位：起播、换音色、跳位置从 0 档（360 字）开始，出声快；接着往下读
-   * 一档档变长（1500 字、4800 字）。系统朗读不看这个。
+   * 一档档变长（1500 字、4800 字）。
    */
   tier?: SpeechTier;
   /** 交接用：音频从这一句对应的时间点开始放，而不是从整段开头。 */
   seekToSentence?: number;
-  /** 第几次尝试：云端失败先等一下再试一次，再失败才用系统声音顶上。 */
+  /** 第几次尝试：云端失败自动重试，始终使用同一云端音色。 */
   attempt?: number;
-  /** 这一段云端读不出来（文本本身的问题）：只这一段用系统声音，下一段照旧走云端。 */
-  system?: boolean;
 }
 
 export function useSpeechPlayer({
@@ -322,7 +282,7 @@ export function useSpeechPlayer({
   onProgress,
 }: SpeechPlayerOptions): SpeechPlayerState {
   // 设置里可能还存着已经下架的音色或者以前选过的系统语音（旧版本、别的设备同步来的），
-  // 一律按默认音色读。系统语音只在云端不可用时自动顶上。
+  // 一律按默认云端音色读；失败也不切换系统语音。
   const settings = useMemo(() => {
     const voiceURI = normalizeVoiceURI(rawSettings.voiceURI);
     return voiceURI === rawSettings.voiceURI ? rawSettings : { ...rawSettings, voiceURI };
@@ -335,7 +295,6 @@ export function useSpeechPlayer({
     }),
     [settings.speechReplacements]
   );
-  const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -357,24 +316,19 @@ export function useSpeechPlayer({
   /** 用户的意图：应该在出声。系统把音频停了（来电、Siri、拔耳机）会被同步成 false。 */
   const playingRef = useRef(false);
   const tokenRef = useRef(0);
-  const engineRef = useRef<SpeechEngine | "live" | null>(null);
+  const playAttemptRef = useRef(0);
+  const engineRef = useRef<"edge" | "live" | null>(null);
   const sleepModeRef = useRef<SleepMode>("off");
   const sleepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sleepDeadlineRef = useRef<number | null>(null);
   /** 「本章结束后」停在哪一章之后：目录里这一项的最后一章（续页算在内）。 */
   const sleepLastChapterRef = useRef(Number.POSITIVE_INFINITY);
-  const keepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const trackRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** 云端连着失败了几次；大于 0 就是在用系统声音顶着。 */
-  const edgeFailuresRef = useRef(0);
-  /** 冷却到这个时刻之后，系统朗读每读一块就顺手试一次云端。 */
-  const edgeRetryAtRef = useRef(0);
-  const edgeProbeRef = useRef(false);
   const positionStateAtRef = useRef(0);
   const listenCacheRef = useRef<{ chapters: Book["chapters"]; first: number; listen: ListenChapter } | null>(null);
   const segmentCacheRef = useRef(new Map<string, BookSpeechBlock | null>());
-  const blockedVoicesRef = useRef(new Set<string>());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const liveRef = useRef<{ bookId: string; plan: LivePlan; id: string; status: LiveStatus } | null>(null);
   const preparedLiveRef = useRef<{
@@ -445,27 +399,6 @@ export function useSpeechPlayer({
     onProgressRef.current = onProgress;
   }, [onProgress]);
 
-  useEffect(() => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    const update = () => {
-      setSystemVoices(
-        window.speechSynthesis
-          .getVoices()
-          .slice()
-          .sort(
-            (a, b) =>
-              voiceScore(b) - voiceScore(a) || a.name.localeCompare(b.name)
-          )
-      );
-    };
-    update();
-    window.speechSynthesis.addEventListener("voiceschanged", update);
-    return () => {
-      window.speechSynthesis.removeEventListener("voiceschanged", update);
-    };
-  }, []);
-
-  // 能选的只有云端音色；systemVoices 留着给云端断掉时自动顶上用。
   const voices: PlayerVoice[] = EDGE_VOICES;
 
   const clearTimers = useCallback(() => {
@@ -473,9 +406,9 @@ export function useSpeechPlayer({
       clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
     }
-    if (keepAliveRef.current) {
-      clearInterval(keepAliveRef.current);
-      keepAliveRef.current = null;
+    if (startupTimerRef.current) {
+      clearTimeout(startupTimerRef.current);
+      startupTimerRef.current = null;
     }
     if (trackRef.current) {
       clearInterval(trackRef.current);
@@ -516,11 +449,42 @@ export function useSpeechPlayer({
   const holdForResume = useCallback((message: string) => {
     playingRef.current = false;
     waitingForClipRef.current = false;
+    clearTimers();
+    abortRef.current?.abort();
+    audioRef.current?.pause();
     setIsPlaying(false);
     setIsPaused(true);
     setIsBuffering(false);
     setError(message);
-  }, []);
+  }, [clearTimers]);
+
+  /** play() 成功不代表媒体时钟开始走；无声卡住时保留位置、恢复可重试状态。 */
+  const watchPlayback = useCallback((audio: HTMLAudioElement, startAt = audio.currentTime) => {
+    if (startupTimerRef.current) clearTimeout(startupTimerRef.current);
+    const token = tokenRef.current;
+    const src = audio.src;
+    startupTimerRef.current = setTimeout(() => {
+      startupTimerRef.current = null;
+      if (token !== tokenRef.current || !playingRef.current || audio.src !== src) return;
+      if (!audio.ended && (audio.paused || audio.readyState < 2 || Math.abs(audio.currentTime - startAt) < 0.02)) {
+        holdForResume("云端音频未能开始播放，点播放重试");
+      }
+    }, 8000);
+  }, [holdForResume]);
+
+  const playAudio = useCallback((audio: HTMLAudioElement, message: string) => {
+    const token = tokenRef.current;
+    const attempt = ++playAttemptRef.current;
+    const src = audio.src;
+    audio.muted = false;
+    audio.volume = 1;
+    void audio.play().catch(() => {
+      // 旧 play() 可能在用户暂停、切章或再次恢复后才拒绝，不能把新播放也停掉。
+      if (attempt !== playAttemptRef.current || token !== tokenRef.current ||
+          audio.src !== src || !playingRef.current) return;
+      holdForResume(message);
+    });
+  }, [holdForResume]);
 
   const silenceAudio = useCallback(() => {
     const audio = audioRef.current;
@@ -537,6 +501,28 @@ export function useSpeechPlayer({
     audio.removeAttribute("src");
     audio.load();
   }, []);
+
+  const preparePlayback = useCallback(() => {
+    const audio = reusableAudio(audioRef);
+    audioRef.current = audio;
+    if (playingRef.current && !audio.paused) return;
+    audio.onended = null;
+    audio.onpause = null;
+    audio.onplay = null;
+    audio.onplaying = null;
+    audio.onerror = null;
+    audio.ontimeupdate = null;
+    playingClipRef.current = null;
+    waitingForClipRef.current = true;
+    audio.preload = "auto";
+    audio.muted = false;
+    audio.volume = 1;
+    audio.loop = true;
+    audio.src = silentClipUrl();
+    releaseClip();
+    // 这次调用只在点击事件中激活同一个元素；真正音频的播放结果由播放器处理。
+    void audio.play().catch(() => undefined);
+  }, [releaseClip]);
 
   /** 目录里这一章（续页并进来）的时长表，锁屏进度条和「拖到第几秒」共用。 */
   const listenFor = useCallback((book: Book, chapterIndex: number): ListenChapter => {
@@ -610,19 +596,6 @@ export function useSpeechPlayer({
     ).last;
   }, []);
 
-  /** 云端连不上：记一次失败，按次数翻倍冷却，冷却期间用系统声音。 */
-  const noteEdgeFailure = useCallback(() => {
-    edgeFailuresRef.current += 1;
-    edgeRetryAtRef.current =
-      Date.now() +
-      Math.min(EDGE_COOLDOWN_MS * 2 ** (edgeFailuresRef.current - 1), EDGE_MAX_COOLDOWN_MS);
-  }, []);
-
-  const noteEdgeSuccess = useCallback(() => {
-    edgeFailuresRef.current = 0;
-    edgeRetryAtRef.current = 0;
-  }, []);
-
   const stop = useCallback(() => {
     tokenRef.current += 1;
     playingRef.current = false;
@@ -639,9 +612,7 @@ export function useSpeechPlayer({
     liveRef.current = null;
     preparedLiveRef.current?.controller.abort();
     preparedLiveRef.current = null;
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
+
     // 定时关闭是「这一次收听」的设置，停了就该归零，不然换本书还会在原来的时间点断掉。
     clearSleep();
     // 迷你播放器是由 location 推出来的，不清掉就永远赖在书库上关不掉。
@@ -725,12 +696,12 @@ export function useSpeechPlayer({
       clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
     }
+    if (startupTimerRef.current) {
+      clearTimeout(startupTimerRef.current);
+      startupTimerRef.current = null;
+    }
     if (engine === "live") {
       audioRef.current?.pause();
-    } else if (engine === "system") {
-      const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
-      // 一块读完、下一块还没开始时不能 pause：有的浏览器会把下一次 speak 也挂住。
-      if (synth?.speaking && !synth.paused) synth.pause();
     } else {
       abortRef.current?.abort();
       cancelHandover();
@@ -783,21 +754,10 @@ export function useSpeechPlayer({
       }
 
       const chapter = book.chapters[chapterIndex];
-      const voiceURI = settingsRef.current.voiceURI;
-      const edgeVoice = !voiceURI || isEdgeVoiceURI(voiceURI);
       const tier = options.tier ?? 0;
       const attempt = options.attempt ?? 0;
-      // 云端失败过就先用系统声音顶着，系统朗读那边会顺手试云端；试通了、这一段的音频
-      // 也已经备好，就直接换回来。
-      let useEdge = edgeVoice && !options.system;
-      if (useEdge && edgeFailuresRef.current > 0) {
-        const probe = chapter ? segmentFor(book, chapterIndex, sentenceIndex, "edge", tier) : null;
-        if (probe && store.has(probe.text, edgeVoiceName(voiceURI))) noteEdgeSuccess();
-        else useEdge = false;
-      }
-      const selectedEngine: SpeechEngine = useEdge ? "edge" : "system";
       const segment = chapter
-        ? segmentFor(book, chapterIndex, sentenceIndex, selectedEngine, tier)
+        ? segmentFor(book, chapterIndex, sentenceIndex, "edge", tier)
         : null;
 
       if (!chapter || !segment) {
@@ -827,12 +787,8 @@ export function useSpeechPlayer({
       abortRef.current = null;
       // 这里刻意不清空 audio：把 src 摘掉等于告诉系统「这次播放结束了」，
       // 媒体会话一断，后台就再没资格起播下一段。真要换源时直接覆盖 src 即可。
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
-      // 已经退回系统朗读时要留着提示，否则读完一段就把「云端不可用」抹掉，
-      // 用户永远不知道音色为什么变了。
-      if (edgeFailuresRef.current === 0 && !options.system) setError("");
+
+      setError("");
 
       const applySpan = (span: SpeechSpan) => {
         if (token !== tokenRef.current) return;
@@ -862,141 +818,8 @@ export function useSpeechPlayer({
           return;
         }
         playAtRef.current?.(bookId, next.chapterIndex, next.sentenceIndex, {
-          tier: selectedEngine === "edge" ? nextTier(tier) : 0,
+          tier: nextTier(tier),
         });
-      };
-
-      const startSystem = () => {
-        if (
-          typeof window === "undefined" ||
-          !("speechSynthesis" in window) ||
-          typeof SpeechSynthesisUtterance === "undefined"
-        ) {
-          setError("当前浏览器没有提供系统朗读能力");
-          stop();
-          return;
-        }
-
-        engineRef.current = "system";
-        waitingForClipRef.current = false;
-        setIsBuffering(false);
-        // 系统朗读没有可跳的时间轴，段内快进这条路在这里必须断掉。
-        playingClipRef.current = null;
-        silenceAudio();
-        releaseClip();
-        const utterance = new SpeechSynthesisUtterance(segment.text);
-        const usableVoices = systemVoices.filter(
-          (voice) => !blockedVoicesRef.current.has(voice.voiceURI)
-        );
-        const selectedVoice =
-          usableVoices.find(
-            (voice) => voice.voiceURI === settingsRef.current.voiceURI
-          ) ??
-          usableVoices.find((voice) => voiceScore(voice) >= 100) ??
-          usableVoices.find((voice) => voiceScore(voice) >= 60);
-        if (selectedVoice) {
-          utterance.voice = selectedVoice;
-          utterance.lang = selectedVoice.lang;
-        } else {
-          utterance.lang = /[㐀-鿿]/.test(segment.text) ? "zh-CN" : "en-US";
-        }
-        utterance.rate = settingsRef.current.speechRate;
-        utterance.pitch = 1;
-        utterance.volume = 1;
-        // 退回系统朗读时这里必须报真实音色，不能还显示用户选的那个云端音色。
-        noteVoiceUsed(selectedVoice?.voiceURI ?? "");
-
-        let boundarySeen = false;
-
-        utterance.onboundary = (event) => {
-          if (token !== tokenRef.current) return;
-          boundarySeen = true;
-          if (trackRef.current) {
-            clearInterval(trackRef.current);
-            trackRef.current = null;
-          }
-          applySpan(spanAt(segment.spans, event.charIndex));
-          if (playingRef.current && sleepDue()) pauseForSleepRef.current(null);
-        };
-
-        utterance.onend = finishSegment;
-
-        utterance.onerror = (event) => {
-          if (token !== tokenRef.current) return;
-          if (event.error === "canceled" || event.error === "interrupted") return;
-          clearTimers();
-          // 在线神经音色断网时会报这几种错，把它拉黑后用本地音色重试一次，避免离线时完全不能听。
-          const recoverable =
-            event.error === "network" ||
-            event.error === "synthesis-failed" ||
-            event.error === "synthesis-unavailable";
-          if (recoverable && selectedVoice && !selectedVoice.localService) {
-            blockedVoicesRef.current.add(selectedVoice.voiceURI);
-            playAtRef.current?.(bookId, chapterIndex, sentenceIndex, { tier, attempt, system: options.system });
-            return;
-          }
-          holdForResume("系统朗读被中断了，点一下继续");
-        };
-
-        window.speechSynthesis.speak(utterance);
-
-        // 桌面 Chrome 的在线语音念到 15 秒左右会静默截断，定期 pause/resume 能续上。
-        // 安卓上 pause 等于直接结束，绝不能这么干；本地语音也没有这个毛病。
-        if (!isAndroid() && selectedVoice && !selectedVoice.localService) {
-          keepAliveRef.current = setInterval(() => {
-            if (token !== tokenRef.current) return;
-            // iOS 上 synth.paused 不可靠，只认我们自己记的状态，否则会把用户的暂停顶回去。
-            if (!playingRef.current) return;
-            const synth = window.speechSynthesis;
-            if (synth.speaking && !synth.paused) {
-              synth.pause();
-              synth.resume();
-            }
-          }, 10000);
-        }
-
-        // 云端失败、正用系统声音顶着：冷却到点后，每读一块就顺手试一下下一块的云端音频。
-        // 试通了，下一块直接换回云端（音频已经进了缓存，同步命中），用户只会听到声音变回来。
-        const after = segment.spans[segment.spans.length - 1];
-        const following = nextBookSentence(book, after.chapterIndex, after.sentenceIndex + 1);
-        if (
-          edgeVoice &&
-          !options.system &&
-          following &&
-          edgeFailuresRef.current > 0 &&
-          !edgeProbeRef.current &&
-          Date.now() >= edgeRetryAtRef.current
-        ) {
-          const probe = segmentFor(book, following.chapterIndex, following.sentenceIndex, "edge", 0);
-          if (probe) {
-            edgeProbeRef.current = true;
-            store
-              .request(probe.text, edgeVoiceName(voiceURI))
-              .then(() => {
-                noteEdgeSuccess();
-              })
-              .catch((reason: unknown) => {
-                if (!isAbortError(reason)) noteEdgeFailure();
-              })
-              .finally(() => {
-                edgeProbeRef.current = false;
-              });
-          }
-        }
-
-        // iOS Safari 不派发 boundary 事件，用朗读速度估算高亮位置，等真实事件到达后立刻交还控制权。
-        const charsPerSecond = estimateCharsPerSecond(
-          segment.text,
-          utterance.rate
-        );
-        let elapsed = 0;
-        trackRef.current = setInterval(() => {
-          if (token !== tokenRef.current || boundarySeen) return;
-          if (!playingRef.current || window.speechSynthesis.paused) return;
-          elapsed += HIGHLIGHT_INTERVAL_MS;
-          applySpan(spanAt(segment.spans, (elapsed / 1000) * charsPerSecond));
-          if (sleepDue()) pauseForSleepRef.current(null);
-        }, HIGHLIGHT_INTERVAL_MS);
       };
 
       const startEdge = () => {
@@ -1036,7 +859,15 @@ export function useSpeechPlayer({
           audio.onended = finishSegment;
           audio.onerror = () => {
             if (token !== tokenRef.current) return;
-            holdForResume("这一段没能播出来，点一下继续");
+            store.evict(segment.text, voiceName);
+            playingClipRef.current = null;
+            holdForResume("这一段云端音频没能播出来，点播放重试");
+          };
+          audio.onplaying = () => {
+            if (token !== tokenRef.current || !playingRef.current || audio.src !== clipUrlRef.current) return;
+            setIsBuffering(false);
+            setError("");
+            noteVoiceUsed(resolvedEdgeVoiceURI(settingsRef.current.voiceURI));
           };
           audio.onpause = syncSystemPause(audio);
           audio.onplay = () => {
@@ -1052,6 +883,8 @@ export function useSpeechPlayer({
           clipUrlRef.current = url;
           audio.src = url;
           if (previous) URL.revokeObjectURL(previous);
+          audio.preload = "auto";
+          audio.defaultPlaybackRate = settingsRef.current.speechRate;
           audio.playbackRate = settingsRef.current.speechRate;
 
           // 交接：从当前这句对应的时刻起播。src 刚换上时 currentTime 可能还写不进去，
@@ -1075,14 +908,11 @@ export function useSpeechPlayer({
           }
 
           waitingForClipRef.current = false;
-          setIsBuffering(false);
+          setIsBuffering(true);
           playingClipRef.current = { bookId, chapterIndex, segment, clip };
-          noteVoiceUsed(resolvedEdgeVoiceURI(settingsRef.current.voiceURI));
           setVoiceError("");
-          void audio.play().catch(() => {
-            if (token !== tokenRef.current) return;
-            holdForResume("播放被系统打断了，点一下继续");
-          });
+          watchPlayback(audio, seekSpan ? timeAt(clip.timeline, seekSpan.start) : 0);
+          playAudio(audio, "播放被系统打断了，点一下继续");
 
           const tick = () => {
             if (token !== tokenRef.current || audio.paused || !playingRef.current) return;
@@ -1139,9 +969,10 @@ export function useSpeechPlayer({
         waitingAudio.onpause = syncSystemPause(waitingAudio);
         waitingAudio.loop = true;
         waitingAudio.src = silentClipUrl();
+        playingClipRef.current = null;
         waitingForClipRef.current = true;
         setIsBuffering(true);
-        void waitingAudio.play().catch(() => undefined);
+        playAudio(waitingAudio, "播放未能启动，点播放重试");
 
         const controller = new AbortController();
         abortRef.current = controller;
@@ -1158,33 +989,21 @@ export function useSpeechPlayer({
           })
           .catch((reason: unknown) => {
             if (token !== tokenRef.current || !playingRef.current) return;
-            if (isAbortError(reason)) return;
+            if (isAbortError(reason) && controller.signal.aborted) return;
             const serviceDown =
               !(reason instanceof SpeechClipError) || reason.serviceDown;
-            if (serviceDown && attempt === 0) {
+            if (serviceDown && attempt < 2) {
               // 先别急着换声音：大多是一时的网络抖动。静音占位接着撑住会话，等一下再试一次。
               retryTimerRef.current = setTimeout(() => {
                 retryTimerRef.current = null;
                 if (token !== tokenRef.current || !playingRef.current) return;
-                playAtRef.current?.(bookId, chapterIndex, sentenceIndex, { ...options, attempt: 1 });
-              }, EDGE_RETRY_DELAY_MS);
+                playAtRef.current?.(bookId, chapterIndex, sentenceIndex, { ...options, attempt: attempt + 1 });
+              }, EDGE_RETRY_DELAY_MS * (attempt + 1));
               return;
             }
-            waitingForClipRef.current = false;
-            setIsBuffering(false);
-            // 云端批次远长于系统 utterance，必须按系统语音的小块重新定位，
-            // 不能把几千字直接塞进 SpeechSynthesisUtterance。
-            if (serviceDown) {
-              // 服务连不上：先用系统声音读，冷却后系统朗读那边会顺手试云端，通了自动换回。
-              noteEdgeFailure();
-              setError("云端语音暂时连不上，先用系统声音读，恢复后自动换回");
-              playAtRef.current?.(bookId, startSpan.chapterIndex, startSpan.sentenceIndex, { tier: 0 });
-            } else {
-              // 这一段文本本身读不出来：只这一块用系统声音读过去，下一段照旧走云端。
-              // 一句读不出来的字不能让后面整本书都变成机器音。
-              setError("这一段云端读不出来，先用系统声音读过去");
-              playAtRef.current?.(bookId, startSpan.chapterIndex, startSpan.sentenceIndex, { tier: 0, system: true });
-            }
+            holdForResume(serviceDown
+              ? "云端语音暂时连不上，点播放重试"
+              : "这一段云端音频暂时不可用，点播放重试");
           });
       };
 
@@ -1192,24 +1011,20 @@ export function useSpeechPlayer({
       setIsPlaying(true);
       setIsPaused(false);
 
-      if (useEdge) startEdge();
-      else startSystem();
+      startEdge();
     },
     [
       cancelHandover,
       clearTimers,
       commitSpan,
       holdForResume,
-      noteEdgeFailure,
-      noteEdgeSuccess,
       noteVoiceUsed,
-      releaseClip,
+      playAudio,
       segmentFor,
-      silenceAudio,
       stop,
       store,
-      systemVoices,
       updatePositionState,
+      watchPlayback,
     ]
   );
 
@@ -1234,15 +1049,6 @@ export function useSpeechPlayer({
       handoverAbortRef.current?.abort();
       handoverAbortRef.current = null;
       setVoiceError("");
-
-      const useEdge = edgeFailuresRef.current === 0 && (!voiceURI || isEdgeVoiceURI(voiceURI));
-      // 系统语音本地就能出声，没有可预合成的东西，直接重开这一段最快。
-      if (!useEdge) {
-        handoverPendingRef.current = false;
-        setPendingVoiceURI("");
-        playAt(at.bookId, at.chapterIndex, at.sentenceIndex, { tier: 0 });
-        return;
-      }
 
       const book = getBookRef.current(at.bookId);
       const chapter = book?.chapters[at.chapterIndex];
@@ -1401,11 +1207,6 @@ export function useSpeechPlayer({
     (book: Book, position: BookPosition, forPlayback = false) => {
       // 正在播的时候没什么可备的，接下一段自有 prefetchNext 管。
       if (!forPlayback && (playingRef.current || waitingForClipRef.current)) return;
-      // 云端连不上、正用系统声音顶着，备了也用不上。
-      if (edgeFailuresRef.current > 0) {
-        reportLiveClient("prewarm-failed", "edge-unavailable", false);
-        return;
-      }
       const voiceURI = settingsRef.current.voiceURI;
       if (voiceURI && !isEdgeVoiceURI(voiceURI)) {
         reportLiveClient("prewarm-failed", "unsupported-voice", false);
@@ -1485,7 +1286,6 @@ export function useSpeechPlayer({
     clearTimers();
     abortRef.current?.abort();
     cancelHandover();
-    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
     releaseClip();
     playingClipRef.current = null;
     // Reuse the element activated by the user's play gesture; a fresh element loses that grant on iOS.
@@ -1635,9 +1435,7 @@ export function useSpeechPlayer({
       if (playingRef.current && !audio.paused && Date.now() - lastAdvance > 12_000) fallback("stalled");
     }, 3000);
     // Called in the same user gesture as start(): Safari can activate native playback.
-    void audio.play().catch(() => {
-      if (liveRef.current === live) holdForResume("播放被系统拦下，点一下继续");
-    });
+    playAudio(audio, "播放被系统拦下，点一下继续");
     setTimeout(() => {
       if (liveRef.current !== live || !playingRef.current || started || document.visibilityState !== "visible") return;
       reportLiveEvent(id, audio, "error");
@@ -1646,7 +1444,7 @@ export function useSpeechPlayer({
       fallback("startup-timeout");
     }, 8000);
     return true;
-  }, [cancelHandover, clearTimers, commitSpan, holdForResume, noteVoiceUsed, releaseClip, stop, updatePositionState]);
+  }, [cancelHandover, clearTimers, commitSpan, noteVoiceUsed, playAudio, releaseClip, stop, updatePositionState]);
 
   useEffect(() => {
     promoteLiveRef.current = (prepared) => {
@@ -1694,10 +1492,6 @@ export function useSpeechPlayer({
     (bookId: string, position?: BookPosition) => {
       const book = getBookRef.current(bookId);
       if (!book) return;
-      // 用户主动开播时再给云端一次机会，之前的失败可能只是临时断网。
-      noteEdgeSuccess();
-      // 拉黑的系统音色多半也是那次断网连累的，一起放出来重试。
-      blockedVoicesRef.current.clear();
       cancelHandover();
       setVoiceError("");
       const nextPosition =
@@ -1713,7 +1507,7 @@ export function useSpeechPlayer({
         !!document.createElement("audio").canPlayType("application/vnd.apple.mpegurl"));
       playAt(bookId, nextPosition.chapterIndex, nextPosition.sentenceIndex, { tier: 0 });
     },
-    [cancelHandover, noteEdgeSuccess, playAt, prefetchStart, retargetSleepChapter, startLive]
+    [cancelHandover, playAt, prefetchStart, retargetSleepChapter, startLive]
   );
 
   const toggle = useCallback(() => {
@@ -1740,7 +1534,7 @@ export function useSpeechPlayer({
       setIsPlaying(true);
       setIsPaused(false);
       setError("");
-      void audio.play().catch(() => holdForResume("播放被系统拦下，点一下继续"));
+      playAudio(audio, "播放被系统拦下，点一下继续");
       updatePositionState();
       return;
     }
@@ -1760,12 +1554,14 @@ export function useSpeechPlayer({
         playAt(current.bookId, current.chapterIndex, current.sentenceIndex, { tier: 0 });
         return;
       }
-      if (audio?.src && !audio.ended) {
+      if (audio && playingClipRef.current && audio.src === clipUrlRef.current && !audio.error && !audio.ended) {
         playingRef.current = true;
         setIsPlaying(true);
         setIsPaused(false);
+        setIsBuffering(true);
         setError("");
-        void audio.play().catch(() => holdForResume("播放被系统打断了，点一下继续"));
+        watchPlayback(audio);
+        playAudio(audio, "播放被系统打断了，点一下继续");
         updatePositionState();
         const prepared = preparedLiveRef.current;
         if (prepared?.status?.ready) promoteLiveRef.current(prepared);
@@ -1775,39 +1571,11 @@ export function useSpeechPlayer({
       return;
     }
 
-    if (engineRef.current === "system") {
-      // 用户亲手点继续：之前的云端失败可能只是一时断网，换回云端试试。
-      if (voiceChanged || edgeFailuresRef.current > 0) {
-        if (edgeFailuresRef.current > 0) {
-          noteEdgeSuccess();
-          window.speechSynthesis.cancel();
-        }
-        playAt(current.bookId, current.chapterIndex, current.sentenceIndex, { tier: 0 });
-        return;
-      }
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-        playingRef.current = true;
-        setIsPlaying(true);
-        setIsPaused(false);
-      } else if (window.speechSynthesis.speaking) {
-        window.speechSynthesis.pause();
-        // 这行不能漏：保活定时器和 finishSegment 都拿 playingRef 当闸门，
-        // 留着 true 的话 iOS 上十秒内会自己 resume 回去，或者偷偷跳到下一段。
-        playingRef.current = false;
-        setIsPaused(true);
-        setIsPlaying(false);
-      } else {
-        playAt(current.bookId, current.chapterIndex, current.sentenceIndex, { tier: 0 });
-      }
-      return;
-    }
-
     // 没有加载着的音频（停止过、暂停时跳到了别处）：从记下的位置重新起播，
     // 跟点播放键一样先试连续音频，顺便再给云端一次机会。
     const book = getBookRef.current(current.bookId);
     if (book) start(book.id, positionFor(book, current.chapterIndex, current.sentenceIndex));
-  }, [holdForResume, noteEdgeSuccess, pause, playAt, start, updatePositionState]);
+  }, [pause, playAt, playAudio, start, updatePositionState, watchPlayback]);
 
   /**
    * 目标句还在已经加载的音频里（连续音频已经合成的部分、正在放的这段云端音频）就直接改时间轴。
@@ -1880,7 +1648,6 @@ export function useSpeechPlayer({
         playingClipRef.current = null;
         waitingForClipRef.current = false;
         engineRef.current = null;
-        if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
         commitCursor(book, cursor);
         return;
       }
@@ -2048,16 +1815,14 @@ export function useSpeechPlayer({
       liveRef.current = null;
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
-      if (keepAliveRef.current) clearInterval(keepAliveRef.current);
+      if (startupTimerRef.current) clearTimeout(startupTimerRef.current);
       if (trackRef.current) clearInterval(trackRef.current);
       abortRef.current?.abort();
       handoverAbortRef.current?.abort();
       preparedLiveRef.current?.controller.abort();
       audioRef.current?.pause();
       if (clipUrlRef.current) URL.revokeObjectURL(clipUrlRef.current);
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
+
     },
     []
   );
@@ -2184,6 +1949,7 @@ export function useSpeechPlayer({
     activeVoiceURI,
     pendingVoiceURI,
     voiceError,
+    preparePlayback,
     start,
     toggle,
     stop,

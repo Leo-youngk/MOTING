@@ -93,6 +93,41 @@ test("所有消费者都撤了就把请求掐掉", async () => {
   assert.equal(fake.calls[0].signal.aborted, true, "没人等了就该断掉上游请求");
 });
 
+test("取消后同一拍重播不能复用已取消请求，旧请求结束也不能摘掉新请求", async () => {
+  const fake = recorder();
+  const store = new SpeechClipStore(fake.fetcher);
+  const controller = new AbortController();
+  const first = store.request("原地重播", "云健", {
+    priority: true, signal: controller.signal,
+  }).catch(() => "cancelled");
+  await tick();
+  controller.abort();
+  const second = store.request("原地重播", "云健", { priority: true }).catch(() => null);
+  await tick();
+  assert.equal(await first, "cancelled");
+  assert.equal(fake.calls.length, 2, "立即重播必须发起新请求");
+  const joined = store.request("原地重播", "云健", { priority: true });
+  await tick();
+  assert.equal(fake.calls.length, 2, "旧请求清理不能删掉仍在进行的新请求");
+  const result = clip(64);
+  fake.settle[1](result);
+  assert.equal(await second, result);
+  assert.equal(await joined, result);
+});
+
+test("cancelPending 后马上播放同一段会重新合成", async () => {
+  const fake = recorder();
+  const store = new SpeechClipStore(fake.fetcher);
+  store.prefetch("准备中的首段", "云健");
+  await tick();
+  store.cancelPending();
+  const playing = store.request("准备中的首段", "云健", { priority: true }).catch(() => null);
+  await tick();
+  assert.equal(fake.calls.length, 2);
+  fake.settle[1](clip(64));
+  assert.ok(await playing);
+});
+
 test("预取排队，正在播放的请求不排队", async () => {
   const fake = recorder();
   const store = new SpeechClipStore(fake.fetcher, 1024 * 1024, 2);

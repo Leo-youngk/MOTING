@@ -17,7 +17,7 @@ test("PWA manifest 包含独立模式和完整图标", async () => {
   assert.ok(manifest.icons.some((icon) => icon.purpose === "maskable"));
 });
 
-test("离线外壳、系统语音和本地存储入口存在", async () => {
+test("离线外壳、云端语音和本地存储入口存在", async () => {
   const [serviceWorker, updateHook, speech, storage, app] = await Promise.all([
     readFile(new URL("public/sw.js", root), "utf8"),
     readFile(new URL("hooks/use-app-update.ts", root), "utf8"),
@@ -31,7 +31,7 @@ test("离线外壳、系统语音和本地存储入口存在", async () => {
   assert.match(serviceWorker, /保留旧哈希资源/);
   assert.match(serviceWorker, /type: "shell-expired"/);
   assert.match(updateHook, /data\?\.type === "shell-expired"/);
-  assert.match(speech, /SpeechSynthesisUtterance/);
+  assert.doesNotMatch(speech, /speechSynthesis|SpeechSynthesisUtterance/);
   assert.match(speech, /sleepModeRef/);
   assert.match(storage, /indexedDB\.open/);
   assert.match(app, /name: "listen"/);
