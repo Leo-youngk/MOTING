@@ -471,3 +471,15 @@ y < 440 一律只返回 `<p>` 且 offset 恒为 0。
 验证：类型检查、ESLint、生产构建、326 项单元/契约测试、Workers 发布包 dry-run；52 项浏览器检查采用《豆棚閒話》真实文本和 Chromium 实际 MP3 解码，覆盖首页异步起播、准备中暂停后立即恢复、云端连续失败后手动重试、播放授权拒绝、延迟播放失败、解码缓存失效和无声起播恢复，并保留跨章节、睡眠定时、系统打断、HLS 默认关闭的回归。
 
 浏览器测试拦截 TTS 接口返回构造的 MP3，校验请求仍使用 `zh-CN-YunjianNeural`；原生 HLS 路径用 MP3 替身。真机 iPhone 和生产云端合成未在本轮验证。
+
+
+## 2026-10-13：发布验收与微软云端接口迁移
+
+PR #28 发布后的实际云端验收发现，旧 `speech.platform.bing.com` 合成接口持续返回握手 403，播放器正确提示云端失败，但无法得到新音频。对照 Readest 当前微软接口实现，将服务地址迁移到 `api.msedgeservices.com/tts/cognitiveservices/websocket/v1`，查询参数使用 `Ocp-Apim-Subscription-Key`，补齐 WebSocket 版本头；语音元数据开关采用 JSON 布尔值。音色仍为 `zh-CN-YunjianNeural`。
+
+- 326 项自动测试、类型检查、改动文件 ESLint、生产构建通过；增加现代接口地址、参数、握手头和元数据类型的契约断言。
+- 线上短句：HTTP 200，返回 24,665 字节；客户端解析出有效 MP3 和 11 个时间轴边界；FFmpeg 成功解码约 4 秒音频，平均音量 -22 dB，确认不是静音占位。
+- 线上《豆棚閒話》360 字首段：HTTP 200，返回 490,044 字节，冷请求耗时 8.33 秒；通过客户端 MP3/时间轴解析与 FFmpeg 解码。
+- 正式 Worker 版本：`cb974a92-af22-4299-9e0b-fcba473f7f4e`。iPhone 真机锁屏仍未在本环境验证。
+
+参考实现：https://github.com/readest/readest/blob/main/apps/readest-app/src/libs/edgeTTS.ts

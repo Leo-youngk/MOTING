@@ -183,9 +183,10 @@ async function synthesizeOnce(
   onAudio?: (audio: Uint8Array) => void | Promise<void>
 ): Promise<SynthesisResult> {
   const connectionId = crypto.randomUUID().replace(/-/g, "");
+  // 微软已迁移 Edge 朗读接口；旧 Bing 地址即使 token 正确也会返回 403。
   const url =
-    "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1" +
-    `?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}` +
+    "https://api.msedgeservices.com/tts/cognitiveservices/websocket/v1" +
+    `?Ocp-Apim-Subscription-Key=${TRUSTED_CLIENT_TOKEN}` +
     `&Sec-MS-GEC=${await securityToken()}` +
     `&Sec-MS-GEC-Version=1-${version}` +
     `&ConnectionId=${connectionId}`;
@@ -193,6 +194,7 @@ async function synthesizeOnce(
   const response = await fetch(url, {
     headers: {
       Upgrade: "websocket",
+      "Sec-WebSocket-Version": "13",
       Origin: ORIGIN,
       "User-Agent": userAgentFor(version),
       "Accept-Language": "en-US,en;q=0.9",
@@ -324,7 +326,7 @@ async function synthesizeOnce(
         "Content-Type:application/json; charset=utf-8\r\n" +
         "Path:speech.config\r\n\r\n" +
         '{"context":{"synthesis":{"audio":{"metadataoptions":' +
-        '{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},' +
+        '{"sentenceBoundaryEnabled":false,"wordBoundaryEnabled":true},' +
         '"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}'
     );
 
