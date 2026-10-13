@@ -93,7 +93,7 @@ function AccessKeyManager() {
       setNotice(`${label}已复制`);
     } catch { setError("无法使用剪贴板，请长按文本手动复制"); }
   };
-  const instructions = `墨听只读 API\n基础地址：${base}\n鉴权：Authorization: Bearer <你的专用密钥>\nOpenAPI：${base}/openapi.json\nGET /books：书名与作者\nGET /notes：划线和想法（thoughtsOnly=true 只读想法）\nGET /chats：对话目录\nGET /chats/{bookId}：分页读取原始提问、回答和引用\n列表支持 bookId、q、updatedSince、limit、cursor。遍历到 nextCursor=null，空页有游标也须继续，并保留筛选条件。跨句划线按 bookId、groupId 合并。只读取已同步数据；不要将密钥写到 URL 或日志。`;
+  const instructions = `墨听只读 API\n基础地址：${base}\n鉴权：Authorization: Bearer <你的专用密钥>\n客户端标识：User-Agent: Moting-Grok-Bot/1.0\nOpenAPI：${base}/openapi.json\nGET /books：书名与作者\nGET /notes：划线和想法（thoughtsOnly=true 只读想法）\nGET /chats：对话目录\nGET /chats/{bookId}：分页读取原始提问、回答和引用\n列表支持 bookId、q、updatedSince、limit、cursor。遍历到 nextCursor=null，空页有游标也须继续，并保留筛选条件。跨句划线按 bookId、groupId 合并。只读取已同步数据；不要将密钥写到 URL 或日志。`;
 
   return <>
     <section className="settings-section">

@@ -6,6 +6,8 @@
 
 鉴权请求头：`Authorization: Bearer <你的专用密钥>`。密钥不要写入 URL、源代码、聊天提示词或日志；使用 Bot 的环境变量/凭据存储。
 
+建议请求头加 `User-Agent: Moting-Grok-Bot/1.0`。本次线上验证发现 Python urllib 的默认标识收到 Cloudflare 403 / 1010，使用明确的客户端标识可正常访问。该错误属于 [Cloudflare 浏览器完整性检查](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/)；下方示例已带客户端标识。
+
 公开 [OpenAPI 3.1 文档](https://moting-reader.if5v.workers.dev/api/knowledge/v1/openapi.json) 可用于生成 HTTP 工具。接口全为 GET。
 
 | 路径 | 内容 |
@@ -46,7 +48,11 @@ def read(path, **params):
     query = urlencode({k: v for k, v in params.items() if v is not None})
     request = Request(
         BASE + path + ("?" + query if query else ""),
-        headers={"Authorization": "Bearer " + os.environ["MOTING_READ_TOKEN"]},
+        headers={
+            "Authorization": "Bearer " + os.environ["MOTING_READ_TOKEN"],
+            "User-Agent": "Moting-Grok-Bot/1.0",
+            "Accept": "application/json",
+        },
     )
     with urlopen(request, timeout=30) as response:
         return json.load(response)

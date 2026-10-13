@@ -6,7 +6,8 @@ const version = { type: "integer", format: "int64", description: "云端单调�
 const nextCursor = { type: ["string", "null"], description: "null 表示遍历完成；即使 data 为空，只要有游标仍须继续。下一页保留全部筛选参数。" };
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const parameter = (name: string, schema: object, description: string) => ({ name, in: "query", schema, description });
-const paging = [parameter("limit", { type: "integer", minimum: 1, maximum: 100, default: 50 }, "每页最多扫描/返回的记录数"), parameter("cursor", string, "上一页返回的不透明 nextCursor")];
+const paging = [{ name: "User-Agent", in: "header", schema: { type: "string", default: "Moting-Grok-Bot/1.0" }, description: "明确的客户端标识；Python urllib 默认标识可能被 Cloudflare 1010 拒绝" },
+  parameter("limit", { type: "integer", minimum: 1, maximum: 100, default: 50 }, "每页最多扫描/返回的记录数"), parameter("cursor", string, "上一页返回的不透明 nextCursor")];
 const filters = [parameter("bookId", string, "仅查询这本书"), parameter("q", { type: "string", maxLength: 200 }, "不区分大小写的文字关键词，支持中文"), parameter("updatedSince", timestamp, "仅返回 updatedAt 严格大于此值的已存在记录；不包含删除通知，缓存应定期全量重建")];
 const errors = Object.fromEntries([400, 401, 404, 409, 503].map((status) => [status, { description: status === 401 ? "Bearer Token 缺失、无效、到期或已撤销" : "参数错误、资源缺失、对话更新或存储暂不可用", content: { "application/json": { schema: ref("Error") } } }]));
 const response = (schema: object) => ({ "200": { description: "已同步的真实数据", content: { "application/json": { schema } } }, ...errors });
