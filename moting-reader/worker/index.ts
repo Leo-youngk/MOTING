@@ -8,6 +8,7 @@ import { synthesizeSpeech } from "./edge-tts";
 import { processLiveHlsJob, type LiveHlsJob } from "./live-hls";
 import { SpeechBatchError, synthesizeBatch } from "./speech";
 import { forwardSync, handleSync } from "./sync";
+import { handleKnowledgeApi } from "./knowledge-api";
 import { handleWeread } from "./weread";
 import { handleZlibrary } from "./zlibrary";
 
@@ -423,6 +424,9 @@ const worker = {
     ctx: ExecutionContext
   ): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    if (pathname === "/api/knowledge/v1" || pathname.startsWith("/api/knowledge/v1/")) {
+      return env.SYNC_UPSTREAM ? forwardSync(request, env.SYNC_UPSTREAM) : handleKnowledgeApi(request, env);
+    }
     if (pathname.startsWith("/api/weread/")) return handleWeread(request, env, ctx);
     if (pathname.startsWith("/api/zlibrary/")) return handleZlibrary(request);
     if (pathname.startsWith("/api/sync/")) {

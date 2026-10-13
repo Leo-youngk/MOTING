@@ -1,0 +1,85 @@
+{
+  "unit_tests": {
+    "tests": 338,
+    "passed": 338,
+    "failed": 0,
+    "new_api_regressions": 12
+  },
+  "typecheck": "passed",
+  "changed_file_eslint": "passed",
+  "production_build": "passed",
+  "cloudflare_dry_run": "passed",
+  "browser": {
+    "checks": {
+      "未登录提示同步授权": true,
+      "本地会话登录": true,
+      "大对话写入隔离 R2": true,
+      "真实同步协议写入测试书和笔记": true,
+      "手机界面创建专用密钥": true,
+      "密钥复制反馈": true,
+      "保存后收起密钥原文": true,
+      "手机无横向溢出": true,
+      "接入说明复制反馈": true,
+      "真实 HTTP 不缓存内容": true,
+      "HTTP 获取书名作者": true,
+      "105 条笔记跨页无遗漏重复": true,
+      "章节和想法返回": true,
+      "R2 对话关键词检索": true,
+      "真实 HTTP 引用返回": true,
+      "真实 R2 长回答完整": true,
+      "同步 Cookie 不能读取 Bot API": true,
+      "Bot API 禁止写入": true,
+      "密钥列表不含密钥原文": true,
+      "密钥不存入浏览器持久设置": true,
+      "手机界面撤销密钥立即生效": true,
+      "离开重进不再展示密钥原文": true,
+      "页面无脚本异常": true
+    },
+    "page_errors": [],
+    "viewport": {
+      "width": 390,
+      "height": 844
+    },
+    "r2_chat_bytes": 2520247,
+    "production_data_written": false
+  },
+  "backup": {
+    "bytes": 1103769,
+    "sha256": "f449709d37fb1cb5871501c1d1b5acbd81192061f726387511e13248b0b56d4f",
+    "integrity": "ok",
+    "counts": {
+      "books": 39,
+      "notes": 418,
+      "chats": 19,
+      "settings": 2
+    }
+  },
+  "migration": {
+    "before": {
+      "books": 39,
+      "notes": 418,
+      "chats": 19,
+      "settings": 2
+    },
+    "after": {
+      "books": 39,
+      "notes": 418,
+      "chats": 19,
+      "settings": 2
+    },
+    "columns": [
+      "id",
+      "name",
+      "token_hash",
+      "token_prefix",
+      "created_at",
+      "expires_at",
+      "revoked_at",
+      "last_used_at"
+    ],
+    "content_counts_unchanged": true
+  },
+  "credential_scan": "passed",
+  "production_test_content_written": false,
+  "deployment": "pending"
+}

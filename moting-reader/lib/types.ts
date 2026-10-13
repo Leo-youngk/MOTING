@@ -5,7 +5,7 @@ export type BookStatus = "ready" | "parsing" | "error";
 export type MainView = "home" | "library" | "listen" | "notes";
 
 /** 设置的二级页。不带就是设置首页。 */
-export type SettingsSection = "ai" | "voice" | "speed" | "theme" | "font" | "sync" | "library";
+export type SettingsSection = "ai" | "api" | "voice" | "speed" | "theme" | "font" | "sync" | "library";
 
 export type AppView =
   | { name: MainView }

@@ -13,6 +13,7 @@ import {
   EyeOff,
   Gauge,
   Headphones,
+  KeyRound,
   Library,
   LoaderCircle,
   RefreshCw,
@@ -46,6 +47,7 @@ import type {
 } from "../lib/types";
 import { Modal } from "./sheet";
 import { SoftRange } from "./soft-range";
+import { KnowledgeAccessSettings } from "./knowledge-access-settings";
 import "./settings-screen.css";
 import type { QueuedProgress } from "../lib/sync-progress";
 
@@ -316,6 +318,13 @@ export function SettingsScreen({
         ? "同步中"
         : "已登录"
       : "未登录";
+
+  if (section === "api") {
+    return <div className="settings-screen">
+      <PageBar title="AI 数据接口" subtitle="划线、想法与对话的只读授权" onBack={onBack} />
+      <KnowledgeAccessSettings sync={sync} onOpenSync={() => onOpen("sync")} onSyncNow={onSyncNow} />
+    </div>;
+  }
 
   if (section === "voice") {
     return (
@@ -609,6 +618,13 @@ export function SettingsScreen({
               detail="模型与接口配置"
               value={aiReady ? settings.aiModel : "未配置"}
               onClick={() => onOpen("ai")}
+            />
+            <LinkRow
+              icon={<KeyRound size={24} strokeWidth={1.7} />}
+              label="AI 数据接口"
+              detail="让 Bot 读取划线、想法和对话"
+              value="只读授权"
+              onClick={() => onOpen("api")}
             />
             <LinkRow
               icon={<Cloud size={24} strokeWidth={1.7} />}
