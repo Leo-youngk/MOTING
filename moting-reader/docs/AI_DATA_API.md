@@ -91,3 +91,5 @@ conversations = list(list_all("/chats"))
 增量迁移 `worker/migrations/0002_knowledge_api.sql` 新建密钥表与查询索引，不改动现有内容。密钥管理位于 `/api/sync/access-keys` 和 `/api/sync/access-keys/{id}/revoke`，受现有 HttpOnly 同步会话与同源检查保护。
 
 主、旧两个 Worker 均需部署；旧入口代理新增 `/api/knowledge/v1/*`，透传 Bearer Token。研发验证使用 `tests/knowledge-api.test.ts` 的真 SQLite SQL 回归和隔离本地 D1/R2 HTTP 验收。验证与部署证据记录在 `docs/knowledge-api-2026-10-13/validation.json`。
+
+2026-10-13 已合并 [PR #30](https://github.com/Leo-youngk/MOTING/pull/30) 并双域上线，后续资源优化构建为 `73877ce`。339 项单测、类型检查、受影响 ESLint 和 23 项本地 HTTP/移动界面验收通过。主、旧入口分别完整读到 38 本现存书目、418 条笔记、19 个对话/18,613 条轮次，校验密钥撤销后都返回 401。生产未写测试书籍、笔记或对话。

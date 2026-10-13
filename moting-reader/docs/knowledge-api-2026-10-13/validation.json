@@ -1,9 +1,9 @@
 {
   "unit_tests": {
-    "tests": 338,
-    "passed": 338,
+    "tests": 339,
+    "passed": 339,
     "failed": 0,
-    "new_api_regressions": 12
+    "new_api_regressions": 13
   },
   "typecheck": "passed",
   "changed_file_eslint": "passed",
@@ -81,5 +81,119 @@
   },
   "credential_scan": "passed",
   "production_test_content_written": false,
-  "deployment": "pending"
+  "production": {
+    "sites": {
+      "primary": {
+        "url": "https://moting-reader.if5v.workers.dev",
+        "openapi_status": 200,
+        "anonymous_status": 401,
+        "info": {
+          "name": "墨听 AI 数据接口",
+          "version": "1.0.0",
+          "build": "73877ce",
+          "scope": "knowledge:read",
+          "resources": [
+            "books",
+            "notes",
+            "chats"
+          ],
+          "syncedOnly": true,
+          "openapi": "/api/knowledge/v1/openapi.json"
+        },
+        "resources": {
+          "books": {
+            "status": 200,
+            "first_page_count": 38,
+            "has_more": false,
+            "total_count": 38,
+            "pages": 1
+          },
+          "notes": {
+            "status": 200,
+            "first_page_count": 100,
+            "has_more": true,
+            "total_count": 418,
+            "pages": 5
+          },
+          "chats": {
+            "status": 200,
+            "first_page_count": 16,
+            "has_more": true,
+            "total_count": 19,
+            "pages": 2
+          },
+          "chat_detail": {
+            "all_conversations_read": 19,
+            "total_turns": 18613
+          }
+        }
+      },
+      "legacy": {
+        "url": "https://moting-reader.yk2958374240.workers.dev",
+        "openapi_status": 200,
+        "anonymous_status": 401,
+        "info": {
+          "name": "墨听 AI 数据接口",
+          "version": "1.0.0",
+          "build": "73877ce",
+          "scope": "knowledge:read",
+          "resources": [
+            "books",
+            "notes",
+            "chats"
+          ],
+          "syncedOnly": true,
+          "openapi": "/api/knowledge/v1/openapi.json"
+        },
+        "resources": {
+          "books": {
+            "status": 200,
+            "first_page_count": 38,
+            "has_more": false,
+            "total_count": 38,
+            "pages": 1
+          },
+          "notes": {
+            "status": 200,
+            "first_page_count": 100,
+            "has_more": true,
+            "total_count": 418,
+            "pages": 5
+          },
+          "chats": {
+            "status": 200,
+            "first_page_count": 16,
+            "has_more": true,
+            "total_count": 19,
+            "pages": 2
+          },
+          "chat_detail": {
+            "all_conversations_read": 19,
+            "total_turns": 18613
+          }
+        }
+      }
+    },
+    "production_test_content_written": false,
+    "test_key_revoked": true,
+    "content_counts_unchanged": true
+  },
+  "deployed_code_commit": "73877cea7a3a03e3d9968cd5613f174410a77957",
+  "public_checks": {
+    "https://moting-reader.if5v.workers.dev": {
+      "build": "73877ce",
+      "manifest_matches_build": true,
+      "openapi_client_header": true
+    },
+    "https://moting-reader.yk2958374240.workers.dev": {
+      "build": "73877ce",
+      "manifest_matches_build": true,
+      "openapi_client_header": true
+    }
+  },
+  "resource_limit_regression": {
+    "before": "Cloudflare 1102 on long chat continuation",
+    "after": "8 consecutive HTTP 200 responses on the same page",
+    "cache_budget_bytes": 12582912
+  }
 }
