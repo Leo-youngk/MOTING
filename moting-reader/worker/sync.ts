@@ -3,6 +3,7 @@ import { APP_BUILD, SYNC_PROTOCOL } from "../lib/build-info.ts";
 import { handleLiveHls } from "./live-hls.ts";
 import { handleHls } from "./hls.ts";
 import { synthesizeSpeech } from "./edge-tts.ts";
+import { handleKnowledgeKeys } from "./knowledge-keys.ts";
 // 云端同步服务端:登录会话 + 记录级 LWW 增量同步 + R2 正文/插图存取。
 // 合并语义:所有记录按客户端声明的 updated_at 比较,新者胜;删除走墓碑。
 // 没有任何「整库覆盖」路径——手机首次同步是上传,另一台设备首次同步是拉取合并。
@@ -501,6 +502,13 @@ export async function handleSync(request: Request, env: SyncEnv, ctx?: Execution
     }
 
     const resolved = resolve(env);
+    if (action === "access-keys" || action.startsWith("access-keys/")) {
+      const session = await checkSession(request, resolved.store);
+      if (!session.ok) return json({ error: "请先登录同步账号" }, 401);
+      const response = await handleKnowledgeKeys(request, env.DB);
+      if (session.cookie) response.headers.set("set-cookie", session.cookie);
+      return response;
+    }
     if (request.method === "GET" && action === "version") {
       const session = await checkSession(request, resolved.store);
       if (!session.ok) return json({ error: "请先登录同步账号" }, 401);
@@ -558,6 +566,8 @@ export async function handleSync(request: Request, env: SyncEnv, ctx?: Execution
  */
 export async function forwardSync(request: Request, upstream: string): Promise<Response> {
   const url = new URL(request.url);
+  const origin = request.headers.get("origin");
+  if (url.pathname.startsWith("/api/sync/") && origin && origin !== url.origin) return json({ error: "不允许跨站请求" }, 403);
   let target: URL;
   try {
     target = new URL(url.pathname + url.search, upstream);
@@ -565,7 +575,7 @@ export async function forwardSync(request: Request, upstream: string): Promise<R
     return json({ error: "同步服务配置无效" }, 502);
   }
   const headers = new Headers();
-  for (const name of ["content-type", "cookie", "content-length"]) {
+  for (const name of ["content-type", "cookie", "content-length", "authorization"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
@@ -587,8 +597,10 @@ export async function forwardSync(request: Request, upstream: string): Promise<R
     status: response.status,
     headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
   });
-  const contentType = response.headers.get("content-type");
-  if (contentType) out.headers.set("content-type", contentType);
+  for (const name of ["content-type", "www-authenticate", "allow"]) {
+    const value = response.headers.get(name);
+    if (value) out.headers.set(name, value);
+  }
   const setCookie = response.headers.get("set-cookie");
   if (setCookie) out.headers.set("set-cookie", setCookie);
   return out;

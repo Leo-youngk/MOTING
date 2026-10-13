@@ -8,6 +8,39 @@
   background: var(--paper);
 }
 
+.knowledge-access-text {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: 12px;
+  margin: 12px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-callout);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  resize: vertical;
+}
+
+.knowledge-access-key {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.knowledge-access-key > div { min-width: 0; }
+.knowledge-access-key strong { overflow-wrap: anywhere; font-size: var(--text-base); }
+.knowledge-access-key small { display: block; margin-top: 6px; color: var(--muted); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.knowledge-access-revoke { flex-shrink: 0; color: var(--danger); }
+.settings-input select { width: 100%; min-height: 44px; color: var(--ink); font-size: var(--text-callout); background: transparent; }
+
 /* 顶栏：返回、居中标题（可带一行小字）、右边的小熊。浮在内容上面，所以是玻璃。 */
 .page-bar {
   position: sticky;
