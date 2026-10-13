@@ -191,6 +191,32 @@ test("参数验证拒绝越界、跨资源游标、重复参数和注入；查�
   s.sql.close();
 });
 
+test("大对话按 R2 对象版本复用，版本改变和对象消失仍拒绝读取旧内容", async () => {
+  const s = setup(); s.book("versioned-chat", 1);
+  const source = JSON.stringify({ turns: [{ role: "user", content: "缓存校验的问题" }, { role: "assistant", content: "完整回答。".repeat(30000) }] });
+  const hash = await recordHash(source);
+  s.chat("versioned-chat", 2, STORED_BLOB_PREFIX + JSON.stringify({ hash, bytes: utf8Bytes(source) }));
+  let body: string | null = source;
+  let version = "object-version-one";
+  let downloads = 0;
+  s.env.BOOKS_BUCKET = {
+    async head() { return body === null ? null : { size: utf8Bytes(body), version }; },
+    async get() { downloads++; return body === null ? null : { size: utf8Bytes(body), version, body: new Response(body).body }; },
+  } as unknown as R2Bucket;
+  const { token } = await s.key();
+  const first = await (await handleKnowledgeApi(s.request("/chats/versioned-chat?limit=1", token), s.env)).json() as { nextCursor: string };
+  const second = await (await handleKnowledgeApi(s.request(`/chats/versioned-chat?cursor=${first.nextCursor}`, token), s.env)).json() as { turns: { content: string }[] };
+  assert.equal(second.turns[0].content, "完整回答。".repeat(30000));
+  assert.equal(downloads, 1, "同一不可变版本无需再次下载和解析");
+  body = source.replace("缓存校验的问题", "缓存校验的问错"); version = "object-version-two";
+  assert.equal((await handleKnowledgeApi(s.request("/chats/versioned-chat", token), s.env)).status, 503);
+  body = source; version = "object-version-three";
+  assert.equal((await handleKnowledgeApi(s.request("/chats/versioned-chat", token), s.env)).status, 200);
+  body = null;
+  assert.equal((await handleKnowledgeApi(s.request("/chats/versioned-chat", token), s.env)).status, 503);
+  s.sql.close();
+});
+
 test("10 个密钥上限及有效期校验，撤销后允许再创建", async () => {
   const s = setup(); const cookie = await s.login(); const first = await s.key(cookie);
   for (let i = 0; i < 9; i++) await s.key(cookie);

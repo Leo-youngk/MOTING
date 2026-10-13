@@ -11,6 +11,23 @@ interface ListCursor { type: "list"; resource: Resource; at: number; id: string;
 interface ChatCursor { type: "chat"; bookId: string; version: number; offset: number }
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const PAGE_BYTES = 8 * 1024 * 1024;
+// 大对话每页重读/重解析会触发线上 Workers 1102。只复用已校验、版本未变的 R2 内容，
+// 每次仍检查对象存在及版本；授权和 D1 删除状态始终由请求重新检查。
+const CHAT_CACHE_BYTES = 12 * 1024 * 1024;
+const chatCache = new Map<string, { version: string; bytes: number; value: Json }>();
+let chatCacheBytes = 0;
+
+function forgetChat(key: string): void {
+  const entry = chatCache.get(key);
+  if (entry) { chatCacheBytes -= entry.bytes; chatCache.delete(key); }
+}
+
+function rememberChat(key: string, entry: { version: string; bytes: number; value: Json }): void {
+  forgetChat(key);
+  while (chatCacheBytes + entry.bytes > CHAT_CACHE_BYTES && chatCache.size) forgetChat(chatCache.keys().next().value!);
+  chatCache.set(key, entry);
+  chatCacheBytes += entry.bytes;
+}
 
 function text(value: unknown): string { return typeof value === "string" ? value : ""; }
 function object(value: unknown): Json {
@@ -47,14 +64,38 @@ function pageLimit(params: URLSearchParams): number {
 async function readRecord(kind: Resource, key: string, data: string, bucket?: R2Bucket): Promise<Json> {
   const blob = storedBlob(data);
   let source = data;
+  let cacheKey = "";
+  let objectVersion = "";
   if (blob) {
     if (!bucket) throw new KnowledgeError("大记录存储暂时不可用", 503, "unavailable");
-    const saved = await bucket.get(recordObjectKey(kind, key, blob.hash));
+    const objectKey = recordObjectKey(kind, key, blob.hash);
+    cacheKey = kind === "chats" ? objectKey : "";
+    const cached = cacheKey ? chatCache.get(cacheKey) : undefined;
+    if (cached) {
+      const current = await bucket.head(objectKey);
+      if (!current || current.size !== blob.bytes) {
+        forgetChat(cacheKey);
+        throw new KnowledgeError("大记录正文暂时不可用，请稍后重试", 503, "unavailable");
+      }
+      if (current.version === cached.version) {
+        rememberChat(cacheKey, cached);
+        return cached.value;
+      }
+      forgetChat(cacheKey);
+    }
+    const saved = await bucket.get(objectKey);
     if (!saved || saved.size !== blob.bytes || saved.size > MAX_RECORD_BYTES) throw new KnowledgeError("大记录正文暂时不可用，请稍后重试", 503, "unavailable");
+    objectVersion = saved.version;
     source = await new Response(saved.body).text();
     if (utf8Bytes(source) !== blob.bytes || await recordHash(source) !== blob.hash) throw new KnowledgeError("大记录正文校验失败，请稍后重试", 503, "invalid_record");
   }
-  try { return object(JSON.parse(source)); }
+  try {
+    const value = object(JSON.parse(source));
+    if (blob && cacheKey && objectVersion && blob.bytes <= CHAT_CACHE_BYTES) {
+      rememberChat(cacheKey, { version: objectVersion, bytes: blob.bytes, value });
+    }
+    return value;
+  }
   catch (error) {
     if (error instanceof KnowledgeError) throw error;
     throw new KnowledgeError("云端记录内容异常，请稍后重试", 503, "invalid_record");
