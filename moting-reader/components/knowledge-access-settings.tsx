@@ -17,7 +17,8 @@ export function KnowledgeAccessSettings({ sync, onOpenSync, onSyncNow }: {
       <h2>让 Bot 读懂你的阅读</h2>
       <div className="settings-card settings-card--padded">
         <p className="settings-note">授权 Grok bot 读取你的划线摘录、想法和 AI 对话。密钥只授予读取权限，可随时撤销。</p>
-        <p className="settings-note">接口读取云端已同步的内容，本地新增记录请先同步。</p>
+        <p className="settings-note">联网并登录云端同步后，新划线、想法和 AI 对话会自动上传，通常在改动后约 30 秒发起。</p>
+        <p className="settings-note">“立即同步”可提前上传或失败后重试。离线内容会在恢复联网并打开应用后自动补传；Bot 读取云端已同步的内容。</p>
         {sync.connected ? <>
           <div className="settings-actions">
             <button type="button" className="text-button" disabled={sync.syncing} onClick={onSyncNow}>
