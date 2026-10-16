@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   aiAttemptPlan,
   aiFailureMessage,
+  aiThinkingOptions,
   requestWithRetry,
   upstreamErrorMessage,
 } from "../worker/ai-upstream.ts";
@@ -48,6 +49,28 @@ test("a busy primary model hands over to the fallback model", async () => {
   assert.deepEqual(models, ["lite", "lite", "flash"]);
   // 主模型重试前等约 1 秒，换备用模型不用等
   assert.deepEqual(h.waits, [1000]);
+});
+
+test("identical model names on different providers still switch connections", async () => {
+  const calls: Array<[string, string | undefined]> = [];
+  const result = await requestWithRetry({
+    ...harness(), plan: aiAttemptPlan("same-model", "same-model", true),
+    send: async (model, provider) => {
+      calls.push([model, provider]);
+      return reply(provider === "fallback" ? 200 : 429);
+    },
+  });
+  assert.equal(result.ok && result.provider, "fallback");
+  assert.deepEqual(calls, [["same-model", undefined], ["same-model", undefined], ["same-model", "fallback"]]);
+});
+
+test("thinking parameters are selected for the actual endpoint", () => {
+  assert.deepEqual(aiThinkingOptions("https://generativelanguage.googleapis.com/v1beta/openai", true), { reasoning_effort: "high" });
+  assert.deepEqual(aiThinkingOptions("https://generativelanguage.googleapis.com/v1beta/openai", false), { reasoning_effort: "low" });
+  assert.deepEqual(aiThinkingOptions("https://api.deepseek.com", false), { thinking: { type: "disabled" } });
+  assert.deepEqual(aiThinkingOptions("https://openrouter.ai/api/v1", true), { reasoning: { enabled: true } });
+  assert.deepEqual(aiThinkingOptions("https://api.openai.com/v1", false), {});
+  assert.deepEqual(aiThinkingOptions("https://example.com/v1", true), { enable_thinking: true });
 });
 
 test("a single retry is enough when the model recovers", async () => {

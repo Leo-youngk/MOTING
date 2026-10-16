@@ -553,6 +553,41 @@
 }
 
 /* 选模型的面板。 */
+.ai-provider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.ai-provider-row__edit {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 16px 0;
+  background: transparent;
+  text-align: left;
+}
+
+.ai-provider-row__edit strong,
+.ai-provider-row__edit small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-provider-row__edit strong { font-size: var(--text-callout); }
+.ai-provider-row__edit small { color: var(--muted); font-size: var(--text-sm); }
+.ai-provider-row__edit[aria-pressed="true"] strong { color: var(--accent-deep); }
+.ai-provider-row > .text-button { flex-shrink: 0; }
+.ai-provider-row > .text-button:disabled { color: var(--muted); opacity: 1; }
+select.settings-input { font-size: var(--text-callout); }
+
 .model-picker {
   display: flex;
   flex-direction: column;

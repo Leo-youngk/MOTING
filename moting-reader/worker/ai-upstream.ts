@@ -9,28 +9,40 @@
 /** 值得再试的状态：限流、超时和 5xx。400/401/404 这类是配置错了，重试也没用。 */
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
+/** 兼容协议的思考参数并不通用，按实际请求地址选择，备用服务商也独立处理。 */
+export function aiThinkingOptions(baseUrl: string, enabled: boolean): Record<string, unknown> {
+  const host = new URL(baseUrl).hostname;
+  if (host === "generativelanguage.googleapis.com") return { reasoning_effort: enabled ? "high" : "low" };
+  if (host === "api.deepseek.com") return { thinking: { type: enabled ? "enabled" : "disabled" } };
+  if (host === "openrouter.ai") return { reasoning: { enabled } };
+  if (host === "api.openai.com") return enabled ? { reasoning_effort: "high" } : {};
+  return enabled ? { enable_thinking: true } : {};
+}
+
 export interface AiAttemptStep {
   model: string;
+  provider?: "fallback";
   /** 这一次开始前等多久（毫秒），实际再乘 0.8~1.2 的随机抖动。 */
   delayMs: number;
 }
 
 export interface AiAttempt {
   model: string;
+  provider?: "fallback";
   /** 上游的 HTTP 状态；0 表示连不上或超时。 */
   status: number;
 }
 
 export type AiUpstreamResult =
-  | { ok: true; response: Response; model: string; attempts: AiAttempt[] }
+  | { ok: true; response: Response; model: string; provider?: "fallback"; attempts: AiAttempt[] }
   | { ok: false; status: number; detail: string; attempts: AiAttempt[] };
 
 /**
  * 主模型两次（间隔约 1 秒）→ 备用模型两次（约 1 秒）→ 主模型最后一次（约 2 秒）。
  * 忙起来往往一两分钟都缓不过来，主模型连着失败就早点换备用，比守着它等更快拿到回答。
  */
-export function aiAttemptPlan(primary: string, fallback: string | null): AiAttemptStep[] {
-  if (!fallback || fallback === primary) {
+export function aiAttemptPlan(primary: string, fallback: string | null, crossProvider = false): AiAttemptStep[] {
+  if (!fallback || (fallback === primary && !crossProvider)) {
     return [
       { model: primary, delayMs: 0 },
       { model: primary, delayMs: 1000 },
@@ -41,8 +53,8 @@ export function aiAttemptPlan(primary: string, fallback: string | null): AiAttem
   return [
     { model: primary, delayMs: 0 },
     { model: primary, delayMs: 1000 },
-    { model: fallback, delayMs: 0 },
-    { model: fallback, delayMs: 1000 },
+    { model: fallback, delayMs: 0, ...(crossProvider ? { provider: "fallback" as const } : {}) },
+    { model: fallback, delayMs: 1000, ...(crossProvider ? { provider: "fallback" as const } : {}) },
     { model: primary, delayMs: 2000 },
   ];
 }
@@ -72,7 +84,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  */
 export async function requestWithRetry(options: {
   plan: AiAttemptStep[];
-  send: (model: string) => Promise<Response>;
+  send: (model: string, provider?: "fallback") => Promise<Response>;
   readError: (response: Response) => Promise<string>;
   signal: AbortSignal;
   budgetMs: number;
@@ -100,16 +112,16 @@ export async function requestWithRetry(options: {
 
     let response: Response;
     try {
-      response = await send(step.model);
+      response = await send(step.model, step.provider);
     } catch (error) {
       if (signal.aborted) throw error;
-      attempts.push({ model: step.model, status: 0 });
+      attempts.push({ model: step.model, status: 0, ...(step.provider ? { provider: step.provider } : {}) });
       failure = { status: 0, detail: "" };
       continue;
     }
-    attempts.push({ model: step.model, status: response.status });
+    attempts.push({ model: step.model, status: response.status, ...(step.provider ? { provider: step.provider } : {}) });
     if (response.ok && response.body) {
-      return { ok: true, response, model: step.model, attempts };
+      return { ok: true, response, model: step.model, ...(step.provider ? { provider: step.provider } : {}), attempts };
     }
     failure = { status: response.status, detail: await readError(response).catch(() => "") };
     if (!RETRYABLE_STATUS.has(response.status)) break;
@@ -142,7 +154,7 @@ export function upstreamErrorMessage(text: string): string {
 /** 最终失败时给用户看的一句话：什么原因、自动试了几次、换没换过备用模型。 */
 export function aiFailureMessage(status: number, attempts: AiAttempt[], detail: string): string {
   const tries = attempts.length;
-  const fallback = attempts.find((attempt) => attempt.model !== attempts[0]?.model)?.model;
+  const fallback = attempts.find((attempt) => attempt.provider || attempt.model !== attempts[0]?.model)?.model;
   const retried =
     tries > 1
       ? `，自动重试了 ${tries} 次${fallback ? `，备用模型 ${fallback} 也没接上` : "都没成功"}`

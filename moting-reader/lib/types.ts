@@ -171,6 +171,15 @@ export type ShellTheme = "white" | "black" | "cream";
 /** scroll = 上下滑动连续阅读，page = 左右翻页分页阅读。 */
 export type ReadingMode = "scroll" | "page";
 
+export interface AiProvider {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  fallbackModel: string;
+}
+
 export interface ReaderSettings {
   fontSize: number;
   lineHeight: number;
@@ -197,6 +206,11 @@ export interface ReaderSettings {
   aiModel: string;
   /** 主模型忙（503、限流）时自动改用的模型，同一个接口地址和密钥；空串表示不设。 */
   aiFallbackModel: string;
+  /** 多服务商配置；旧版只有上面的单组字段，读取时自动迁移。 */
+  aiProviders?: AiProvider[];
+  aiActiveProviderId?: string;
+  /** 可选的跨服务商备用；与当前服务商相同时不启用。 */
+  aiFallbackProviderId?: string;
   aiDeepThinking: boolean;
 }
 

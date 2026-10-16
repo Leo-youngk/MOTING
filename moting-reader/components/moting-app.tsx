@@ -71,6 +71,7 @@ import {
   type SpeechDownload,
 } from "../hooks/use-speech-player";
 import { AiRequestError, modelHistory, streamAiChat } from "../lib/ai";
+import { fallbackAiProvider } from "../lib/ai-providers";
 import {
   BookMetadataError,
   cleanTitleText,
@@ -2817,6 +2818,7 @@ async function askAi({
       apiKey: settings.aiApiKey,
       model: settings.aiModel,
       fallbackModel: settings.aiFallbackModel,
+      fallbackProvider: fallbackAiProvider(settings),
       deepThinking: settings.aiDeepThinking,
       signal,
       onModel,

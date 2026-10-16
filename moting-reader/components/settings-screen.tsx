@@ -28,6 +28,7 @@ import {
   type ReactNode,
 } from "react";
 import { AiRequestError, fetchAiModels } from "../lib/ai";
+import { AI_PROVIDER_PRESETS, activeAiProvider, getAiProviders, withAiProviders } from "../lib/ai-providers";
 import { resolvedEdgeVoiceURI } from "../lib/edge-voices";
 import type { AppUpdateStatus } from "../hooks/use-app-update";
 import {
@@ -36,6 +37,7 @@ import {
   READER_THEME_SWATCH,
 } from "../lib/reader-options";
 import type {
+  AiProvider,
   BookMeta,
   PlayerVoice,
   ReaderSettings,
@@ -572,7 +574,7 @@ export function SettingsScreen({
               icon={<Sparkles size={24} strokeWidth={1.7} />}
               label="AI 助手"
               detail="模型与接口配置"
-              value={aiReady ? settings.aiModel : "未配置"}
+              value={aiReady ? `${activeAiProvider(settings)?.name} · ${settings.aiModel}` : "未配置"}
               onClick={() => onOpen("ai")}
             />
             <LinkRow
@@ -743,220 +745,200 @@ function SyncPage({
  * 拉不到就明说，退回手填。地址和密钥在离开输入框时保存，其余一改就存。
  */
 function AiSettingsPage({
-  settings,
-  onChange,
-  onBack,
+  settings, onChange, onBack,
 }: {
   settings: ReaderSettings;
   onChange: (settings: ReaderSettings) => void;
   onBack: () => void;
 }) {
-  const [baseUrl, setBaseUrl] = useState(settings.aiBaseUrl);
-  const [apiKey, setApiKey] = useState(settings.aiApiKey);
+  const providers = getAiProviders(settings);
+  const active = activeAiProvider(settings);
+  const [editingId, setEditingId] = useState(active?.id ?? "");
+  const [adding, setAdding] = useState(false);
+  const editing = providers.find(provider => provider.id === editingId) ?? active;
+  const settingsRef = useRef(settings);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+  const commit = (next: ReaderSettings) => {
+    settingsRef.current = next;
+    onChange(next);
+  };
+  const updateProvider = (id: string, patch: Partial<AiProvider>) => {
+    const current = settingsRef.current;
+    commit(withAiProviders(current, getAiProviders(current).map(provider =>
+      provider.id === id ? { ...provider, ...patch } : provider)));
+  };
+
+  return (
+    <div className="settings-screen">
+      <PageBar title="AI 助手" subtitle="用于划词提问和书内对话" onBack={onBack} />
+      <main className="settings-main">
+        <Section title="服务商" foot={<p>每家服务商单独保存配置，点名称编辑，点「使用」切换。</p>}>
+          <div className="settings-card">
+            {providers.map(provider => (
+              <div className="ai-provider-row" key={provider.id}>
+                <button type="button" className="ai-provider-row__edit"
+                  aria-pressed={editing?.id === provider.id} onClick={() => setEditingId(provider.id)}>
+                  <strong>{provider.name}</strong>
+                  <small>{provider.model || "尚未选择模型"}</small>
+                </button>
+                <button type="button" className="text-button" aria-label={`使用 ${provider.name}`}
+                  disabled={active?.id === provider.id}
+                  onClick={() => {
+                    const current = settingsRef.current;
+                    commit(withAiProviders(current, getAiProviders(current), provider.id));
+                    setEditingId(provider.id);
+                  }}>
+                  {active?.id === provider.id ? "当前使用" : "使用"}
+                </button>
+              </div>
+            ))}
+            <button type="button" className="settings-option" onClick={() => setAdding(true)}>
+              添加服务商
+            </button>
+          </div>
+        </Section>
+
+        {editing ? <AiProviderEditor key={editing.id} provider={editing}
+          onUpdate={patch => updateProvider(editing.id, patch)}
+          onDelete={() => {
+            const current = settingsRef.current;
+            commit(withAiProviders(current, getAiProviders(current).filter(provider => provider.id !== editing.id)));
+          }} /> : null}
+
+        {providers.length > 1 ? (
+          <Section title="跨服务商备用" foot={<p>主服务商繁忙、限流或连接失败时，改用所选服务商的主模型。只在回答开始前切换。</p>}>
+            <div className="settings-card settings-card--form">
+              <label className="settings-field">
+                <span>备用服务商</span>
+                <select className="settings-input" aria-label="备用服务商"
+                  value={settings.aiFallbackProviderId === active?.id ? "" : settings.aiFallbackProviderId || ""}
+                  onChange={event => commit({ ...settingsRef.current, aiFallbackProviderId: event.target.value })}>
+                  <option value="">不启用</option>
+                  {providers.filter(provider => provider.id !== active?.id).map(provider => (
+                    <option key={provider.id} value={provider.id} disabled={!provider.baseUrl.trim() || !provider.model.trim()}>
+                      {provider.name}{provider.model ? ` · ${provider.model}` : "（请先配置模型）"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </Section>
+        ) : null}
+
+        <Section title="回答偏好" foot={<>
+          <p>修改自动保存。开启同步后，配置和密钥会随设置同步到你的其他设备。</p>
+          <p>使用 OpenAI 兼容接口，请求经墨听转发；转发日志不记录密钥和对话。</p>
+        </>}>
+          <label className="settings-card settings-toggle">
+            <span><strong>深度思考</strong><em>需服务商和模型支持</em></span>
+            <span className="ai-switch">
+              <input type="checkbox" checked={settings.aiDeepThinking}
+                onChange={event => commit({ ...settingsRef.current, aiDeepThinking: event.target.checked })} />
+              <span className="ai-switch__track"><span className="ai-switch__thumb" /></span>
+            </span>
+          </label>
+        </Section>
+      </main>
+      {adding ? (
+        <Modal title="添加服务商" onClose={() => setAdding(false)}>
+          <div className="settings-card">
+            {AI_PROVIDER_PRESETS.map(preset => (
+              <OptionRow key={preset.name} selected={false} label={preset.name} onClick={() => {
+                const provider: AiProvider = { ...preset, id: crypto.randomUUID(), apiKey: "", model: "", fallbackModel: "" };
+                const current = settingsRef.current;
+                commit(withAiProviders(current, [...getAiProviders(current), provider]));
+                setEditingId(provider.id);
+                setAdding(false);
+              }} />
+            ))}
+          </div>
+        </Modal>
+      ) : null}
+    </div>
+  );
+}
+
+function AiProviderEditor({ provider, onUpdate, onDelete }: {
+  provider: AiProvider;
+  onUpdate: (patch: Partial<AiProvider>) => void;
+  onDelete: () => void;
+}) {
   const [showKey, setShowKey] = useState(false);
   const [models, setModels] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [picking, setPicking] = useState<"main" | "fallback" | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
-  const initialLoadRef = useRef(false);
-  // 列表是异步回来的，回来时要拿最新的设置去补默认模型，不能用发请求那一刻的旧值。
-  const settingsRef = useRef(settings);
+  const loadModels = useCallback(async (baseUrl: string, apiKey: string) => {
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setModels([]);
+    setError("");
+    setLoading(Boolean(baseUrl.trim()));
+    if (!baseUrl.trim()) return;
+    try {
+      const list = await fetchAiModels(baseUrl, apiKey, controller.signal);
+      if (!controller.signal.aborted) setModels(list);
+    } catch (err) {
+      if (!controller.signal.aborted) setError(err instanceof AiRequestError ? err.message : "获取模型列表失败");
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  }, []);
   useEffect(() => {
-    settingsRef.current = settings;
-  }, [settings]);
+    const timer = window.setTimeout(() => void loadModels(provider.baseUrl, provider.apiKey), 0);
+    return () => { window.clearTimeout(timer); controllerRef.current?.abort(); };
+  }, [loadModels, provider.baseUrl, provider.apiKey]);
 
-  const loadModels = useCallback(
-    async (nextBaseUrl: string, nextApiKey: string) => {
-      if (!nextBaseUrl.trim()) return;
-      controllerRef.current?.abort();
-      const controller = new AbortController();
-      controllerRef.current = controller;
-      setLoading(true);
-      setError("");
-      try {
-        const list = await fetchAiModels(nextBaseUrl, nextApiKey, controller.signal);
-        if (controller.signal.aborted) return;
-        setModels(list);
-        // 还没选过主模型：先用列表第一个，填完地址就能直接用，想换再点进去挑。
-        const current = settingsRef.current;
-        if (!current.aiModel && list[0]) onChange({ ...current, aiModel: list[0] });
-      } catch (err) {
-        if (!controller.signal.aborted) {
-          setError(err instanceof AiRequestError ? err.message : "获取模型列表失败");
-        }
-      } finally {
-        if (!controller.signal.aborted) setLoading(false);
-      }
-    },
-    [onChange]
-  );
+  const status = !provider.baseUrl.trim() ? "填写接口后可获取模型列表。" : loading ? "正在获取模型列表…"
+    : error ? `拿不到模型列表（${error}），可以直接手填模型名。`
+      : models.length ? `接口返回了 ${models.length} 个模型。` : "可直接手填模型名。";
 
-  // 地址之前就填过的话，一进来就去拉列表，不用等再点一下输入框。
-  useEffect(() => {
-    if (initialLoadRef.current || !settings.aiBaseUrl.trim()) return;
-    initialLoadRef.current = true;
-    const timer = window.setTimeout(
-      () => void loadModels(settings.aiBaseUrl, settings.aiApiKey),
-      0
-    );
-    return () => window.clearTimeout(timer);
-  }, [loadModels, settings.aiBaseUrl, settings.aiApiKey]);
-  useEffect(() => () => controllerRef.current?.abort(), []);
-
-  const saveConnection = () => {
-    if (baseUrl === settings.aiBaseUrl && apiKey === settings.aiApiKey) return;
-    onChange({ ...settings, aiBaseUrl: baseUrl.trim(), aiApiKey: apiKey.trim() });
-    void loadModels(baseUrl, apiKey);
-  };
-
-  // 拉不到列表就退回手填，但得让人看见是退回来的，别默默变成一个空输入框。
-  const status = !settings.aiBaseUrl.trim()
-    ? "填写接口后可获取模型列表。"
-    : loading
-      ? "正在获取模型列表…"
-      : error
-        ? `拿不到模型列表（${error}），可以直接手填模型名。`
-        : models.length
-          ? `接口返回了 ${models.length} 个模型，点模型那一栏就能挑。`
-          : "这个接口没返回模型列表，直接手填模型名。";
-
-  return (
-    <div className="settings-screen">
-      <PageBar title="AI 助手" subtitle="用于划词提问和书内对话" onBack={onBack} />
-      <main className="settings-main">
-        <Section title="连接设置">
-          <div className="settings-card settings-card--form">
-            <label className="settings-field">
-              <span>接口地址</span>
-              <span className="settings-input">
-                <input
-                  type="text"
-                  inputMode="url"
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  value={baseUrl}
-                  placeholder="https://api.example.com/v1"
-                  onChange={(event) => setBaseUrl(event.target.value)}
-                  onBlur={saveConnection}
-                />
-              </span>
-            </label>
-            <label className="settings-field">
-              <span>API Key</span>
-              <span className="settings-input">
-                <input
-                  type={showKey ? "text" : "password"}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  value={apiKey}
-                  placeholder="输入 API Key"
-                  onChange={(event) => setApiKey(event.target.value)}
-                  onBlur={saveConnection}
-                />
-                <button
-                  type="button"
-                  className="settings-input__icon"
-                  aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}
-                  onClick={() => setShowKey((value) => !value)}
-                >
-                  {showKey ? <EyeOff size={20} /> : <Eye size={20} />}
-                </button>
-              </span>
-            </label>
-          </div>
-        </Section>
-
-        <Section
-          title="模型"
-          foot={
-            <>
-              {settings.aiFallbackModel && settings.aiFallbackModel === settings.aiModel ? (
-                <p className="settings-error">备用模型和主模型是同一个，等于没设。</p>
-              ) : null}
-            </>
-          }
-        >
-          <div className="settings-card settings-card--form">
-            <div className="settings-field">
-              <span>主模型</span>
-              <button
-                type="button"
-                className={`settings-input settings-input--button${settings.aiModel ? "" : " is-empty"}`}
-                onClick={() => setPicking("main")}
-              >
-                <span>{settings.aiModel || "填写模型名称"}</span>
-                {loading ? <LoaderCircle size={16} className="spin" aria-hidden /> : null}
-              </button>
-            </div>
-            <div className="settings-field">
-              <span>备用模型</span>
-              <button
-                type="button"
-                className={`settings-input settings-input--button${settings.aiFallbackModel ? "" : " is-empty"}`}
-                onClick={() => setPicking("fallback")}
-              >
-                <span>{settings.aiFallbackModel || "选填"}</span>
-              </button>
-            </div>
-            <p className="settings-card__note">主模型繁忙时自动切换，使用同一接口。</p>
-          </div>
-        </Section>
-
-        <Section
-          title="回答偏好"
-          foot={
-            <>
-              <p className={error ? "settings-error" : undefined}>{status}</p>
-              <p>修改自动保存。请求经墨听的 Worker 转发一次避开跨域，密钥只存在这台设备上。</p>
-            </>
-          }
-        >
-          <label className="settings-card settings-toggle">
-            <span>
-              <strong>深度思考</strong>
-              <em>需模型支持，开启后回答里带上思考过程</em>
-            </span>
-            <span className="ai-switch">
-              <input
-                type="checkbox"
-                checked={settings.aiDeepThinking}
-                onChange={(event) =>
-                  onChange({ ...settings, aiDeepThinking: event.target.checked })
-                }
-              />
-              <span className="ai-switch__track">
-                <span className="ai-switch__thumb" />
-              </span>
-            </span>
-          </label>
-        </Section>
-      </main>
-
-      {picking ? (
-        <ModelPicker
-          title={picking === "main" ? "主模型" : "备用模型"}
-          value={picking === "main" ? settings.aiModel : settings.aiFallbackModel}
-          models={models}
-          loading={loading}
-          status={status}
-          allowNone={picking === "fallback"}
-          onReload={() => void loadModels(settings.aiBaseUrl, settings.aiApiKey)}
-          canReload={Boolean(settings.aiBaseUrl.trim()) && !loading}
-          onPick={(model) => {
-            onChange(
-              picking === "main"
-                ? { ...settings, aiModel: model }
-                : { ...settings, aiFallbackModel: model }
-            );
-          }}
-          onClose={() => setPicking(null)}
-        />
-      ) : null}
-    </div>
-  );
+  return <>
+    <Section title={`配置 · ${provider.name}`}>
+      <div className="settings-card settings-card--form">
+        <label className="settings-field"><span>名称</span><span className="settings-input">
+          <input key={provider.name} defaultValue={provider.name} maxLength={80}
+            onBlur={event => onUpdate({ name: event.target.value.trim() || provider.name })} />
+        </span></label>
+        <label className="settings-field"><span>接口地址</span><span className="settings-input">
+          <input key={provider.baseUrl} defaultValue={provider.baseUrl} type="text" inputMode="url"
+            autoCapitalize="off" autoCorrect="off" spellCheck={false} placeholder="https://api.example.com/v1"
+            onBlur={event => onUpdate({ baseUrl: event.target.value.trim().replace(/\/+$/, "") })} />
+        </span></label>
+        <label className="settings-field"><span>API Key</span><span className="settings-input">
+          <input key={provider.apiKey} defaultValue={provider.apiKey} type={showKey ? "text" : "password"}
+            autoCapitalize="off" autoCorrect="off" spellCheck={false} placeholder="输入 API Key"
+            onBlur={event => onUpdate({ apiKey: event.target.value.trim() })} />
+          <button type="button" className="settings-input__icon" aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}
+            onClick={() => setShowKey(value => !value)}>{showKey ? <EyeOff size={20} /> : <Eye size={20} />}</button>
+        </span></label>
+      </div>
+    </Section>
+    <Section title="模型" foot={<p className={error ? "settings-error" : undefined} role="status">{status}</p>}>
+      <div className="settings-card settings-card--form">
+        <div className="settings-field"><span>主模型</span>
+          <button type="button" className={`settings-input settings-input--button${provider.model ? "" : " is-empty"}`}
+            onClick={() => setPicking("main")}><span>{provider.model || "填写模型名称"}</span>
+            {loading ? <LoaderCircle size={16} className="spin" aria-hidden /> : null}</button>
+        </div>
+        <div className="settings-field"><span>同服务商备用模型</span>
+          <button type="button" className={`settings-input settings-input--button${provider.fallbackModel ? "" : " is-empty"}`}
+            onClick={() => setPicking("fallback")}><span>{provider.fallbackModel || "选填"}</span></button>
+        </div>
+        <p className="settings-card__note">未选择跨服务商备用时，主模型繁忙会改用这个模型。</p>
+      </div>
+    </Section>
+    <button type="button" className="settings-danger" onClick={onDelete}><Trash2 size={18} />删除此服务商</button>
+    {picking ? <ModelPicker title={picking === "main" ? "主模型" : "备用模型"}
+      value={picking === "main" ? provider.model : provider.fallbackModel}
+      models={models} loading={loading} status={status} allowNone={picking === "fallback"}
+      canReload={Boolean(provider.baseUrl.trim()) && !loading}
+      onReload={() => void loadModels(provider.baseUrl, provider.apiKey)}
+      onPick={model => onUpdate(picking === "main" ? { model } : { fallbackModel: model })}
+      onClose={() => setPicking(null)} /> : null}
+  </>;
 }
 
 /** 选模型：上面手填，下面是接口返回的列表（多了可以筛）。 */

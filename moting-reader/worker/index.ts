@@ -2,7 +2,7 @@
 import handler from "vinext/server/app-router-entry";
 import { AI_REQUEST_LIMITS } from "../lib/ai";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
-import { aiAttemptPlan, aiFailureMessage, requestWithRetry } from "./ai-upstream";
+import { aiAttemptPlan, aiFailureMessage, aiThinkingOptions, requestWithRetry } from "./ai-upstream";
 import { synthesizeSpeech } from "./edge-tts";
 import { SpeechBatchError, synthesizeBatch } from "./speech";
 import { forwardSync, handleSync } from "./sync";
@@ -248,32 +248,46 @@ async function handleAiChat(request: Request): Promise<Response> {
   const apiKey = stringField(payload.apiKey ?? "", 4096);
   if (apiKey === null) return aiError("API Key 过长", 400);
   const fallbackModel = stringField(payload.fallbackModel ?? "", 200)?.trim() || null;
+  let fallbackProvider: { baseUrl: string; apiKey: string; model: string } | undefined;
+  if (payload.fallbackProvider !== undefined && payload.fallbackProvider !== null) {
+    const value = payload.fallbackProvider;
+    if (!isRecord(value)) return aiError("备用服务商配置无效", 400);
+    const fallbackUrl = normalizeAiBaseUrl(value.baseUrl);
+    const fallbackKey = stringField(value.apiKey ?? "", 4096);
+    const fallbackName = stringField(value.model, 200)?.trim();
+    if (!fallbackUrl || fallbackKey === null || !fallbackName) {
+      return aiError("备用服务商的地址、密钥或模型配置无效", 400);
+    }
+    fallbackProvider = { baseUrl: fallbackUrl, apiKey: fallbackKey, model: fallbackName };
+  }
 
   let result;
   try {
     result = await requestWithRetry({
-      plan: aiAttemptPlan(model, fallbackModel),
+      plan: aiAttemptPlan(model, fallbackProvider?.model ?? fallbackModel, Boolean(fallbackProvider)),
       signal: request.signal,
       budgetMs: AI_RETRY_BUDGET_MS,
-      send: (attemptModel) =>
-        fetch(`${baseUrl}/chat/completions`, {
+      send: (attemptModel, provider) => {
+        const connection = provider === "fallback" && fallbackProvider ? fallbackProvider : { baseUrl, apiKey };
+        return fetch(`${connection.baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+            ...(connection.apiKey ? { authorization: `Bearer ${connection.apiKey}` } : {}),
           },
           body: JSON.stringify({
             model: attemptModel,
             messages,
             stream: true,
-            ...(payload.deepThinking ? { enable_thinking: true } : {}),
+            ...aiThinkingOptions(connection.baseUrl, payload.deepThinking === true),
           }),
           signal: AbortSignal.any([request.signal, AbortSignal.timeout(AI_CHAT_TIMEOUT_MS)]),
-        }),
+        });
+      },
       readError: (response) => readResponseText(response, MAX_AI_ERROR_RESPONSE_BYTES),
       // 退路要看得见：每次重试、换备用模型都进 Workers 日志，出了问题能查到底是哪边忙。
       onRetry: (attempt, next) =>
-        console.warn("ai upstream retry", { failed: attempt, next: next.model }),
+        console.warn("ai upstream retry", { failed: attempt, next: next.model, provider: next.provider ?? "primary" }),
     });
   } catch {
     // 用户在等待重试时关掉了对话框，连接已经断了，这个响应不会有人收。
@@ -284,7 +298,7 @@ async function handleAiChat(request: Request): Promise<Response> {
     console.error("ai upstream failed", { status: result.status, attempts: result.attempts });
     return aiError(aiFailureMessage(result.status, result.attempts, result.detail), result.status || 502);
   }
-  if (result.model !== model) {
+  if (result.provider || result.model !== model) {
     console.warn("ai fallback answered", { model: result.model, attempts: result.attempts });
   }
 
@@ -295,6 +309,7 @@ async function handleAiChat(request: Request): Promise<Response> {
       "x-content-type-options": "nosniff",
       // 前端据此标出「这条是备用模型答的」。
       "x-ai-model": result.model,
+      "x-ai-provider": result.provider ?? "primary",
     },
   });
 }
