@@ -117,6 +117,8 @@ export interface AiChatOptions {
   model: string;
   /** 主模型忙（503、限流）时 Worker 自动改用它答；空串表示不设备用。 */
   fallbackModel?: string;
+  /** 可选的另一家服务商；配置后优先于同服务商备用模型。 */
+  fallbackProvider?: { name: string; baseUrl: string; apiKey: string; model: string };
   messages: AiChatMessage[];
   deepThinking: boolean;
   signal?: AbortSignal;
@@ -126,14 +128,17 @@ export interface AiChatOptions {
 
 /** 逐块把增量内容喂给 onDelta，content 和 reasoning_content（深度思考）分开传。 */
 export async function streamAiChat(options: AiChatOptions, onDelta: (delta: AiStreamDelta) => void): Promise<void> {
-  const { baseUrl, apiKey, model, fallbackModel, messages, deepThinking, signal } = options;
+  const { baseUrl, apiKey, model, fallbackModel, fallbackProvider, messages, deepThinking, signal } = options;
 
   let response: Response;
   try {
     response = await fetch("/api/ai/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ baseUrl, apiKey, model, fallbackModel, messages, deepThinking }),
+      body: JSON.stringify({ baseUrl, apiKey, model, fallbackModel,
+        fallbackProvider: fallbackProvider && {
+          baseUrl: fallbackProvider.baseUrl, apiKey: fallbackProvider.apiKey, model: fallbackProvider.model,
+        }, messages, deepThinking }),
       signal,
     });
   } catch (err) {
@@ -144,7 +149,9 @@ export async function streamAiChat(options: AiChatOptions, onDelta: (delta: AiSt
   if (!response.ok || !response.body) {
     throw new AiRequestError((await errorMessage(response)) ?? `AI 服务返回 ${response.status}`);
   }
-  options.onModel?.(response.headers.get("x-ai-model") || model);
+  const answeredModel = response.headers.get("x-ai-model") || model;
+  options.onModel?.(response.headers.get("x-ai-provider") === "fallback" && fallbackProvider
+    ? `${fallbackProvider.name} · ${answeredModel}` : answeredModel);
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();

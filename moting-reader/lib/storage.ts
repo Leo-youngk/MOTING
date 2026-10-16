@@ -15,6 +15,7 @@ import type {
   ReadingStats,
 } from "./types";
 import { DEFAULT_SETTINGS, DEFAULT_STATS } from "./types";
+import { normalizeAiSettings } from "./ai-providers";
 
 const DB_NAME = "moting-reader";
 /** 5：正文从书目记录里拆到 contents 表。 */
@@ -1058,7 +1059,7 @@ export async function getSettings(): Promise<ReaderSettings> {
   if (mapped) merged.theme = mapped;
   // 选过已经下架的音色（或者系统语音）的，回到默认音色。
   merged.voiceURI = normalizeVoiceURI(merged.voiceURI);
-  return merged;
+  return normalizeAiSettings(merged);
 }
 
 export async function saveSettings(

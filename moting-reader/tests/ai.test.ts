@@ -102,6 +102,23 @@ test("a normal stream delivers the answer piece by piece", async () => {
   });
 });
 
+test("only the selected fallback is sent and a cross-provider answer is labelled", async () => {
+  const original = globalThis.fetch;
+  const fallbackProvider = { name: "备用服务商", baseUrl: "https://backup.example/v1", apiKey: "backup-key", model: "m" };
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(body.fallbackProvider, { baseUrl: fallbackProvider.baseUrl, apiKey: "backup-key", model: "m" });
+    assert.equal(body.aiProviders, undefined);
+    return sse(['data: {"choices":[{"delta":{"content":"回答"}}]}\n\n', "data: [DONE]\n\n"],
+      { "x-ai-model": "m", "x-ai-provider": "fallback" });
+  };
+  try {
+    let answeredBy = "";
+    await streamAiChat({ ...options, fallbackProvider, onModel: model => { answeredBy = model; } }, () => {});
+    assert.equal(answeredBy, "备用服务商 · m");
+  } finally { globalThis.fetch = original; }
+});
+
 test("the model that actually answered is reported, so a fallback answer can be labelled", async () => {
   const chunks = ['data: {"choices":[{"delta":{"content":"好"}}]}\n\n', "data: [DONE]\n\n"];
   await withFetch(sse(chunks, { "x-ai-model": "gemini-3.7-flash" }), async () => {
