@@ -18,8 +18,8 @@ import { DEFAULT_SETTINGS, DEFAULT_STATS } from "./types";
 import { normalizeAiSettings } from "./ai-providers";
 
 const DB_NAME = "moting-reader";
-/** 5：正文从书目记录里拆到 contents 表。 */
-const DB_VERSION = 5;
+/** 已发布的版本使用 v6；保留版本和进度队列表，避免旧设备因降版本打不开书库。 */
+const DB_VERSION = 6;
 const BOOK_STORE = "books";
 /** 书的正文，一本书一条，主键 bookId。书目在 books 表里，打开这本书时才读这里。 */
 const CONTENT_STORE = "contents";
@@ -189,6 +189,9 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(SESSION_STORE)) {
         const sessions = db.createObjectStore(SESSION_STORE, { keyPath: "id" });
         sessions.createIndex("bookId", "bookId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains("sync-progress")) {
+        db.createObjectStore("sync-progress", { keyPath: "id" });
       }
     };
     request.onsuccess = () => {

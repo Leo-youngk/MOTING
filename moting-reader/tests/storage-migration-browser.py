@@ -136,7 +136,7 @@ def run(books, rest, label, context_factory):
     expected_sentences = {b["id"]: sum(len(p["sentences"]) for c in b["chapters"] for p in c["paragraphs"]) for b in books}
     contents = {c["bookId"]: c for c in state["contents"]}
     checks = {
-        "db_version_5": state["version"] == 5,
+        "db_version_6": state["version"] == 6,
         "books_have_no_chapters": all(not b["hasChapters"] for b in state["books"]),
         "outline_matches_content": all(b["outline"] == expected.get(b["id"]) for b in state["books"]),
         "contents_complete": all(
