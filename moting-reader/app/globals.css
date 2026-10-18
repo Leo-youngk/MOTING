@@ -2083,8 +2083,7 @@ button:disabled {
 
 /* ==========================================================================
    问 AI：正文里的批注（.ai-inline）和全屏长对话（.ai-chat）两套形态。
-   批注跟着阅读器的 --reader-* 配色走，因为它长在正文里；全屏对话是独立的
-   一层，走外壳的 --paper / --surface。
+   书内批注和全屏对话都跟着阅读主题走；从笔记页打开的历史对话跟着书架外观走。
    ========================================================================== */
 
 /* --- 划词后的正文批注 ------------------------------------------------ */
@@ -4817,12 +4816,15 @@ html[data-keyboard-open] .modal-sheet {
   padding: 14px 0 4px;
 }
 
-/* 阅读设置这张 sheet 跟着当前阅读主题走：夜间深色、纸张暖色。
-   把 sheet 里用到的几个外壳 token 就地映射到 --reader-*，子元素无需单独改色。 */
+/* 阅读设置和书内 AI 对话共用阅读配色，背景、文字和控件跟安全区保持一致。 */
 .modal-sheet--reader {
   background: color-mix(in srgb, var(--reader-background) 88%, transparent);
   color: var(--reader-ink);
   border-color: color-mix(in srgb, var(--reader-ink) 14%, transparent);
+}
+
+.modal-sheet--reader,
+.reader-shell .ai-chat {
   /* --glass-* 里的 var(--ink) 是在 :root 上就定好的，不会跟着下面这几行重映射，
      所以书内 sheet 要自己按 --reader-ink 再算一遍，否则夜间读时控件还是浅色玻璃。 */
   --glass-tint: color-mix(in srgb, var(--reader-ink) 8%, transparent);
@@ -4842,6 +4844,12 @@ html[data-keyboard-open] .modal-sheet {
   --subtle: color-mix(in srgb, var(--reader-ink) 45%, transparent);
   /* 选中态的深橙在夜间纸上发闷，按主题往亮里调一档。 */
   --accent-deep: color-mix(in srgb, var(--accent) 82%, var(--reader-ink));
+}
+
+.reader-shell .ai-chat {
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, var(--reader-background));
+  --accent-ink: var(--reader-ink);
+  color: var(--reader-ink);
 }
 
 .modal-sheet--reader .modal-grabber {
