@@ -92,6 +92,62 @@ export function sentenceAtSeconds(
   return sentences[match];
 }
 
+/**
+ * 从某一句的开头往后（seconds 为负就往前）挪大约这么多秒（1×），落在那一刻正在读的那一句。
+ * 按字数估算，跨章、跳过空章；走到书的两头就停在端点。
+ * 只在跳出已经加载的音频时用：音频里的跳转按真实时间轴走。
+ */
+export function sentenceAfterSeconds(
+  chapters: readonly Chapter[],
+  chapterIndex: number,
+  sentenceIndex: number,
+  seconds: number
+): { chapterIndex: number; sentenceIndex: number } {
+  const lists = new Map<number, ReturnType<typeof flattenChapter>>();
+  const sentencesOf = (index: number) => {
+    let list = lists.get(index);
+    if (!list) {
+      list = chapters[index] ? flattenChapter(chapters[index]) : [];
+      lists.set(index, list);
+    }
+    return list;
+  };
+  const durationOf = (at: { chapterIndex: number; sentenceIndex: number }) => {
+    const sentence = sentencesOf(at.chapterIndex)[at.sentenceIndex];
+    return sentence ? speechSeconds(sentence.speakableText || sentence.text) : 0;
+  };
+  const step = (at: { chapterIndex: number; sentenceIndex: number }, direction: 1 | -1) => {
+    let chapter = at.chapterIndex;
+    let sentence = at.sentenceIndex + direction;
+    while (chapter >= 0 && chapter < chapters.length) {
+      const list = sentencesOf(chapter);
+      if (sentence >= 0 && sentence < list.length) return { chapterIndex: chapter, sentenceIndex: sentence };
+      chapter += direction;
+      sentence = direction > 0 ? 0 : sentencesOf(chapter).length - 1;
+    }
+    return null;
+  };
+
+  let at = { chapterIndex, sentenceIndex };
+  let remaining = seconds;
+  if (remaining >= 0) {
+    while (remaining >= durationOf(at)) {
+      const next = step(at, 1);
+      if (!next) break;
+      remaining -= durationOf(at);
+      at = next;
+    }
+  } else {
+    while (remaining < 0) {
+      const previous = step(at, -1);
+      if (!previous) break;
+      at = previous;
+      remaining += durationOf(at);
+    }
+  }
+  return at;
+}
+
 /** 03:21、1:02:03。 */
 export function formatClock(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));

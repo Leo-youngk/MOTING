@@ -1,230 +1,200 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createChapter, flattenChapter } from "../lib/content.ts";
+import { buildEdgeSpeechBatches, createChapter, flattenChapter } from "../lib/content.ts";
+import { speechReplacer } from "../lib/speech-text.ts";
 import {
-  cursorAfterSeconds,
-  GRID_LENGTH,
-  gridSegmentAt,
   nextTier,
-  ordinalOf,
-  spanForSentence,
-  speechIndexFor,
-  speechReplacer,
-  speechSegment,
-  systemSegment,
   TIER_LENGTH,
-  type SpeechCursor,
-  type SpeechSegment,
   type SpeechTier,
+  QUICK_SPEECH_LENGTH,
+  segmentFromChapter,
+  sentenceAfter,
+  spanForSentence,
+  speechSegmentAt,
+  segmentFromBook,
+  spanForBookSentence,
+  nextBookSentence,
 } from "../lib/speech-segments.ts";
-import type { Chapter } from "../lib/types.ts";
+import type { Book, Chapter } from "../lib/types.ts";
 
-function chapter(title: string, paragraphs: string[], order = 0, heading = true): Chapter {
-  const blocks = [
-    ...(heading ? [{ kind: "heading" as const, text: title, level: 2 }] : []),
-    ...paragraphs.map((text) => ({ text })),
-  ];
-  const result = createChapter(title, blocks, order);
-  assert.ok(result);
-  return result;
+function chapterOf(sentenceCount: number, length = 30): Chapter {
+  const text = Array.from(
+    { length: sentenceCount },
+    (_, index) => `第${index}句${"墨".repeat(length)}。`
+  ).join("");
+  const chapter = createChapter("测试章", [{ text }], 0);
+  assert.ok(chapter);
+  return chapter;
 }
 
-/** 一本 count 章的书，每章 paragraphs 段，每段 sentences 句，每句约 length 字。 */
-function book(count: number, paragraphs = 6, sentences = 5, length = 24): Chapter[] {
-  return Array.from({ length: count }, (_, chapterIndex) =>
-    chapter(
-      `第${chapterIndex + 1}章`,
-      Array.from({ length: paragraphs }, (_, paragraph) =>
-        Array.from(
-          { length: sentences },
-          (_, sentence) => `${chapterIndex}-${paragraph}-${sentence}${"墨".repeat(length)}。`
-        ).join("")
-      ),
-      chapterIndex
-    )
+test("从章节中间起播时裁掉前面并重算偏移", () => {
+  const chapter = chapterOf(12);
+  const segment = speechSegmentAt(buildEdgeSpeechBatches(chapter), 5);
+
+  assert.ok(segment);
+  assert.equal(segment.spans[0].sentenceIndex, 5, "第一个 span 就是要起播的那句");
+  assert.equal(segment.spans[0].start, 0, "裁完偏移要从 0 重新起算");
+  assert.ok(segment.text.startsWith("第5句"));
+  for (const span of segment.spans) {
+    assert.equal(segment.text.slice(span.start, span.end).length, span.end - span.start);
+  }
+});
+
+test("短首段明显短于长批次，长批次覆盖的句子更多", () => {
+  const chapter = chapterOf(80);
+  const quick = segmentFromChapter(chapter, 0, "edge", true);
+  const long = segmentFromChapter(chapter, 0, "edge", false);
+
+  assert.ok(quick && long);
+  assert.ok(quick.text.length <= QUICK_SPEECH_LENGTH);
+  assert.ok(
+    long.spans.length > quick.spans.length,
+    "长批次要能一口气覆盖更多句子，否则后台连播又要频繁换源"
   );
-}
+});
 
-function speakableOf(chapters: Chapter[], chapterIndex: number, sentenceIndex: number) {
-  const sentence = flattenChapter(chapters[chapterIndex])[sentenceIndex];
-  return sentence.speakableText || sentence.text;
-}
+test("短首段读完之后接的是紧挨着的下一句，不重不漏", () => {
+  const chapter = chapterOf(80);
+  const quick = segmentFromChapter(chapter, 0, "edge", true);
+  assert.ok(quick);
 
-/** 照播放器的接法一段接一段读到底。 */
-function playThrough(chapters: Chapter[], from: SpeechCursor, maxSegments = 200): SpeechSegment[] {
-  const index = speechIndexFor(chapters);
-  const segments: SpeechSegment[] = [];
-  let cursor: SpeechCursor | null = from;
+  const next = sentenceAfter(quick);
+  const continuation = segmentFromChapter(chapter, next, "edge", false);
+  assert.ok(continuation);
+  assert.equal(
+    continuation.spans[0].sentenceIndex,
+    next,
+    "续播必须正好从首段结束的下一句开始"
+  );
+  assert.equal(
+    quick.spans[quick.spans.length - 1].sentenceIndex + 1,
+    continuation.spans[0].sentenceIndex
+  );
+});
+
+test("超出章节范围返回 null，让调用方去翻下一章", () => {
+  const chapter = chapterOf(6);
+  assert.equal(speechSegmentAt(buildEdgeSpeechBatches(chapter), 999), null);
+  assert.equal(speechSegmentAt([], 0), null);
+});
+
+test("交接时能在段内定位到指定句子", () => {
+  const chapter = chapterOf(40);
+  const segment = segmentFromChapter(chapter, 3, "edge", true);
+  assert.ok(segment);
+
+  const inside = segment.spans[2].sentenceIndex;
+  const span = spanForSentence(segment, inside);
+  assert.ok(span);
+  assert.equal(span.sentenceIndex, inside);
+  assert.equal(
+    spanForSentence(segment, 9999),
+    null,
+    "段外的句子必须报 null，调用方才知道候选音频已经过期"
+  );
+});
+
+test("系统朗读用的小块远小于云端长批次", () => {
+  const chapter = chapterOf(80);
+  const system = segmentFromChapter(chapter, 0, "system", false);
+  const edge = segmentFromChapter(chapter, 0, "edge", false);
+
+  assert.ok(system && edge);
+  assert.ok(
+    system.text.length < edge.text.length,
+    "几千字塞不进 SpeechSynthesisUtterance"
+  );
+});
+
+test("a short chapter tail and the next chapter share one clip without losing chapter-local sentence indexes", () => {
+  const chapters = [
+    createChapter("一", [{ text: "已经听过。章末剩余一句。" }], 0)!,
+    { id: "images", paragraphs: [], sentenceCount: 0 } as unknown as Chapter,
+    createChapter("二", [{ text: "下一章第一句。下一章第二句。" }], 2)!,
+  ];
+  const book = { id: "book", chapters } as Book;
+  const part = segmentFromBook(book, 0, 1, "edge", true)!;
+  // 换章用三个换行（Worker 在那里留 1.8 秒），同一段里的句子直接接上。
+  assert.equal(part.text, "章末剩余一句。\n\n\n下一章第一句。下一章第二句。");
+  assert.deepEqual(part.spans.map(span => [span.chapterIndex, span.sentenceIndex]), [[0, 1], [2, 0], [2, 1]]);
+  assert.equal(spanForBookSentence(part, 2, 0)?.sentenceId, chapters[2].paragraphs[0].sentences[0].id);
+  assert.equal(spanForBookSentence(part, 0, 0), null);
+  assert.deepEqual(nextBookSentence(book, 0, 2), { chapterIndex: 2, sentenceIndex: 0 });
+  assert.equal(nextBookSentence(book, 2, 2), null);
+});
+
+test("the prefetched continuation starts at the exact next sentence across chapters, within the audio budget", () => {
+  const chapters = [chapterOf(5), chapterOf(120), chapterOf(120)];
+  const book = { id: "book", chapters } as Book;
+  let at: { chapterIndex: number; sentenceIndex: number } | null = { chapterIndex: 0, sentenceIndex: 3 };
+  const heard: string[] = [];
+  let first = true;
+  while (at) {
+    const part = segmentFromBook(book, at.chapterIndex, at.sentenceIndex, "edge", first)!;
+    assert.ok(part.text.length <= (first ? QUICK_SPEECH_LENGTH : 4800));
+    heard.push(...part.spans.map(span => `${span.chapterIndex}:${span.sentenceIndex}`));
+    const last = part.spans.at(-1)!;
+    at = nextBookSentence(book, last.chapterIndex, last.sentenceIndex + 1);
+    first = false;
+  }
+  const expected = chapters.flatMap((chapter, ci) => Array.from({ length: chapter.sentenceCount }, (_, si) => `${ci}:${si}`)).slice(3);
+  assert.deepEqual(heard, expected, "no repeated or skipped sentences when clips end in later chapters");
+});
+
+test("chapter sleep mode and system fallback keep clips confined to one chapter", () => {
+  const book = { id: "book", chapters: [chapterOf(2), chapterOf(10)] } as Book;
+  assert.ok(segmentFromBook(book, 0, 1, "edge", false)!.spans.some(span => span.chapterIndex === 1));
+  for (const engine of ["edge", "system"] as const) {
+    assert.ok(segmentFromBook(book, 0, 1, engine, false, false)!.spans.every(span => span.chapterIndex === 0));
+  }
+});
+
+test("结构化文本：换段一个换行、标题前后两个、换章三个，续页章按换段算", () => {
+  const chapters = [
+    createChapter("第一章", [{ kind: "heading", text: "第一章", level: 2 }, { text: "甲。乙。" }, { text: "丙。" }], 0)!,
+    createChapter("未知", [{ text: "丁。" }], 1)!,
+    createChapter("第二章", [{ kind: "heading", text: "第二章", level: 2 }, { text: "戊。" }], 2)!,
+  ];
+  const book = { id: "book", chapters } as Book;
+  const part = segmentFromBook(book, 0, 0, "edge", 2)!;
+  assert.equal(part.text, "第一章\n\n甲。乙。\n丙。\n丁。\n\n\n第二章\n\n戊。");
+  for (const span of part.spans) {
+    const sentence = flattenChapter(chapters[span.chapterIndex])[span.sentenceIndex];
+    assert.equal(part.text.slice(span.start, span.end), sentence.speakableText || sentence.text);
+  }
+});
+
+test("首段 → 第二段 → 长批次逐档变长，接续不重不漏，段尾带上下一句前的换行", () => {
+  const chapters = [chapterOf(40), chapterOf(200)];
+  const book = { id: "book", chapters } as Book;
+  let at: { chapterIndex: number; sentenceIndex: number } | null = { chapterIndex: 0, sentenceIndex: 2 };
   let tier: SpeechTier = 0;
-  while (cursor && segments.length < maxSegments) {
-    const segment = speechSegment(index, cursor, tier);
-    assert.ok(segment);
-    segments.push(segment);
-    cursor = segment.next;
+  const lengths: number[] = [];
+  const heard: string[] = [];
+  while (at) {
+    const part = segmentFromBook(book, at.chapterIndex, at.sentenceIndex, "edge", tier)!;
+    assert.ok(part.text.replace(/\n+$/, "").length <= TIER_LENGTH[tier] || part.spans.length === 1);
+    lengths.push(part.text.length);
+    heard.push(...part.spans.map(span => `${span.chapterIndex}:${span.sentenceIndex}`));
+    const last = part.spans.at(-1)!;
+    at = nextBookSentence(book, last.chapterIndex, last.sentenceIndex + 1);
+    if (at && at.chapterIndex !== last.chapterIndex) assert.ok(part.text.endsWith("\n\n\n"), "下一句在下一章，段尾带上换章的换行");
     tier = nextTier(tier);
   }
-  return segments;
-}
-
-test("换段、标题、换章用不同的换行分隔，续页章按换段算", () => {
-  const chapters = [
-    chapter("第一章", ["甲。乙。", "丙。"], 0),
-    chapter("未知", ["丁。"], 1, false),
-    chapter("第二章", ["戊。"], 2),
-  ];
-  const index = speechIndexFor(chapters);
-  const segment = speechSegment(index, { chapterIndex: 0, sentenceIndex: 0 }, 0);
-  assert.ok(segment);
-  assert.equal(segment.text, "第一章\n\n甲。乙。\n丙。\n丁。\n\n\n第二章\n\n戊。");
-  assert.deepEqual(
-    segment.spans.map((span) => [span.chapterIndex, span.sentenceIndex]),
-    [[0, 0], [0, 1], [0, 2], [0, 3], [1, 0], [2, 0], [2, 1]]
-  );
-  for (const span of segment.spans) {
-    assert.equal(
-      segment.text.slice(span.start, span.end),
-      speakableOf(chapters, span.chapterIndex, span.sentenceIndex)
-    );
-  }
-  assert.equal(segment.next, null);
+  assert.ok(lengths[0] <= TIER_LENGTH[0] + 3 && lengths[1] > lengths[0] && lengths[1] <= TIER_LENGTH[1] + 3);
+  const expected = chapters.flatMap((chapter, ci) => Array.from({ length: chapter.sentenceCount }, (_, si) => `${ci}:${si}`)).slice(2);
+  assert.deepEqual(heard, expected);
 });
 
-test("首段 360 字以内、可以跨章；段尾带上跟下一句之间的换行", () => {
-  const chapters = book(3, 2, 3, 40);
-  const index = speechIndexFor(chapters);
-  const last = flattenChapter(chapters[0]).length - 1;
-  const segment = speechSegment(index, { chapterIndex: 0, sentenceIndex: last }, 0);
-  assert.ok(segment);
-  assert.ok(segment.text.length <= TIER_LENGTH[0] + 3);
-  assert.equal(segment.spans[0].chapterIndex, 0);
-  assert.equal(segment.spans[1].chapterIndex, 1, "章末起播直接接下一章，不会只读一句就去等网络");
-  if (segment.next && ordinalOf(index, segment.next) >= 0) {
-    const nextSeparator = index.sentences[ordinalOf(index, segment.next)].separator;
-    if (nextSeparator.startsWith("\n")) assert.ok(segment.text.endsWith(nextSeparator));
-  }
-});
-
-test("一段接一段读到底，每句恰好读一次，跨章也不重不漏", () => {
-  const chapters = book(6);
-  const segments = playThrough(chapters, { chapterIndex: 1, sentenceIndex: 7 });
-  const read = segments.flatMap((segment) =>
-    segment.spans.map((span) => `${span.chapterIndex}:${span.sentenceIndex}`)
-  );
-  const expected = chapters.flatMap((item, chapterIndex) =>
-    flattenChapter(item).map((_, sentenceIndex) => `${chapterIndex}:${sentenceIndex}`)
-  );
-  assert.deepEqual(read, expected.slice(expected.indexOf("1:7")));
-  assert.deepEqual(
-    segments.slice(0, 3).map((segment) => segment.tier),
-    [0, 1, 2]
-  );
-  assert.ok(segments[0].text.length <= TIER_LENGTH[0] + 3);
-  assert.ok(segments[1].text.length <= TIER_LENGTH[1] + 3);
-});
-
-test("长批次对齐网格：从不同地方开始听，读一阵之后请求的文本完全一样", () => {
-  const chapters = book(30);
-  const a = playThrough(chapters, { chapterIndex: 0, sentenceIndex: 3 });
-  const b = playThrough(chapters, { chapterIndex: 1, sentenceIndex: 11 });
-  const tail = (segments: SpeechSegment[]) => segments.slice(4).map((segment) => segment.text);
-  const shared = tail(b).filter((text) => tail(a).includes(text));
-  assert.ok(shared.length >= 2, "后面的格子应该一字不差，缓存才能复用");
-  for (const segment of a.slice(3)) {
-    assert.ok(segment.text.length <= GRID_LENGTH + 200, "一格不超过网格长度（加上段尾分隔）");
-  }
-});
-
-test("格子里剩得太少就连下一格一起读", () => {
-  const chapters = book(12);
-  const index = speechIndexFor(chapters);
-  const secondCell = index.grid[1];
-  const nearEnd = index.sentences[secondCell - 2];
-  const segment = speechSegment(index, nearEnd, 2);
-  assert.ok(segment);
-  assert.ok(segment.spans.length > 2, "不能只读格子末尾那两句");
-  assert.equal(
-    ordinalOf(index, segment.next ?? { chapterIndex: -1, sentenceIndex: 0 }),
-    index.grid[2] ?? -1
-  );
-});
-
-test("本地有整格音频时能从格子中间播", () => {
-  const chapters = book(8);
-  const index = speechIndexFor(chapters);
-  const cursor = { chapterIndex: 2, sentenceIndex: 9 };
-  const cell = gridSegmentAt(index, cursor);
-  assert.ok(cell);
-  assert.ok(spanForSentence(cell, cursor), "整格要包含这一句");
-  assert.ok(index.grid.includes(ordinalOf(index, cell.spans[0])), "从格子开头起");
-  assert.equal(spanForSentence(cell, { chapterIndex: 99, sentenceIndex: 0 }), null);
-});
-
-test("读音替换：长规则优先，空规则忽略，偏移按替换后的文本算", () => {
-  const replace = speechReplacer([
-    { from: "长", to: "常" },
-    { from: "长大", to: "涨大" },
-    { from: "", to: "x" },
-  ]);
+test("读音纠正改的是送去合成的文字，偏移按替换后的文字算；长规则优先", () => {
+  const replace = speechReplacer([{ from: "长", to: "常" }, { from: "长大", to: "涨大" }, { from: "", to: "x" }]);
   assert.equal(replace("他长大了，长得很长"), "他涨大了，常得很常");
-
-  const chapters = [chapter("第一章", ["行长说。银行很大。"], 0, false)];
-  const index = speechIndexFor(chapters);
-  const segment = speechSegment(
-    index,
-    { chapterIndex: 0, sentenceIndex: 0 },
-    0,
-    speechReplacer([{ from: "行长", to: "航长" }])
-  );
-  assert.ok(segment);
-  assert.equal(segment.text, "航长说。银行很大。");
-  assert.equal(segment.text.slice(segment.spans[1].start, segment.spans[1].end), "银行很大。");
-});
-
-test("系统朗读一块不跨章，读完指向下一章开头", () => {
-  const chapters = book(2, 1, 3, 10);
-  const lastSentence = flattenChapter(chapters[0]).length - 1;
-  const segment = systemSegment(chapters, { chapterIndex: 0, sentenceIndex: lastSentence });
-  assert.ok(segment);
-  assert.ok(segment.spans.every((span) => span.chapterIndex === 0));
-  assert.deepEqual(segment.next, { chapterIndex: 1, sentenceIndex: 0 });
-  assert.equal(systemSegment(chapters, { chapterIndex: 9, sentenceIndex: 0 }), null);
-});
-
-test("按估算时长往前往后挪", () => {
-  const chapters = book(3, 4, 5, 20);
-  const index = speechIndexFor(chapters);
-  const from = { chapterIndex: 1, sentenceIndex: 10 };
-  // 每句 20 多个字，按 4.65 字/秒大约 5 秒。
-  const forward = cursorAfterSeconds(index, from, 15);
-  const backward = cursorAfterSeconds(index, from, -15);
-  assert.ok(forward && backward);
-  assert.ok(forward.sentenceIndex > from.sentenceIndex && forward.sentenceIndex <= from.sentenceIndex + 3);
-  assert.ok(backward.sentenceIndex < from.sentenceIndex && backward.sentenceIndex >= from.sentenceIndex - 4);
-  assert.deepEqual(cursorAfterSeconds(index, { chapterIndex: 0, sentenceIndex: 0 }, -60), {
-    chapterIndex: 0,
-    sentenceIndex: 0,
-  });
-  const lastChapter = chapters.length - 1;
-  const lastSentence = flattenChapter(chapters[lastChapter]).length - 1;
-  assert.deepEqual(cursorAfterSeconds(index, { chapterIndex: lastChapter, sentenceIndex: 0 }, 1e6), {
-    chapterIndex: lastChapter,
-    sentenceIndex: lastSentence,
-  });
-});
-
-test("读音纠正把字变多时，长批次也不会超过 Worker 的长度上限", () => {
-  const chapters = book(30);
-  const index = speechIndexFor(chapters);
-  const longer = speechReplacer([{ from: "墨", to: "墨水瓶里的墨" }]);
-  const segment = speechSegment(index, { chapterIndex: 0, sentenceIndex: 0 }, 2, longer);
-  assert.ok(segment);
-  assert.ok(segment.text.length <= 6000, `${segment.text.length}`);
-  const next = segment.next && speechSegment(index, segment.next, 2, longer);
-  assert.ok(next);
-  assert.equal(
-    ordinalOf(index, next.spans[0]),
-    ordinalOf(index, segment.spans[segment.spans.length - 1]) + 1,
-    "截短之后接着读下一句，不漏"
-  );
+  const chapters = [createChapter("一", [{ text: "行长说。银行很大。" }], 0)!];
+  const book = { id: "book", chapters } as Book;
+  const part = segmentFromBook(book, 0, 0, "edge", 0, true, speechReplacer([{ from: "行长", to: "航长" }]))!;
+  assert.equal(part.text, "航长说。银行很大。");
+  assert.equal(part.text.slice(part.spans[1].start, part.spans[1].end), "银行很大。");
+  const system = segmentFromBook(book, 0, 0, "system", 0, true, speechReplacer([{ from: "行长", to: "航长" }]))!;
+  assert.equal(system.text, "航长说。银行很大。");
 });

@@ -1,5 +1,6 @@
 /**
  * 一批朗读文本的合成：切片、并发、单片重试、拼接。网络和时钟都从参数进来，方便单测。
+ * /api/tts 和 HLS 队列任务共用单片重试（synthesizeChunk）。
  */
 
 import {
@@ -7,6 +8,7 @@ import {
   hasSpeakableText,
   joinSpeechChunks,
   splitSpeechText,
+  splitStructuredSpeech,
 } from "../lib/speech-batch.ts";
 import type { SpeechChunkResult } from "../lib/speech-batch.ts";
 import type { SpeechBoundary } from "../lib/types.ts";
@@ -73,7 +75,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** 判断错误值不值得换一条连接再试：超时、断线、握手被拒都值得；音频超限这种不值得。 */
+/** 值不值得换一条连接再试：超时、断线、握手被拒都值得；音频超限这种不值得。 */
 function retryable(error: unknown): boolean {
   if (!(error instanceof Error)) return true;
   return (
@@ -83,54 +85,55 @@ function retryable(error: unknown): boolean {
   );
 }
 
-async function synthesizeChunk(
+/** 合成一片，临时失败换条连接重试。有字可读却没回音频的，再试一次，还是没有就返回空音频。 */
+export async function synthesizeChunk(
   text: string,
   voice: string,
   signal: AbortSignal,
-  deps: Required<SpeechBatchDeps>,
-  index: number
+  options: SpeechBatchDeps,
+  index = 0
 ): Promise<SpeechChunkResult> {
+  const wait = options.wait ?? sleep;
+  const random = options.random ?? Math.random;
+  const log = options.log ?? (() => undefined);
   let lastError: unknown;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      const result = await deps.synthesize(text, voice, signal);
-      // 有字可读却一个字节都没回：多半是服务抽风，再试一次；还是没有就当这片读不出来。
+      const result = await options.synthesize(text, voice, signal);
       if (!result.audio.length && attempt < 2) {
-        deps.log("tts_chunk_empty", { index, length: text.length, attempt });
+        log("tts_chunk_empty", { index, length: text.length, attempt });
         continue;
       }
       return result;
     } catch (error) {
       if (signal.aborted || isAbort(error)) throw error;
       lastError = error;
-      const message = error instanceof Error ? error.message : String(error);
       if (!retryable(error) || attempt === MAX_ATTEMPTS) break;
-      deps.log("tts_chunk_retry", { index, length: text.length, attempt, error: message });
-      const jitter = 0.8 + deps.random() * 0.4;
-      await deps.wait(RETRY_BASE_MS * 2 ** (attempt - 1) * jitter, signal);
+      const message = error instanceof Error ? error.message : String(error);
+      log("tts_chunk_retry", { index, length: text.length, attempt, error: message });
+      await wait(RETRY_BASE_MS * 2 ** (attempt - 1) * (0.8 + random() * 0.4), signal);
     }
   }
   if (lastError === undefined) return { audio: new Uint8Array(0), boundaries: [] };
   throw lastError;
 }
 
+/**
+ * format 2 是新客户端的结构化文本（换行表示换段、标题、换章），按结构切片、整理拼接处的停顿；
+ * 老客户端每句后面一个换行，照旧切、原样拼。
+ */
 export async function synthesizeBatch(
   rawText: string,
   voice: string,
   signal: AbortSignal,
-  options: SpeechBatchDeps
+  options: SpeechBatchDeps & { structured?: boolean }
 ): Promise<{ audio: Uint8Array<ArrayBuffer>; timeline: SpeechBoundary[] }> {
-  const deps: Required<SpeechBatchDeps> = {
-    wait: sleep,
-    random: Math.random,
-    log: () => undefined,
-    ...options,
-  };
+  const log = options.log ?? (() => undefined);
   const text = cleanSpeechText(rawText);
-  const chunks = splitSpeechText(
-    text,
-    text.length <= SHORT_BATCH_MAX_LENGTH ? SHORT_CHUNK_LENGTH : LONG_CHUNK_LENGTH
-  );
+  const chunkLength = text.length <= SHORT_BATCH_MAX_LENGTH ? SHORT_CHUNK_LENGTH : LONG_CHUNK_LENGTH;
+  const chunks = options.structured
+    ? splitStructuredSpeech(text, chunkLength)
+    : splitSpeechText(text, chunkLength);
   const results = new Array<SpeechChunkResult>(chunks.length);
 
   // 一片彻底失败，剩下的就不用再合成了。
@@ -152,13 +155,7 @@ export async function synthesizeBatch(
             continue;
           }
           try {
-            results[index] = await synthesizeChunk(
-              chunk.text,
-              voice,
-              controller.signal,
-              deps,
-              index
-            );
+            results[index] = await synthesizeChunk(chunk.text, voice, controller.signal, options, index);
           } catch (error) {
             if (!controller.signal.aborted) controller.abort(error);
             throw error;
@@ -174,11 +171,7 @@ export async function synthesizeBatch(
     if (signal.aborted) throw signal.reason ?? error;
     if (error instanceof SpeechBatchError) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    deps.log("tts_batch_failed", {
-      length: text.length,
-      chunks: chunks.length,
-      error: message,
-    });
+    log("tts_batch_failed", { length: text.length, chunks: chunks.length, error: message });
     throw new SpeechBatchError(message || "朗读服务不可用", "service");
   } finally {
     signal.removeEventListener("abort", onAbort);

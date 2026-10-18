@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AppView, MainView } from "../lib/types";
+import { pageScrollY, scrollWhenUnlocked } from "../components/sheet";
 
 /** 冷启动要回到上次待的地方，位置存这里。 */
 const VIEW_KEY = "moting:last-view";
@@ -51,6 +52,13 @@ function keepsScroll(view: AppView): boolean {
   return view.name !== "reader" && view.name !== "player";
 }
 
+/** 这条历史是不是应用自己压的（navigate / replace 写进去的都带 view）。 */
+function isAppEntry(state: unknown): boolean {
+  return !!state && typeof state === "object" && "view" in state;
+}
+
+type RscNavigate = (href: string, redirectDepth?: number, kind?: string, ...rest: unknown[]) => Promise<void>;
+
 function readSaved(): AppView | null {
   try {
     const raw = window.localStorage.getItem(VIEW_KEY);
@@ -83,7 +91,7 @@ export interface AppNavigation {
  * 主页、系统返回手势会直接退出应用、每个返回按钮都写死了目的地而不是回到来处。
  * 这里把视图状态接到 History API 上，三件事一起解决，顺带记住每个列表页的滚动位置。
  */
-export function useAppNavigation(): AppNavigation {
+export function useAppNavigation(onChange?: () => void): AppNavigation {
   // SSR 阶段没有 localStorage，初值只能是主页；真正的恢复放到挂载后做，
   // 否则服务端和客户端首帧对不上会触发 hydration 报错。
   const [view, setView] = useState<AppView>({ name: "home" });
@@ -96,11 +104,13 @@ export function useAppNavigation(): AppNavigation {
   const remember = useCallback(() => {
     const current = viewRef.current;
     if (keepsScroll(current)) {
-      scrollsRef.current.set(viewKey(current), window.scrollY);
+      scrollsRef.current.set(viewKey(current), pageScrollY());
     }
   }, []);
 
   const apply = useCallback((next: AppView) => {
+    onChange?.();
+    (document.activeElement as HTMLElement | null)?.blur();
     viewRef.current = next;
     setView(next);
     if (isTab(next)) setBackgroundView(next.name as MainView);
@@ -109,7 +119,7 @@ export function useAppNavigation(): AppNavigation {
     } catch {
       // 隐私模式下写不进去，代价只是下次冷启动回主页，不影响这一次使用。
     }
-  }, []);
+  }, [onChange]);
 
   const navigate = useCallback(
     (next: AppView) => {
@@ -160,6 +170,24 @@ export function useAppNavigation(): AppNavigation {
     };
   }, []);
 
+  // vinext 的 App Router 也监听 popstate，每次后退都向服务器再要一遍 "/" 的 RSC；
+  // 取不到（离线、弱网、Worker 回 5xx）就 location.href 整页重载——读完书点返回，
+  // 书库先白屏再重新开机。应用自己压的历史条目 URL 全是 "/"，没有服务端内容要换，
+  // 这类后退不交给它。它在事件发生时才读 window.__VINEXT_RSC_NAVIGATE__，换掉这个入口就够了。
+  useEffect(() => {
+    const host = window as unknown as { __VINEXT_RSC_NAVIGATE__?: RscNavigate };
+    const original = host.__VINEXT_RSC_NAVIGATE__;
+    if (typeof original !== "function") return;
+    const navigateRsc: RscNavigate = (href, redirectDepth, kind, ...rest) =>
+      kind === "traverse" && isAppEntry(window.history.state)
+        ? Promise.resolve()
+        : original(href, redirectDepth, kind, ...rest);
+    host.__VINEXT_RSC_NAVIGATE__ = navigateRsc;
+    return () => {
+      if (host.__VINEXT_RSC_NAVIGATE__ === navigateRsc) host.__VINEXT_RSC_NAVIGATE__ = original;
+    };
+  }, []);
+
   useEffect(() => {
     const onPop = (event: PopStateEvent) => {
       remember();
@@ -200,7 +228,7 @@ export function useAppNavigation(): AppNavigation {
   // 回到列表页时把上次滚到哪儿放回去；没记过就是新进来，从头开始。
   useLayoutEffect(() => {
     if (!keepsScroll(view)) return;
-    window.scrollTo(0, scrollsRef.current.get(viewKey(view)) ?? 0);
+    scrollWhenUnlocked(() => window.scrollTo(0, scrollsRef.current.get(viewKey(view)) ?? 0));
   }, [view]);
 
   return { view, backgroundView, navigate, selectTab, replace, goBack };

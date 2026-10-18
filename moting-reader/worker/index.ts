@@ -2,27 +2,23 @@
 import handler from "vinext/server/app-router-entry";
 import { AI_REQUEST_LIMITS } from "../lib/ai";
 import { DEFAULT_EDGE_VOICE } from "../lib/edge-voices";
+import { STRUCTURED_SPEECH_FORMAT } from "../lib/speech-batch";
 import { aiAttemptPlan, aiFailureMessage, aiThinkingOptions, requestWithRetry } from "./ai-upstream";
 import { synthesizeSpeech } from "./edge-tts";
+import { processLiveHlsJob, type LiveHlsJob } from "./live-hls";
 import { SpeechBatchError, synthesizeBatch } from "./speech";
 import { forwardSync, handleSync } from "./sync";
 import { handleWeread } from "./weread";
 import { handleZlibrary } from "./zlibrary";
 
-/** 客户端一批最多 4000 来字，加上跨章补齐的余量和分隔换行，留到 6000。 */
+/** 客户端一批最多 4800 来字，加上分隔换行和读音纠正的余量，留到 6000。 */
 const MAX_TTS_TEXT_LENGTH = 6000;
-/**
- * 合成结果按（格式版本, 音色, 文本）缓存一年。拼接处的停顿规则变了就把版本加一，
- * 免得同一段文本新旧两种停顿混着出。
- */
-const TTS_CACHE_VERSION = "v2";
 const MAX_AI_MODELS_BODY_BYTES = 32 * 1024;
 const MAX_AI_CHAT_BODY_BYTES = 512 * 1024;
 const MAX_TTS_BODY_BYTES = 64 * 1024;
 const MAX_AI_MODELS_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_AI_ERROR_RESPONSE_BYTES = 64 * 1024;
 const AI_MODELS_TIMEOUT_MS = 30000;
-const AI_CHAT_TIMEOUT_MS = 120000;
 /** 上游忙时所有重试加起来最多等这么久。一次 503 本身就要三秒上下，再长用户就以为卡死了。 */
 const AI_RETRY_BUDGET_MS = 30000;
 // 音色名会拼进 SSML 属性，必须限死格式，否则等于把 SSML 注入点暴露出去。
@@ -267,7 +263,8 @@ async function handleAiChat(request: Request): Promise<Response> {
       plan: aiAttemptPlan(model, fallbackProvider?.model ?? fallbackModel, Boolean(fallbackProvider)),
       signal: request.signal,
       budgetMs: AI_RETRY_BUDGET_MS,
-      send: (attemptModel, provider) => {
+      attemptTimeoutMs: payload.deepThinking ? 20000 : 12000,
+      send: (attemptModel, signal, provider) => {
         const connection = provider === "fallback" && fallbackProvider ? fallbackProvider : { baseUrl, apiKey };
         return fetch(`${connection.baseUrl}/chat/completions`, {
           method: "POST",
@@ -279,15 +276,16 @@ async function handleAiChat(request: Request): Promise<Response> {
             model: attemptModel,
             messages,
             stream: true,
-            ...aiThinkingOptions(connection.baseUrl, payload.deepThinking === true),
+            ...aiThinkingOptions(connection.baseUrl, attemptModel, payload.deepThinking === true),
           }),
-          signal: AbortSignal.any([request.signal, AbortSignal.timeout(AI_CHAT_TIMEOUT_MS)]),
+          signal,
         });
       },
       readError: (response) => readResponseText(response, MAX_AI_ERROR_RESPONSE_BYTES),
       // 退路要看得见：每次重试、换备用模型都进 Workers 日志，出了问题能查到底是哪边忙。
       onRetry: (attempt, next) =>
         console.warn("ai upstream retry", { failed: attempt, next: next.model, provider: next.provider ?? "primary" }),
+      onStreamEnd: (model, outcome) => console.log("ai stream ended", { model, outcome }),
     });
   } catch {
     // 用户在等待重试时关掉了对话框，连接已经断了，这个响应不会有人收。
@@ -314,15 +312,23 @@ async function handleAiChat(request: Request): Promise<Response> {
   });
 }
 
-async function cacheKeyFor(text: string, voice: string): Promise<Request> {
+/**
+ * 合成结果按（格式, 音色, 文本）缓存一年。结构化文本的拼接处要整理停顿，跟老格式的音频不一样，
+ * 所以格式号进键；老格式的键保持原样，已有缓存继续命中。
+ */
+async function cacheKeyFor(text: string, voice: string, format: number): Promise<Request> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(`${TTS_CACHE_VERSION}|${voice}|${text}`)
+    new TextEncoder().encode(format === STRUCTURED_SPEECH_FORMAT ? `v${format}|${voice}|${text}` : `${voice}|${text}`)
   );
   const hash = Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
   return new Request(`https://moting-reader.internal/tts/${hash}`);
+}
+
+function logSpeech(event: string, detail: Record<string, unknown>) {
+  console.warn(event, detail);
 }
 
 /** 响应体是 [4 字节大端元数据长度][元数据 JSON][MP3]，避免 base64 多出三分之一体积。 */
@@ -338,10 +344,6 @@ function frameResponse(
   body.set(metadata, 4);
   body.set(audio, 4 + metadata.length);
   return body;
-}
-
-function logSpeech(event: string, detail: Record<string, unknown>) {
-  console.warn(event, detail);
 }
 
 async function handleSpeech(
@@ -364,8 +366,10 @@ async function handleSpeech(
     );
   }
 
-  // 不 trim：客户端的句子下标是按它发来的原文算的，结尾的换行还表示这批读完之后停多久。
-  const text = typeof payload.text === "string" ? payload.text : "";
+  const format = payload.format === STRUCTURED_SPEECH_FORMAT ? STRUCTURED_SPEECH_FORMAT : 1;
+  const raw = typeof payload.text === "string" ? payload.text : "";
+  // 结构化文本不 trim：句子下标按客户端发来的原文算，结尾的换行还表示这批读完之后停多久。
+  const text = format === STRUCTURED_SPEECH_FORMAT ? raw : raw.trim();
   if (!text.trim()) {
     return Response.json({ error: "缺少朗读文本" }, { status: 400 });
   }
@@ -379,7 +383,7 @@ async function handleSpeech(
       : DEFAULT_EDGE_VOICE;
 
   const cache = caches.default;
-  const key = await cacheKeyFor(text, voice);
+  const key = await cacheKeyFor(text, voice, format);
   const cached = await cache.match(key);
   if (cached) return cached;
 
@@ -388,30 +392,18 @@ async function handleSpeech(
     result = await synthesizeBatch(text, voice, request.signal, {
       synthesize: synthesizeSpeech,
       log: logSpeech,
+      structured: format === STRUCTURED_SPEECH_FORMAT,
     });
   } catch (error) {
-    if (request.signal.aborted) {
-      return new Response(null, { status: 499 });
-    }
+    if (request.signal.aborted) return new Response(null, { status: 499 });
     const failure =
       error instanceof SpeechBatchError
         ? error
-        : new SpeechBatchError(
-            error instanceof Error ? error.message : "朗读服务不可用",
-            "service"
-          );
-    logSpeech("tts_failed", {
-      status: failure.status,
-      error: failure.message,
-      length: text.length,
-      voice,
-    });
+        : new SpeechBatchError(error instanceof Error ? error.message : "朗读服务不可用", "service");
+    logSpeech("tts_failed", { status: failure.status, error: failure.message, length: text.length, format, voice });
     return Response.json(
       { error: failure.message },
-      {
-        status: failure.status,
-        headers: failure.kind === "service" ? { "retry-after": "5" } : undefined,
-      }
+      { status: failure.status, headers: failure.kind === "service" ? { "retry-after": "5" } : undefined }
     );
   }
 
@@ -433,6 +425,13 @@ async function handleSpeech(
 }
 
 const worker = {
+  async queue(batch: MessageBatch<LiveHlsJob>, env: Env): Promise<void> {
+    if (!env.BOOKS_BUCKET || !env.AUDIO_QUEUE) throw new Error("音频任务缺少 R2/Queue 绑定");
+    for (const message of batch.messages) {
+      await processLiveHlsJob(message.body, env.BOOKS_BUCKET, env.AUDIO_QUEUE, undefined, env.DB);
+      message.ack();
+    }
+  },
   async fetch(
     request: Request,
     env: Env,
@@ -443,7 +442,7 @@ const worker = {
     if (pathname.startsWith("/api/zlibrary/")) return handleZlibrary(request);
     if (pathname.startsWith("/api/sync/")) {
       // 旧域名部署没有 R2/D1,凭 SYNC_UPSTREAM 把同步请求原样代理到主部署。
-      return env.SYNC_UPSTREAM ? forwardSync(request, env.SYNC_UPSTREAM) : handleSync(request, env);
+      return env.SYNC_UPSTREAM ? forwardSync(request, env.SYNC_UPSTREAM) : handleSync(request, env, ctx);
     }
     if (pathname === "/api/tts") {
       return handleSpeech(request, ctx);
@@ -456,6 +455,6 @@ const worker = {
     }
     return handler.fetch(request, env, ctx);
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<Env, LiveHlsJob>;
 
 export default worker;

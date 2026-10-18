@@ -5,13 +5,14 @@ import {
   aiFailureMessage,
   aiThinkingOptions,
   requestWithRetry,
+  retryAfterMs,
   upstreamErrorMessage,
 } from "../worker/ai-upstream.ts";
 
 const OVERLOADED = '[{"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}]';
 
 function reply(status: number, body = "") {
-  return new Response(status === 200 ? "data: [DONE]\n\n" : body, { status });
+  return new Response(status === 200 ? 'data: {"choices":[{"delta":{"content":"回答"}}]}\n\ndata: [DONE]\n\n' : body, { status });
 }
 
 /** 按顺序吐出预设的响应，并记下每次请求的是哪个模型。 */
@@ -51,26 +52,149 @@ test("a busy primary model hands over to the fallback model", async () => {
   assert.deepEqual(h.waits, [1000]);
 });
 
-test("identical model names on different providers still switch connections", async () => {
-  const calls: Array<[string, string | undefined]> = [];
-  const result = await requestWithRetry({
-    ...harness(), plan: aiAttemptPlan("same-model", "same-model", true),
-    send: async (model, provider) => {
-      calls.push([model, provider]);
-      return reply(provider === "fallback" ? 200 : 429);
-    },
-  });
-  assert.equal(result.ok && result.provider, "fallback");
-  assert.deepEqual(calls, [["same-model", undefined], ["same-model", undefined], ["same-model", "fallback"]]);
+test("HTTP 200 with an empty answer or array-wrapped stream error is retried before output", async () => {
+  const models: string[] = [];
+  const responses = [new Response("data: [DONE]\n\n"), new Response(`data: ${OVERLOADED}\n\n`), reply(200)];
+  const result = await requestWithRetry({ ...harness(), plan: aiAttemptPlan("primary", "fallback"),
+    send: async model => { models.push(model); return responses.shift()!; } });
+  assert.equal(result.ok && result.model, "fallback");
+  assert.deepEqual(models, ["primary", "primary", "fallback"]);
+  if (result.ok) assert.match(await result.response.text(), /回答/);
 });
 
-test("thinking parameters are selected for the actual endpoint", () => {
-  assert.deepEqual(aiThinkingOptions("https://generativelanguage.googleapis.com/v1beta/openai", true), { reasoning_effort: "high" });
-  assert.deepEqual(aiThinkingOptions("https://generativelanguage.googleapis.com/v1beta/openai", false), { reasoning_effort: "low" });
-  assert.deepEqual(aiThinkingOptions("https://api.deepseek.com", false), { thinking: { type: "disabled" } });
-  assert.deepEqual(aiThinkingOptions("https://openrouter.ai/api/v1", true), { reasoning: { enabled: true } });
-  assert.deepEqual(aiThinkingOptions("https://api.openai.com/v1", false), {});
-  assert.deepEqual(aiThinkingOptions("https://example.com/v1", true), { enable_thinking: true });
+test("a stalled first answer is canceled and switches to the fallback within the budget", async () => {
+  const models: string[] = [];
+  let canceled = false;
+  const result = await requestWithRetry({ ...harness(), budgetMs: 500, attemptTimeoutMs: 20,
+    plan: aiAttemptPlan("primary", "fallback"),
+    send: async model => {
+      models.push(model);
+      return model === "fallback" ? reply(200) : new Response(new ReadableStream({ cancel() { canceled = true; } }));
+    } });
+  assert.equal(result.ok && result.model, "fallback");
+  assert.deepEqual(models, ["primary", "fallback"]);
+  assert.equal(canceled, true);
+  if (result.ok) await result.response.text();
+});
+
+test("the startup budget also bounds waiting for HTTP headers", async () => {
+  const started = Date.now();
+  let upstreamSignal: AbortSignal | undefined;
+  const result = await requestWithRetry({ ...harness(), budgetMs: 30,
+    plan: [{ model: "primary", delayMs: 0 }],
+    send: async (_model, signal) => { upstreamSignal = signal; return new Promise(() => {}); } });
+  assert.equal(result.ok, false);
+  assert.equal(!result.ok && result.status, 408);
+  assert.equal(upstreamSignal?.aborted, true);
+  assert.ok(Date.now() - started < 300);
+});
+
+test("a partial reply is preserved and interrupted instead of retried", async () => {
+  let calls = 0;
+  const outcomes: string[] = [];
+  const result = await requestWithRetry({ ...harness(), plan: aiAttemptPlan("primary", "fallback"),
+    send: async () => { calls++; return new Response('data: {"choices":[{"delta":{"content":"半截回答"}}]}\n\n'); },
+    onStreamEnd: (_model, outcome) => outcomes.push(outcome) });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const text = await result.response.text();
+    assert.match(text, /半截回答/);
+    assert.match(text, /回答中途断开/);
+  }
+  assert.equal(calls, 1);
+  assert.deepEqual(outcomes, ["interrupted"]);
+});
+
+test("idle output times out but a steadily producing long answer stays open", async () => {
+  const encoder = new TextEncoder();
+  for (const stalled of [true, false]) {
+    let timer: ReturnType<typeof setInterval>;
+    let canceled = false;
+    let count = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"开头"}}]}\n\n'));
+        if (!stalled) timer = setInterval(() => {
+          controller.enqueue(encoder.encode(++count === 8 ? "data: [DONE]\n\n" : 'data: {"choices":[{"delta":{"content":"继续"}}]}\n\n'));
+          if (count === 8) { clearInterval(timer); controller.close(); }
+        }, 10);
+      },
+      cancel() { clearInterval(timer); canceled = true; },
+    });
+    const result = await requestWithRetry({ ...harness(), budgetMs: 50, idleMs: 30,
+      plan: [{ model: "primary", delayMs: 0 }], send: async () => new Response(body) });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      const text = await result.response.text();
+      assert.equal(text.includes("回答中途断开"), stalled);
+      assert.equal(text.includes("[DONE]"), !stalled);
+    }
+    if (stalled) assert.equal(canceled, true);
+  }
+});
+
+test("429 respects Retry-After and can immediately use a different model", async () => {
+  const h = harness();
+  const models: string[] = [];
+  const result = await requestWithRetry({ ...h, plan: aiAttemptPlan("primary", "fallback"),
+    send: async model => {
+      models.push(model);
+      return model === "primary" ? new Response(OVERLOADED, { status: 429, headers: { "retry-after": "60" } }) : reply(200);
+    } });
+  assert.deepEqual(models, ["primary", "fallback"]);
+  assert.deepEqual(h.waits, []);
+  assert.equal(result.ok, true);
+  if (result.ok) await result.response.text();
+  assert.equal(retryAfterMs("60", "", 0), 60000);
+  assert.equal(retryAfterMs("Thu, 01 Jan 1970 00:01:00 GMT", "", 10000), 50000);
+  assert.equal(retryAfterMs(null, '[{"error":{"details":[{"retryDelay":"60s"}]}}]', 0), 60000);
+  assert.equal(retryAfterMs(null, '{"error":{"message":"RequestsPerDay quota exhausted"}}', 0), 86400000);
+});
+
+test("Google gets supported reasoning settings without affecting other providers", () => {
+  const google = "https://generativelanguage.googleapis.com/v1beta/openai";
+  assert.deepEqual(aiThinkingOptions(google, "models/gemini-2.5-flash", false), { reasoning_effort: "none" });
+  assert.deepEqual(aiThinkingOptions(google, "models/gemini-3.8-flash", false), { reasoning_effort: "low" });
+  assert.deepEqual(aiThinkingOptions(google, "models/gemini-3.8-flash", true),
+    { extra_body: { google: { thinking_config: { thinking_level: "high", include_thoughts: true } } } });
+  assert.deepEqual(aiThinkingOptions(google, "gemini-2.0-flash", false), {});
+  assert.deepEqual(aiThinkingOptions("https://other.example/v1", "m", true), { enable_thinking: true });
+});
+
+test("reasoning-only responses are retried without leaking failed thoughts", async () => {
+  let calls = 0;
+  const result = await requestWithRetry({ ...harness(), plan: aiAttemptPlan("primary", null),
+    send: async () => ++calls === 1
+      ? new Response('data: {"choices":[{"delta":{"reasoning_content":"失败的思考"}}]}\n\ndata: [DONE]\n\n')
+      : reply(200) });
+  assert.equal(result.ok, true);
+  if (result.ok) assert.doesNotMatch(await result.response.text(), /失败的思考/);
+  assert.equal(calls, 2);
+});
+
+test("Retry-After longer than the budget avoids repeating requests to the same model", async () => {
+  let calls = 0;
+  const result = await requestWithRetry({ ...harness(), plan: aiAttemptPlan("primary", null),
+    send: async () => { calls++; return new Response("limited", { status: 429, headers: { "retry-after": "60" } }); } });
+  assert.equal(result.ok, false);
+  assert.equal(calls, 1);
+});
+
+test("forwarding preserves multiline SSE and cancels an active upstream on client cancellation", async () => {
+  let canceled = false;
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(encoder.encode('data: {"choices":\ndata: [{"delta":{"content":"正文"}}]}\n\n')); },
+    cancel() { canceled = true; },
+  });
+  const result = await requestWithRetry({ ...harness(), plan: aiAttemptPlan("primary", null), send: async () => new Response(body) });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const reader = result.response.body!.getReader();
+    assert.match(new TextDecoder().decode((await reader.read()).value), /\ndata: \[/);
+    await reader.cancel();
+  }
+  assert.equal(canceled, true);
 });
 
 test("a single retry is enough when the model recovers", async () => {
@@ -184,4 +308,24 @@ test("the final error says what happened in plain Chinese", () => {
   );
   assert.match(aiFailureMessage(0, [{ model: "lite", status: 0 }], ""), /连不上这个接口地址/);
   assert.match(aiFailureMessage(429, [], ""), /额度/);
+});
+
+
+test("same model name at another provider does not inherit the primary quota cooldown", async () => {
+  const calls: Array<[string, string | undefined]> = [];
+  const result = await requestWithRetry({ ...harness(), plan: aiAttemptPlan("shared", "shared", true),
+    send: async (model, _signal, provider) => {
+      calls.push([model, provider]);
+      return provider ? reply(200) : new Response(OVERLOADED, { status: 429, headers: { "retry-after": "60" } });
+    },
+  });
+  assert.equal(result.ok && result.provider, "fallback");
+  assert.deepEqual(calls, [["shared", undefined], ["shared", "fallback"]]);
+  if (result.ok) await result.response.text();
+});
+
+test("provider-specific thinking preserves the existing Gemini adapter", () => {
+  assert.deepEqual(aiThinkingOptions("https://api.deepseek.com", "fixture", false), { thinking: { type: "disabled" } });
+  assert.deepEqual(aiThinkingOptions("https://openrouter.ai/api/v1", "fixture", true), { reasoning: { enabled: true } });
+  assert.deepEqual(aiThinkingOptions("https://api.openai.com/v1", "fixture", false), {});
 });

@@ -1,13 +1,14 @@
 // 协议参考：bipinkrish/Zlibrary-API 与 ZlibraryKO/zlibrary.koplugin。
 // 独立的 Web Fetch 实现；凭据仅用于用户指定的站点，不转交下载 CDN。
 import { MAX_BOOK_FILE_ERROR } from "../lib/file-limits.ts";
+import { fetchWithTimeout, readWithTimeout } from "../lib/fetch-utils.ts";
 import { ONLINE_BOOK_FORMATS, ONLINE_BOOK_MAX_BYTES, ZLIBRARY_ORIGIN, type OnlineBook } from "../lib/zlibrary-types.ts";
 
 type Json = Record<string, unknown>;
 type Fetcher = typeof fetch;
 const PAGE_SIZE = 20;
 const SEARCH_TIMEOUT_MS = 15_000;
-const SEARCH_RETRY_DELAY_MS = 250;
+const RETRY_DELAY_MS = 250;
 const COOKIE_ID = "moting_zlib_id";
 const COOKIE_KEY = "moting_zlib_key";
 const RETRYABLE_UPSTREAM_STATUS = new Set([408, 425, 500, 502, 503, 504]);
@@ -150,7 +151,7 @@ async function api(path: string, request: Request, fetcher: Fetcher, form?: URLS
       if (request.signal.aborted) throw error;
       if (attempt + 1 < maxAttempts) {
         console.warn("zlibrary_upstream_retry", { path, attempt: attempt + 1, reason: "network" });
-        await waitForRetry(request, SEARCH_RETRY_DELAY_MS);
+        await waitForRetry(request, RETRY_DELAY_MS);
         continue;
       }
       throw new ServiceError("暂时连接不上 zh.z-lib.gd，请稍后重试", 503);
@@ -164,7 +165,7 @@ async function api(path: string, request: Request, fetcher: Fetcher, form?: URLS
       if (retryable && attempt + 1 < maxAttempts) {
         await response.body?.cancel();
         console.warn("zlibrary_upstream_retry", { path, attempt: attempt + 1, reason: `http_${response.status}` });
-        await waitForRetry(request, SEARCH_RETRY_DELAY_MS);
+        await waitForRetry(request, RETRY_DELAY_MS);
         continue;
       }
       await response.body?.cancel();
@@ -202,9 +203,10 @@ function downloadUrl(raw: string): URL {
 }
 
 async function download(request: Request, payload: Json, fetcher: Fetcher): Promise<Response> {
+  const startedAt = Date.now();
   const id = text(payload.id), hash = text(payload.hash);
   if (!/^\d{1,20}$/.test(id) || !/^[a-zA-Z0-9]{1,64}$/.test(hash)) throw new ServiceError("书籍编号无效", 400);
-  const data = await api(`/eapi/book/${id}/${hash}/file`, request, fetcher);
+  const data = await api(`/eapi/book/${id}/${hash}/file`, request, fetcher, undefined, { timeoutMs: 15_000, retryTransient: true });
   const file = object(data.file);
   if (!file.downloadLink) {
     const detail = text(file.disallowDownloadMessage).replace(/<[^>]*>/g, " ").slice(0, 300);
@@ -214,42 +216,127 @@ async function download(request: Request, payload: Json, fetcher: Fetcher): Prom
   const extension = text(file.extension).toLowerCase();
   if (!(ONLINE_BOOK_FORMATS as readonly string[]).includes(extension)) throw new ServiceError("这个版本的格式暂不支持，请选择 EPUB、PDF、TXT 或 Markdown", 422);
   let url = downloadUrl(text(file.downloadLink));
-  let response: Response | undefined;
-  for (let hop = 0; hop < 5; hop++) {
-    try {
-      response = await fetcher(url.href, { redirect: "manual", signal: AbortSignal.any([request.signal, AbortSignal.timeout(120_000)]) });
-    } catch { throw new ServiceError("文件服务器连接失败，请重试", 503); }
-    if (response.status < 300 || response.status >= 400) break;
-    const location = response.headers.get("location");
-    await response.body?.cancel();
-    if (!location) throw new ServiceError("下载跳转缺少地址");
-    url = downloadUrl(new URL(location, url).href);
-    response = undefined;
-  }
-  if (!response?.ok || !response.body) {
-    await response?.body?.cancel();
-    throw new ServiceError("文件下载失败或跳转过多，请重试");
-  }
-  const type = response.headers.get("content-type") || "application/octet-stream";
-  const length = Number(response.headers.get("content-length")) || 0;
-  if (/html|json/i.test(type) || length > ONLINE_BOOK_MAX_BYTES) {
-    await response.body.cancel();
-    throw new ServiceError(length > ONLINE_BOOK_MAX_BYTES ? MAX_BOOK_FILE_ERROR : "下载返回了网页而非书籍文件，请重新登录后重试", 422);
-  }
-  const filename = `${text(file.description).replace(/[<>:"/\\|?*\x00-\x1f]/g, " ").trim().slice(0, 140) || id}.${extension}`;
-  const headers = new Headers({ "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", "x-book-filename": encodeURIComponent(filename), "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}` });
-  // 流式转发；即便没有 Content-Length，也在读取时执行大小上限。
+  const cancelController = new AbortController();
+  const signal = AbortSignal.any([request.signal, cancelController.signal]);
+  let length = 0;
+  let validator = "";
   let received = 0;
-  const limited = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      received += chunk.byteLength;
-      if (received > ONLINE_BOOK_MAX_BYTES) throw new Error(MAX_BOOK_FILE_ERROR);
-      controller.enqueue(chunk);
+  let retried = false;
+
+  type Connection = { reader: ReadableStreamDefaultReader<Uint8Array>; first?: ReadableStreamReadResult<Uint8Array>; type: string };
+  async function connect(): Promise<Connection> {
+    signal.throwIfAborted();
+    const headers = new Headers({ "accept-encoding": "identity" });
+    if (received) {
+      headers.set("range", `bytes=${received}-`);
+      headers.set("if-range", validator);
+    }
+    let response: Response | undefined;
+    for (let hop = 0; hop < 5; hop++) {
+      try {
+        // 首次正文最多等一分钟；传输期间只限制空闲，不截断持续下载的大书。
+        const remaining = received ? 15_000 : Math.max(1, startedAt + 60_000 - Date.now());
+        response = await fetchWithTimeout(url.href, { headers, redirect: "manual", cache: "no-store", signal }, Math.min(15_000, remaining), fetcher);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        throw new ServiceError("文件服务器连接失败，请重试", 503);
+      }
+      if (response.status < 300 || response.status >= 400) break;
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (!location) throw new ServiceError("下载跳转缺少地址");
+      url = downloadUrl(new URL(location, url).href);
+      response = undefined;
+    }
+    if (!response?.ok || !response.body) {
+      await response?.body?.cancel();
+      const status = response?.status;
+      throw new ServiceError("文件下载失败或跳转过多，请重试", status && RETRYABLE_UPSTREAM_STATUS.has(status) ? 503 : status === 429 ? 429 : 502);
+    }
+    const type = response.headers.get("content-type") || "application/octet-stream";
+    const encoded = !!response.headers.get("content-encoding") && response.headers.get("content-encoding") !== "identity";
+    const size = Number(response.headers.get("content-length")) || 0;
+    if (/html|json/i.test(type) || size + received > ONLINE_BOOK_MAX_BYTES) {
+      await response.body.cancel();
+      throw new ServiceError(size + received > ONLINE_BOOK_MAX_BYTES ? MAX_BOOK_FILE_ERROR : "下载返回了网页而非书籍文件，请重新登录后重试", 422);
+    }
+    if (received) {
+      const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("content-range") || "");
+      const sameFile = response.headers.get("etag") === validator || response.headers.get("last-modified") === validator;
+      if (response.status !== 206 || encoded || !range || Number(range[1]) !== received || Number(range[3]) !== length || Number(range[2]) !== length - 1 || !sameFile) {
+        await response.body.cancel();
+        throw new ServiceError("文件服务器不支持安全续传，请重新下载");
+      }
+    } else {
+      if (response.status === 206) { await response.body.cancel(); throw new ServiceError("文件服务器返回了不完整的版本，请重试"); }
+      length = encoded ? 0 : size;
+      const etag = response.headers.get("etag") || "";
+      validator = !encoded ? (etag && !etag.startsWith("W/") ? etag : response.headers.get("last-modified") || "") : "";
+    }
+    const reader = response.body.getReader();
+    try {
+      const remaining = received ? 20_000 : Math.max(1, startedAt + 60_000 - Date.now());
+      const first = await readWithTimeout(reader, signal, Math.min(20_000, remaining));
+      if (first.done || !first.value.byteLength) throw new ServiceError("文件服务器没有返回正文，请重试", 503);
+      if (!received && /^\s*(?:<!doctype\s+html|<html|<head|<body)/i.test(new TextDecoder().decode(first.value.subarray(0, 512)))) throw new ServiceError("下载返回了网页而非书籍文件，请重新登录后重试", 422);
+      return { reader, first, type };
+    } catch (error) {
+      void reader.cancel().catch(() => {});
+      reader.releaseLock();
+      throw error;
+    }
+  }
+
+  async function retry(error: unknown) {
+    signal.throwIfAborted();
+    if (retried || (error instanceof ServiceError && error.status !== 503) || (received && (!length || !validator || received >= length))) throw error;
+    retried = true;
+    console.warn("zlibrary_download_retry", { phase: received ? "resume" : "startup", bytes: received });
+    await waitForRetry(request, RETRY_DELAY_MS);
+    return connect();
+  }
+
+  let connection: Connection;
+  try { connection = await connect(); } catch (error) { connection = await retry(error); }
+  const filename = `${text(file.description).replace(/[<>:"/\\|?*\x00-\x1f]/g, " ").trim().slice(0, 140) || id}.${extension}`;
+  const headers = new Headers({ "content-type": connection.type, "cache-control": "no-store", "x-content-type-options": "nosniff", "x-book-filename": encodeURIComponent(filename), "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}` });
+  if (length) headers.set("x-book-size", String(length));
+  const release = () => { void connection.reader.cancel().catch(() => {}); connection.reader.releaseLock(); };
+  const limited = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      while (!signal.aborted) {
+        try {
+          const chunk = connection.first ?? await readWithTimeout(connection.reader, signal, 20_000);
+          connection.first = undefined;
+          if (chunk.done) {
+            if (length && received !== length) throw new Error("Incomplete book download");
+            connection.reader.releaseLock();
+            console.info("zlibrary_download_complete", { bytes: received, durationMs: Date.now() - startedAt, retried });
+            controller.close();
+            return;
+          }
+          received += chunk.value.byteLength;
+          if (received > ONLINE_BOOK_MAX_BYTES) throw new ServiceError(MAX_BOOK_FILE_ERROR, 422);
+          if (length && received > length) throw new ServiceError("文件大小与下载信息不符，请重试");
+          controller.enqueue(chunk.value);
+          return;
+        } catch (error) {
+          release();
+          try { connection = await retry(error); }
+          catch (failure) {
+            console.warn("zlibrary_download_failed", { bytes: received, durationMs: Date.now() - startedAt, canceled: signal.aborted });
+            controller.error(failure);
+            return;
+          }
+        }
+      }
+      controller.error(signal.reason);
     },
-    flush() {
-      if (!received || (length && !response?.headers.get("content-encoding") && received !== length)) throw new Error("Incomplete book download");
+    cancel(reason) {
+      cancelController.abort(reason);
+      release();
     },
-  }));
+  });
   return new Response(limited, { headers });
 }
 

@@ -2,6 +2,7 @@
 
 import "./book-metadata.css";
 
+import { retryDelay, type PushFailure } from "../lib/sync-record";
 import {
   ArrowDown,
   ArrowUp,
@@ -13,7 +14,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
-  Download,
   FileText,
   Headphones,
   Highlighter,
@@ -64,12 +64,7 @@ import { useAppNavigation } from "../hooks/use-app-navigation";
 import { useAppUpdate } from "../hooks/use-app-update";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
-import {
-  SKIP_SECONDS,
-  useSpeechPlayer,
-  type SleepMode,
-  type SpeechDownload,
-} from "../hooks/use-speech-player";
+import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
 import { AiRequestError, modelHistory, streamAiChat } from "../lib/ai";
 import { fallbackAiProvider } from "../lib/ai-providers";
 import {
@@ -126,10 +121,13 @@ import {
   getSyncSession,
   loginSync,
   logoutSync,
+  pushPending,
   runSync,
+  runProgressSync,
   SyncError,
   type SyncAppliedKind,
 } from "../lib/sync";
+import { followScrollDelta, newerPosition } from "../lib/follow-speech";
 import {
   clearLibrary,
   getAllBookMetadata,
@@ -142,6 +140,10 @@ import {
   getSettings,
   getStats,
   getSyncState,
+  getProgressQueue,
+  recoverReadingBackups,
+  saveLocalListeningPosition,
+  resolveProgressConflict,
   onStorageUpgrade,
   saveSession,
   removeBook,
@@ -156,6 +158,7 @@ import {
   saveSettings,
   updateBookMeta,
 } from "../lib/storage";
+import type { QueuedProgress } from "../lib/sync-progress";
 import {
   DEFAULT_SETTINGS,
   DEFAULT_STATS,
@@ -195,9 +198,11 @@ import {
 } from "../lib/reader-options";
 import { wereadCoverDisplayUrl } from "../lib/weread";
 import { useSafeInsets, type SafeInsets } from "../hooks/use-safe-insets";
-import { useTextSelection } from "../hooks/use-text-selection";
+import { useTextSelection, wordAtPoint } from "../hooks/use-text-selection";
+import { isEnglishText, isMidSentence, lookupSpans } from "../lib/dictionary";
 import { SelectionLayer } from "./selection-layer";
-import { Modal, SheetCancelButton, scrollWhenUnlocked, useScrollLock } from "./sheet";
+import { WordGlossCard, glossKey, type GlossTarget } from "./word-gloss";
+import { Modal, PageActiveContext, SheetCancelButton, scrollWhenUnlocked, useScrollLock } from "./sheet";
 import { SoftRange } from "./soft-range";
 import { SettingsScreen } from "./settings-screen";
 import {
@@ -205,7 +210,7 @@ import {
   type Placement,
   type Rect,
 } from "../lib/popover-placement";
-import { resolvedEdgeVoiceURI } from "../lib/edge-voices";
+import { EDGE_VOICES, resolvedEdgeVoiceURI } from "../lib/edge-voices";
 import { Bookstore } from "./bookstore";
 import { HomeStore } from "./home-store";
 import { OnlineLibrary } from "./online-library";
@@ -261,6 +266,15 @@ async function loadParsers() {
 const CONTENT_CACHE_BOOKS = 3;
 /** 提示条退场动画的时长，和 CSS 里 .toast.is-leaving 对齐。 */
 const TOAST_EXIT_MS = 180;
+/** 上一轮同步结束不到这么久又回到前台，就不再拉一轮（桌面上来回切窗口很频繁）。 */
+const RESUME_SYNC_GAP_MS = 10_000;
+/** 锁屏听书时隔这么久把听书进度推一次上云。 */
+const BACKGROUND_PUSH_MS = 2 * 60_000;
+
+interface ToastAction {
+  label: string;
+  run: () => void;
+}
 /** layout 里的开机脚本读这个键：上次的书架配色、阅读配色，和两者的底色。 */
 const THEME_KEY = "moting:theme";
 
@@ -2534,8 +2548,8 @@ type ReaderPopupState =
  * 曾经宽到接近 400px，靠边的选区会把它整个挤出屏幕，最边上那一项根本点不到。
  * 所以先渲染、量、再摆，第一帧用 visibility 藏住，避免闪一下。
  *
- * 内容也跟着收敛：第一层只留划线、想法、复制，其余进「更多」，
- * 这样常规宽度就压在 300px 上下，靠边时也还有夹取余量。
+ * 五个动作（划线、想法、复制、从这里听、问 AI）一排摆齐，不再把后两个收进「更多」：
+ * 照微信读书把图标放在字上面，每项窄成一列，整条压在 280px 上下，375px 的屏上靠边也放得下。
  */
 function ReaderPopover({
   popup,
@@ -2561,7 +2575,6 @@ function ReaderPopover({
   onAskAi: () => void;
 }) {
   const nodeRef = useRef<HTMLDivElement>(null);
-  const [more, setMore] = useState(false);
   const [placement, setPlacement] = useState<Placement | null>(null);
   /**
    * 最近一次按在浮条上的时刻。长按选字抬手时，浏览器会在手指的位置补发一个 click，
@@ -2578,22 +2591,6 @@ function ReaderPopover({
     [popup]
   );
 
-  // 换了一处选区就回到第一层，否则上次翻开的「更多」会粘在下一次。
-  // 这里按「选中的是哪几个字」比，不按像素位置——滚动时菜单会重新量位置，
-  // 拿坐标当身份会让用户正看着的那一层被重置掉。
-  const identity =
-    popup.kind === "mark"
-      ? popup.note.id
-      : popup.parts
-          .map((part) => `${part.sentenceId}:${part.start}-${part.end}`)
-          .join("|");
-  const [lastIdentity, setLastIdentity] = useState(identity);
-  if (identity !== lastIdentity) {
-    setLastIdentity(identity);
-    setMore(false);
-  }
-
-  // 翻到「更多」会换一批按钮、宽度跟着变，所以 more 也得进依赖重新量。
   useLayoutEffect(() => {
     const node = nodeRef.current;
     if (!node) return;
@@ -2618,7 +2615,7 @@ function ReaderPopover({
       observer.disconnect();
       window.removeEventListener("resize", update);
     };
-  }, [top, bottom, left, right, rects, insets, more, popup.kind]);
+  }, [top, bottom, left, right, rects, insets, popup.kind]);
 
   const style: CSSProperties = placement
     ? {
@@ -2691,35 +2688,16 @@ function ReaderPopover({
         {popup.kind === "mark" ? (
           <>
             <button type="button" onClick={onThought}>
-              <PencilLine size={16} />
+              <PencilLine size={19} />
               {popup.note.thought ? "改想法" : "想法"}
             </button>
             <button type="button" onClick={onCopy}>
-              <Copy size={16} />
+              <Copy size={19} />
               复制
             </button>
             <button type="button" onClick={onDelete}>
-              <Trash2 size={16} />
+              <Trash2 size={19} />
               删除
-            </button>
-          </>
-        ) : more ? (
-          <>
-            <button
-              type="button"
-              className="reader-popover__back"
-              aria-label="返回上一层"
-              onClick={() => setMore(false)}
-            >
-              <ChevronLeft size={16} />
-            </button>
-            <button type="button" onClick={onListen}>
-              <Headphones size={16} />
-              从这里听
-            </button>
-            <button type="button" onClick={onAskAi}>
-              <Sparkles size={16} />
-              问 AI
             </button>
           </>
         ) : (
@@ -2728,20 +2706,24 @@ function ReaderPopover({
               type="button"
               onClick={() => onHighlight(defaultColor, defaultStyle)}
             >
-              <Highlighter size={16} />
+              <Highlighter size={19} />
               划线
             </button>
             <button type="button" onClick={onThought}>
-              <PencilLine size={16} />
+              <PencilLine size={19} />
               想法
             </button>
             <button type="button" onClick={onCopy}>
-              <Copy size={16} />
+              <Copy size={19} />
               复制
             </button>
-            <button type="button" onClick={() => setMore(true)}>
-              <MoreHorizontal size={16} />
-              更多
+            <button type="button" onClick={onListen}>
+              <Headphones size={19} />
+              从这里听
+            </button>
+            <button type="button" onClick={onAskAi}>
+              <Sparkles size={19} />
+              问 AI
             </button>
           </>
         )}
@@ -2758,12 +2740,17 @@ const AI_TOC_LIMIT = 6000;
 /** 刚发出的问题滚到顶栏下面时离顶栏的距离。改它要同步 CSS 里 .ai-chat__latest 的最小高度。 */
 const LATEST_GAP = 16;
 
-/** 起手提问：拿真实的书名和章节标题拼，只是把常问的几件事摆出来，不编造内容。 */
+/**
+ * 起手提问：拿真实的书名和章节标题拼，只是把常问的几件事摆出来，不编造内容。
+ * 英文模式下划的是英文句子时，先给翻译和拆句——读英文最常卡在这两处。
+ */
 function starterPrompts(
   book: BookMeta,
   chapter: Chapter | undefined,
-  hasQuote: boolean
+  hasQuote: boolean,
+  englishQuote = false
 ) {
+  if (hasQuote && englishQuote) return ["翻译成中文", "拆解句子结构", "这段在说什么"];
   if (hasQuote) return ["这段在说什么", "举个例子", "和前后文什么关系"];
   const list = ["这本书主要在讲什么"];
   if (chapter) list.push(`讲讲《${chapterLabelFor(book.chapterOutline, chapter.id)}》这一章`);
@@ -2812,6 +2799,11 @@ async function askAi({
   const chapterContext = chapter
     ? `\n\n当前章节《${chapterTitle}》正文${chapterText.length >= AI_CHAPTER_TEXT_LIMIT ? "（篇幅较长，只截取了前面一部分）" : ""}：\n${chapterText}`
     : "";
+  // 英文模式下读的是英文章节：读者英语基础一般，讲解要照顾到。关着英文模式或是中文书，提示词一字不变。
+  const englishNote =
+    settings.englishMode && isEnglishText(chapterText)
+      ? "\n这是一本英文书，读者英语基础一般：讲解一律用中文；翻译要通顺自然；讲句子结构时先找出主干，再讲从句和修饰成分，少用语法术语。"
+      : "";
   await streamAiChat(
     {
       baseUrl: settings.aiBaseUrl,
@@ -2825,7 +2817,7 @@ async function askAi({
       messages: [
         {
           role: "system",
-          content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。\n如有需要可使用 Markdown 格式（标题、加粗、列表、代码块等）让回答更清晰，但不必为简短回答刻意加格式。${brief ? "\n这次回答显示在正文旁边的批注里，控制在 200 字以内，直接说结论，不要用标题。" : ""}`,
+          content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。\n如有需要可使用 Markdown 格式（标题、加粗、列表、代码块等）让回答更清晰，但不必为简短回答刻意加格式。${englishNote}${brief ? "\n这次回答显示在正文旁边的批注里，控制在 200 字以内，直接说结论，不要用标题。" : ""}`,
         },
         ...modelHistory(history),
       ],
@@ -3041,6 +3033,7 @@ function AiAskPanel({
     let content = "";
     let reasoning = "";
     let answeredBy = "";
+    let failure = "";
     streamTextRef.current = { content: "", reasoning: "" };
     try {
       await askAi({
@@ -3060,8 +3053,9 @@ function AiAskPanel({
         },
       });
     } catch (err) {
-      if (err instanceof AiRequestError) setError(err.message);
-      else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
+      failure = err instanceof AiRequestError ? err.message
+        : controller.signal.aborted ? "回答已停止，可继续回答" : "请求失败，稍后再试";
+      setError(failure);
     } finally {
       if (streamFrameRef.current !== null) {
         window.cancelAnimationFrame(streamFrameRef.current);
@@ -3070,11 +3064,12 @@ function AiAskPanel({
       streamTextRef.current = { content, reasoning };
       const next: AiChatTurn[] = [
         ...history,
-        { id: assistantId, replyTo, role: "assistant", content, reasoning, ...fallbackMark(answeredBy, settings) },
+        { id: assistantId, replyTo, role: "assistant", content, reasoning,
+          ...(failure ? { error: failure } : {}), ...fallbackMark(answeredBy, settings) },
       ];
       setTurns(next);
       setBusy(false);
-      // 没答上来的这一轮只留在眼前（带着「重试」），不写进这本书的对话记录。
+      // 空回答不保存；已有正文的半截回答连同失败原因保留，重开后仍能继续。
       onTurnsChange(next.filter(isAnsweredTurn));
     }
   };
@@ -3091,6 +3086,7 @@ function AiAskPanel({
       );
     }
     const streaming = busy && turn.id === activeAnswerId;
+    const failure = turn.error || (turn.id === activeAnswerId ? error : "");
     const reasoningOpen = openReasoning.has(index);
     return (
       <div className="ai-ask__turn-assistant" key={turn.id ?? index}>
@@ -3136,15 +3132,16 @@ function AiAskPanel({
             {turn.model ? <span className="ai-ask__via">主模型太忙，由备用模型 {turn.model} 回答</span> : null}
           </div>
         ) : null}
-        {turn.id === activeAnswerId && error && !busy ? (
+        {failure && !streaming ? (
           <div className="ai-ask__failed">
-            <p className="ai-ask__error">{error}</p>
-            {turn.content ? null : (
-              <button type="button" className="ai-ask__retry" onClick={retry}>
+            <p className="ai-ask__error">{failure}</p>
+            {index === turns.length - 1 ? (
+              <button type="button" className="ai-ask__retry" disabled={busy}
+                onClick={() => turn.content ? ask("请从中断处继续完成回答，不要重复已经给出的内容。") : retry()}>
                 <RefreshCw size={14} />
-                重试
+                {turn.content ? "继续回答" : "重试"}
               </button>
-            )}
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -3240,7 +3237,12 @@ function AiAskPanel({
           <div className="ai-chat__row">
             {configured && !turns.length ? (
               <div className="ai-chat__starters" aria-label="建议提问">
-                {starterPrompts(book, chapter, isFreshQuote).map((preset) => (
+                {starterPrompts(
+                  book,
+                  chapter,
+                  isFreshQuote,
+                  settings.englishMode && isEnglishText(text)
+                ).map((preset) => (
                   <button
                     type="button"
                     key={preset}
@@ -3303,6 +3305,7 @@ function AiInlineAsk({
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [via, setVia] = useState<string | undefined>();
+  const historyRef = useRef<AiChatTurn[]>([]);
   const controllerRef = useRef<AbortController | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -3314,13 +3317,14 @@ function AiInlineAsk({
     []
   );
 
-  const run = async (preset?: string) => {
+  const run = async (preset?: string, retry = false) => {
     if (busy || !configured) return;
     const userText = (preset ?? question).trim() || "帮我讲讲这段话";
-    const history: AiChatTurn[] = [
+    const history: AiChatTurn[] = retry ? historyRef.current : [
       ...turns,
       { id: makeId("turn"), role: "user", content: userText, quote: text },
     ];
+    historyRef.current = history;
     setAsked(userText);
     setQuestion("");
     setAnswer("");
@@ -3331,6 +3335,7 @@ function AiInlineAsk({
     let content = "";
     let reasoning = "";
     let answeredBy = "";
+    let failure = "";
     const assistantId = makeId("turn");
     const replyTo = history.at(-1)?.id;
     setVia(undefined);
@@ -3353,15 +3358,17 @@ function AiInlineAsk({
         },
       });
     } catch (err) {
-      if (err instanceof AiRequestError) setError(err.message);
-      else if ((err as Error)?.name !== "AbortError") setError("请求失败，稍后再试");
+      failure = err instanceof AiRequestError ? err.message
+        : controller.signal.aborted ? "回答已停止，可继续回答" : "请求失败，稍后再试";
+      setError(failure);
     } finally {
       setBusy(false);
       // 这一轮照样进这本书的常驻对话，正文里的批注只是它的即时视图。没答上来的空回答不留。
       onTurnsChange(
         [
           ...history,
-          { id: assistantId, replyTo, role: "assistant" as const, content, reasoning, ...fallbackMark(answeredBy, settings) },
+          { id: assistantId, replyTo, role: "assistant" as const, content, reasoning,
+            ...(failure ? { error: failure } : {}), ...fallbackMark(answeredBy, settings) },
         ].filter(isAnsweredTurn)
       );
     }
@@ -3428,7 +3435,12 @@ function AiInlineAsk({
               </button>
             </div>
             <div className="ai-inline__starters">
-              {starterPrompts(book, chapter, true).map((preset) => (
+              {starterPrompts(
+                book,
+                chapter,
+                true,
+                settings.englishMode && isEnglishText(text)
+              ).map((preset) => (
                 <button
                   type="button"
                   key={preset}
@@ -3458,6 +3470,9 @@ function AiInlineAsk({
 
       {answer !== null && !busy ? (
         <div className="ai-inline__actions">
+          {error && !answer ? (
+            <button type="button" onClick={() => void run(asked, true)}><RefreshCw size={13} />重试</button>
+          ) : null}
           <button type="button" onClick={() => void copy()}>
             {copied ? <Check size={13} /> : <Copy size={13} />}
             {copied ? "已复制" : "复制"}
@@ -3584,13 +3599,31 @@ function holdInPlace(element: HTMLElement, container: HTMLElement): () => void {
  */
 const READING_ANCHOR_TOP = 150;
 
+/** 跳转落点：scrollIntoView 的几种，外加 anchor = 放到阅读进度那条锚点线上。 */
+type RevealBlock = ScrollLogicalPosition | "anchor";
+
+/** 手指在正文上挪过这么远才算「自己在翻」，正文跟读就此停下。轻点时的抖动不算。 */
+const FOLLOW_GESTURE_SLOP = 12;
+/** 这几个键在正文里是翻页、滚动。 */
+const PAGING_KEYS = new Set([
+  "ArrowDown",
+  "ArrowUp",
+  "ArrowLeft",
+  "ArrowRight",
+  "PageDown",
+  "PageUp",
+  "Home",
+  "End",
+  " ",
+]);
+
 /** 滚动过程中最多隔这么久留一份「卸载兜底」快照。防抖落盘仍然是 400ms。 */
 const SNAPSHOT_INTERVAL_MS = 250;
 
 /**
  * 阅读位置的同步兜底。
  *
- * 正式的落盘走 IndexedDB，但那是攒 2.5 秒一批、而且是异步的：手机上把应用划掉、
+ * 正式的落盘走 IndexedDB，但它是异步的：手机上把应用划掉、
  * 或者系统回收 PWA 时，pagehide 里那次补写根本来不及完成，最近几秒读的就丢了，
  * 下次进来退回更早的位置——这正是「有时候进度有偏移」。localStorage 是同步写，
  * 拿它兜住最后一下；两边谁新用谁。
@@ -3625,11 +3658,15 @@ function ReaderScreen({
   settings,
   currentSentenceId,
   speakingChapterIndex,
+  speakingSentenceIndex,
+  speechPlaying,
+  jumpTo,
   chatTurns,
   onChatChange,
   onBack,
   onProgress,
   onStartListening,
+  onTogglePlayback,
   onHighlight,
   onUpdateNote,
   onDeleteNote,
@@ -3641,6 +3678,13 @@ function ReaderScreen({
   settings: ReaderSettings;
   currentSentenceId: string;
   speakingChapterIndex: number;
+  speakingSentenceIndex: number;
+  /** 这本书正在出声（暂停、没在听都是 false）。 */
+  speechPlaying: boolean;
+  /** 点了「另一台设备读到了…」的「跳转」：id 每点一次加一。 */
+  jumpTo: { id: number; position: BookPosition } | null;
+  /** 听读同步打开、且这本书在播放器里时才有：底栏的暂停/继续。 */
+  onTogglePlayback?: () => void;
   chatTurns: AiChatTurn[];
   onChatChange: (turns: AiChatTurn[]) => void;
   onBack: () => void;
@@ -3656,8 +3700,8 @@ function ReaderScreen({
   onSettingsChange: (settings: ReaderSettings) => void;
   onToast: (message: string) => void;
 }) {
-  const restorePosition = latestPosition(book);
-  const initial = restorePosition ?? initialPosition(book);
+  // 一次阅读会话只确定一次初始位置。同步和进度回写不能重选恢复目标。
+  const [initial] = useState(() => latestPosition(book) ?? initialPosition(book));
   const [chapterIndex, setChapterIndex] = useState(initial.chapterIndex);
   const [showChapters, setShowChapters] = useState(false);
   const tocListRef = useRevealActiveChapter(showChapters);
@@ -3682,6 +3726,9 @@ function ReaderScreen({
     sentenceIds: string[];
     anchorId: string;
   } | null>(null);
+  // 英文段落里点中的那个词，有值时浮出释义卡。
+  const [glossTarget, setGlossTarget] = useState<GlossTarget | null>(null);
+  const closeGloss = useCallback(() => setGlossTarget(null), []);
   const articleRef = useRef<HTMLElement>(null);
   const insets = useSafeInsets();
   // iPhone 上由应用接管正文选择，桌面和拿不到 caret 定位的浏览器退回系统选择。
@@ -3702,6 +3749,9 @@ function ReaderScreen({
   const savedSentenceRef = useRef(initial.sentenceId);
   /** 上次存下来的「锚点线落在这句第几像素」，用来判断同一段里是否已经读过了一行以上。 */
   const savedOffsetRef = useRef(initial.anchorOffset ?? 0);
+  const savedPageOffsetRef = useRef(initial.pageOffset ?? 0);
+  const restoringRef = useRef(false);
+  const flushReaderProgressRef = useRef<() => void>(() => {});
   // onProgress 每次渲染都是新的箭头函数，book 也随每一次进度回写换引用。把它们直接
   // 写进观察器的依赖，就等于每渲染一次都把盯着上千个句子元素的观察器拆了重建。
   const progressRef = useRef(onProgress);
@@ -3720,6 +3770,7 @@ function ReaderScreen({
     pageIndexRef.current = next;
     setPageIndex(next);
     setPopup(null);
+    setGlossTarget(null);
   }, []);
   const chapter = book.chapters[chapterIndex];
   const tocList = useMemo(() => tocIndexes(book.chapters), [book.chapters]);
@@ -3788,7 +3839,7 @@ function ReaderScreen({
 
   // 进入章节时要落到哪一页：句子 id、章末，或者不动。
   const restoreRef = useRef<string | "last" | null>(
-    book.readingPosition?.sentenceId ?? null
+    initial.sentenceId
   );
   const previousPagedRef = useRef(paged);
 
@@ -3796,6 +3847,7 @@ function ReaderScreen({
     if (paged && !previousPagedRef.current) {
       // 连续阅读中保存点一直在更新；切入分页时应使用当前屏幕的锚点，而非进书时的旧位置。
       restoreRef.current = savedSentenceRef.current;
+      savedPageOffsetRef.current = 0;
     } else if (!paged) {
       restoreRef.current = null;
     }
@@ -3837,13 +3889,27 @@ function ReaderScreen({
         ? target.getBoundingClientRect().left -
           article.getBoundingClientRect().left
         : pageIndexRef.current * step;
-      goToPage(Math.max(0, Math.min(count - 1, Math.round(offset / step))));
+      // 句子从这一栏的第几像素开始都算这一页：四舍五入的话，从右半行开头的句子会落到下一页。
+      goToPage(Math.max(0, Math.min(count - 1, Math.floor((offset + 1) / step) + savedPageOffsetRef.current)));
     };
 
+    let cancelled = false;
+    restoringRef.current = true;
     measure();
+    // WebKit 冷启动可能先用备用字体排栏；字体就绪未必改变 article 尺寸，
+    // ResizeObserver 收不到文字重排，必须按同一句重新算页。
+    void document.fonts.ready.then(() => {
+      if (cancelled) return;
+      measure();
+      restoringRef.current = false;
+    });
     const observer = new ResizeObserver(measure);
     observer.observe(article);
-    return () => observer.disconnect();
+    return () => {
+      cancelled = true;
+      restoringRef.current = false;
+      observer.disconnect();
+    };
   }, [
     paged,
     chapterIndex,
@@ -3855,52 +3921,57 @@ function ReaderScreen({
     goToPage,
   ]);
 
-  useEffect(() => {
+  // 第一次落位得在绘制之前：从书库点进来是点击触发的更新，普通 effect 也会赶在绘制前跑；
+  // 冷启动（刷新、被 iOS 回收后重开）直接落进阅读器时不是，会先画出一帧章首再跳到读到的地方。
+  useLayoutEffect(() => {
     if (paged) return;
-    const targetId = restorePosition?.sentenceId;
+    // 必须先排好目标章再量位置，避免先按估算高度定位、下一帧又整章撑开。
+    primeSection(articleRef.current?.querySelector<HTMLElement>(
+      `[data-chapter-section="${rangeRef.current.start}"]`
+    ));
+    const targetId = savedSentenceRef.current;
+    const anchorOffset = savedOffsetRef.current;
     if (!targetId) return;
-    // 刚打开一本没读过的书时，openReader 会写一条「第一章第一句」的起始位置。
+    // 刚打开一本没读过的书时，初始位置是「第一章第一句」。
     // 那种情况不该去定位：把第一句对到锚点线等于把章节标题顶出屏幕，
     // 而书本来就该从头显示。真读到过第一句也一样——那时页面本来就在顶上。
     if (
-      restorePosition.chapterIndex === 0 &&
-      restorePosition.sentenceIndex === 0 &&
-      !restorePosition.anchorOffset
+      initial.chapterIndex === 0 &&
+      initial.sentenceId === targetId &&
+      initial.sentenceIndex === 0 &&
+      !anchorOffset
     ) {
       return;
     }
 
-    // 定位只在进书后的这一小段窗口里做，而且一旦成功、或者发现用户已经在滚，
-    // 就立刻把所有钩子摘干净。之前放到 8 秒、成功后还留着 ResizeObserver，
-    // iPhone 上冷启动版面稳得慢（读库、渲染、图片占位、地址栏收起导致视口变高），
-    // 会被一次次重新唤醒，表现就是刚进书滑动发滞、过一会才正常。
+    // 真实书的首次重进里，第一次滚准之后，上方正文仍可能在接下来几帧排版：
+    // 提前停掉校正会留下整段高度的偏差。短时间继续复查，到期或用户一动就退出。
+    // 不能重新放宽到几秒，否则会妨碍刚进书时的手势。
     const SETTLE_WINDOW_MS = 1500;
+    const MIN_STABLE_MS = 200;
+    const QUIET_MS = 200;
     let settled = false;
     let frame = 0;
     let resize: ResizeObserver | null = null;
+    let targetElement: HTMLElement | null = null;
     const deadline = Date.now() + SETTLE_WINDOW_MS;
-    /** 我们自己滚到的位置，用来把「用户在滚」和「我们在滚」区分开。 */
-    let appliedY = window.scrollY;
-
+    const startedAt = Date.now();
+    let lastAdjustmentAt = startedAt;
+    restoringRef.current = true;
     const stop = () => {
       if (settled) return;
       settled = true;
+      restoringRef.current = false;
       if (frame) cancelAnimationFrame(frame);
       frame = 0;
       resize?.disconnect();
       resize = null;
-      window.removeEventListener("scroll", onUserScroll);
       window.removeEventListener("wheel", stop);
       window.removeEventListener("touchstart", stop);
       window.removeEventListener("touchmove", stop);
+      window.removeEventListener("pointerdown", stop);
       window.removeEventListener("keydown", stop);
     };
-
-    function onUserScroll() {
-      // 这一下要是我们自己滚出来的就不算；否则说明用户已经在读了，立刻收手。
-      if (Math.abs(window.scrollY - appliedY) <= 1) return;
-      stop();
-    }
 
     /**
      * 把这句话放回保存时的那个高度。返回「是不是已经到位」。
@@ -3910,20 +3981,23 @@ function ReaderScreen({
      * 所以这里要实际复查一次位置，没到位就交给下面的循环继续盯。
      */
     const place = () => {
-      const element = articleRef.current?.querySelector<HTMLElement>(
-        `[data-sentence-id="${targetId}"]`
-      );
+      const element = targetElement?.isConnected
+        ? targetElement
+        : articleRef.current?.querySelector<HTMLElement>(
+            `[data-sentence-id="${targetId}"]`
+          );
       if (!element) return false;
+      targetElement = element;
       // 目标高度 = 锚点线往上退回「当初读到这句第几像素」，这样长段落读到一半
       // 也能回到原处，而不是退回整段开头。
       const targetTop =
-        READING_ANCHOR_TOP - (restorePosition?.anchorOffset ?? 0);
+        READING_ANCHOR_TOP - anchorOffset;
       const driftNow = () => element.getBoundingClientRect().top - targetTop;
 
       const drift = driftNow();
       if (Math.abs(drift) <= 2) return true;
       window.scrollBy(0, drift);
-      appliedY = window.scrollY;
+      lastAdjustmentAt = Date.now();
 
       // 这里不能用「已经滚到底了就算到位」来提前收工：正文刚挂上的那几帧
       // scrollHeight 只有一屏、maxScroll 恰好是 0，那个判断会在第一帧就为真，
@@ -3933,16 +4007,19 @@ function ReaderScreen({
 
     const settle = () => {
       if (settled) return;
-      // 用户已经在滚了（scrollY 离开了我们上次 place() 落下的位置），别再拽回去。
-      // scroll 事件是异步派发的，ResizeObserver／rAF 回调有可能先跑到——
-      // 尤其是滑动触发接章／摘章时，版面变化会让 ResizeObserver 抢先回调，
-      // 光靠 onUserScroll 拦不住这一下，表现就是「刚进书滑动会被弹回原位」。
-      if (Math.abs(window.scrollY - appliedY) > 1) {
-        stop();
-        return;
-      }
-      // 一次落位就收手，不再留着钩子等下一次版面变化。
-      if (place() || Date.now() > deadline) {
+      // ResizeObserver、字体就绪和 rAF 共用一个调度，不能各自启动一条校正循环。
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+      // 这里不能用 scrollY 的变化判断手势：首次渲染的文档可能短得只能滚
+      // 535px，正文接着排开时浏览器会自己改动 scrollY；那不是用户在滚。
+      // 用户输入由下方的 touch / wheel / pointer / keydown 事件立即停止恢复。
+      const aligned = place();
+      const now = Date.now();
+      // 初次对准只是暂时的：上方段落和字体随后可能再改变高度。
+      // 连续稳定一小段时间才结束，最多保留 1.5 秒；所有手势仍立即 stop。
+      if (now > deadline ||
+          (aligned && now - startedAt >= MIN_STABLE_MS &&
+           now - lastAdjustmentAt >= QUIET_MS && document.fonts?.status !== "loading")) {
         stop();
         return;
       }
@@ -3950,8 +4027,7 @@ function ReaderScreen({
     };
     settle();
 
-    // 窗口内版面还在长高（接章、图片占位、视口变化）时补一次；一旦落位，
-    // stop() 会把这个观察器一起摘掉。
+    // 窗口内版面还在长高（接章、图片占位、视口变化）时补一次。
     resize = new ResizeObserver(() => {
       if (settled || Date.now() > deadline) return;
       settle();
@@ -3963,12 +4039,12 @@ function ReaderScreen({
       settle();
     });
 
-    window.addEventListener("scroll", onUserScroll, { passive: true });
     window.addEventListener("wheel", stop, { passive: true, once: true });
     window.addEventListener("touchstart", stop, { passive: true, once: true });
     // 点进书的那一下 touchstart 在 effect 挂上之前就派发过了，once 监听器接不到；
     // 手指还没抬就开始滑时，靠 touchmove 兜住这段手势，立刻停止位置恢复。
     window.addEventListener("touchmove", stop, { passive: true, once: true });
+    window.addEventListener("pointerdown", stop, { passive: true, once: true });
     window.addEventListener("keydown", stop, { once: true });
     return stop;
     // 只在进入这本书／切换阅读模式时回到上次的位置。连续滚动里 chapterIndex 会随滑动
@@ -3980,21 +4056,43 @@ function ReaderScreen({
   useEffect(() => {
     const article = articleRef.current;
     if (!paged || !article) return;
-    const timer = setTimeout(() => {
+    const savePage = (final = false) => {
+      if (!final && restoringRef.current) return;
       // 正文整体被平移过，当前页的左边界要把平移量加回去才算得对。
       const left =
-        article.getBoundingClientRect().left + pageIndex * pageStep;
-      const target = Array.from(
+        article.getBoundingClientRect().left + pageIndexRef.current * pageStep;
+      const sentences = Array.from(
         article.querySelectorAll<HTMLElement>("[data-sentence-id]")
-      ).find((element) => element.getBoundingClientRect().right > left + 1);
+      );
+      const first = sentences.findIndex(
+        (element) => element.getBoundingClientRect().right > left + 1
+      );
+      // 这一页开头常是上一页没说完的半句。记它的话，恢复时按它的开头落页，会退回上一页；
+      // 所以记这一页上第一句从头开始的。整页都是同一句（长句跨好几页）时只能记它。
+      const startsHere = sentences.slice(Math.max(first, 0)).find((element) => {
+        const head = element.getClientRects()[0];
+        return !!head && head.left >= left - 1 && head.left < left + pageStep - 1;
+      });
+      const target = startsHere ?? sentences[first];
       const id = target?.dataset.sentenceId;
       const index = Number(target?.dataset.sentenceIndex);
-      if (!id || Number.isNaN(index) || savedSentenceRef.current === id) return;
+      if (!id || Number.isNaN(index) || !pageStep) return;
+      const origin = target.getBoundingClientRect().left - article.getBoundingClientRect().left;
+      const pageOffset = Math.max(0, pageIndexRef.current - Math.floor((origin + 1) / pageStep));
+      if (savedSentenceRef.current === id && savedPageOffsetRef.current === pageOffset) return;
       savedSentenceRef.current = id;
+      savedPageOffsetRef.current = pageOffset;
+      savedOffsetRef.current = 0;
       showLivePosition(chapterIndex, index);
-      progressRef.current(positionFor(bookRef.current, chapterIndex, index));
-    }, 320);
-    return () => clearTimeout(timer);
+      progressRef.current({ ...positionFor(bookRef.current, chapterIndex, index), pageOffset });
+    };
+    const flushPage = () => savePage(true);
+    flushReaderProgressRef.current = flushPage;
+    const timer = setTimeout(() => savePage(), 320);
+    return () => {
+      clearTimeout(timer);
+      if (flushReaderProgressRef.current === flushPage) flushReaderProgressRef.current = () => {};
+    };
   }, [paged, pageIndex, pageStep, pageCount, chapterIndex, showLivePosition]);
 
   useEffect(() => {
@@ -4097,13 +4195,19 @@ function ReaderScreen({
     };
 
     const saveAnchor = () => {
+      if (restoringRef.current) return;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = null;
+      pendingSave = null;
       const anchor = measureAnchor();
       if (anchor) commitAnchor(anchor);
     };
+    flushReaderProgressRef.current = saveAnchor;
 
     let snapshotAt = 0;
 
     const schedule = () => {
+      if (restoringRef.current) return;
       // 当场先量一份快照：卸载时（退出阅读器、切书）effect 清理跑在 DOM 拆掉之后，
       // 那时再量是量不到的，只能靠这份快照把最后这一下补写进去。
       //
@@ -4132,14 +4236,29 @@ function ReaderScreen({
     window.addEventListener("scroll", schedule, { passive: true });
     return () => {
       window.removeEventListener("scroll", schedule);
+      if (flushReaderProgressRef.current === saveAnchor) flushReaderProgressRef.current = () => {};
       // 卸载前如果还有没落盘的最新位置（防抖还没到），立即量一次存掉，
       // 不能让 clearTimeout 把用户刚读到的地方悄悄扔了。
       if (pendingTimer) {
         clearTimeout(pendingTimer);
-        pendingSave?.();
+        if (!restoringRef.current) pendingSave?.();
       }
     };
   }, [book.id, paged, showLivePosition]);
+
+  // 在 DOM 还在、页面尚未冻结时同步保存。父组件的后台推送随后才能拿到最终位置。
+  useEffect(() => {
+    const flush = () => flushReaderProgressRef.current();
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush, true);
+    window.addEventListener("popstate", flush, true);
+    document.addEventListener("visibilitychange", onHide, true);
+    return () => {
+      window.removeEventListener("pagehide", flush, true);
+      window.removeEventListener("popstate", flush, true);
+      document.removeEventListener("visibilitychange", onHide, true);
+    };
+  }, []);
 
   // 接章、摘章、整章排版都会改变正文上方的高度，不补偿的话页面会当场跳一下。
   // 改之前记住视口里正在看的那一段在哪，改完按它的位移把滚动条推回去。
@@ -4207,19 +4326,23 @@ function ReaderScreen({
   // 补偿用的 scrollBy 又会按规范中止这段动画，最后停在半路。
   const pendingScrollRef = useRef<{
     selector: string;
-    block: ScrollLogicalPosition;
+    block: RevealBlock;
   } | null>(null);
 
   // 滚到目标，再盯住它直到上方的占位都撑开完。只滚一下的话 iOS 上会被撑开的段落推走。
   const releaseHoldRef = useRef<(() => void) | null>(null);
   const revealTarget = useCallback(
-    (selector: string, block: ScrollLogicalPosition) => {
+    (selector: string, block: RevealBlock) => {
       releaseHoldRef.current?.();
       releaseHoldRef.current = null;
       const article = articleRef.current;
       const element = article?.querySelector<HTMLElement>(selector);
       if (!article || !element) return;
-      element.scrollIntoView({ block });
+      if (block === "anchor") {
+        window.scrollBy(0, element.getBoundingClientRect().top - READING_ANCHOR_TOP);
+      } else {
+        element.scrollIntoView({ block });
+      }
       releaseHoldRef.current = holdInPlace(element, article);
     },
     []
@@ -4236,7 +4359,7 @@ function ReaderScreen({
    * 跳转是重新开窗，不是接章，所以不做锚点补偿。
    */
   const jumpWithin = useCallback(
-    (index: number, selector: string, block: ScrollLogicalPosition) => {
+    (index: number, selector: string, block: RevealBlock) => {
       const last = bookRef.current.chapters.length - 1;
       viewAnchorRef.current = null;
       pendingScrollRef.current = { selector, block };
@@ -4309,10 +4432,170 @@ function ReaderScreen({
     return () => observer.disconnect();
   }, [paged, speakingMounted, currentSentenceId, range.start, range.end]);
 
+  // 听读同步打开时正文跟着朗读走（设置里的开关，默认关，关着时上面那条规矩不变）。
+  // 手在正文上一滑就停下来，不跟读者抢；朗读句滑出去了照样露小圆点，点一下回去并接着跟。
+  const following = settings.followSpeech;
+  const [followPaused, setFollowPaused] = useState(false);
+  const followPausedRef = useRef(false);
+  const pauseFollow = useCallback((paused: boolean) => {
+    followPausedRef.current = paused;
+    setFollowPaused(paused);
+  }, []);
+
+  useEffect(() => {
+    if (!following) return;
+    const inText = (target: EventTarget | null) =>
+      target instanceof Node && !!articleRef.current?.parentElement?.contains(target);
+    let start: { x: number; y: number } | null = null;
+    const movedFar = (x: number, y: number) =>
+      !!start && Math.hypot(x - start.x, y - start.y) > FOLLOW_GESTURE_SLOP;
+    const onTouchStart = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      start = touch && inText(event.target) ? { x: touch.clientX, y: touch.clientY } : null;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (touch && movedFar(touch.clientX, touch.clientY)) pauseFollow(true);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.pointerType !== "mouse") return;
+      start = inText(event.target) ? { x: event.clientX, y: event.clientY } : null;
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (event.pointerType === "mouse" && event.buttons && movedFar(event.clientX, event.clientY)) {
+        pauseFollow(true);
+      }
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (inText(event.target)) pauseFollow(true);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (PAGING_KEYS.has(event.key) && !(event.target instanceof HTMLInputElement) &&
+          !(event.target instanceof HTMLTextAreaElement)) {
+        pauseFollow(true);
+      }
+    };
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("wheel", onWheel, { passive: true });
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [following, pauseFollow]);
+
+  /** 分页模式里这个元素落在第几页。 */
+  const pageOf = (element: HTMLElement) => {
+    const article = articleRef.current;
+    if (!article || !pageStep) return pageIndexRef.current;
+    const offset = element.getBoundingClientRect().left - article.getBoundingClientRect().left;
+    return Math.max(0, Math.min(pageCount - 1, Math.floor((offset + 1) / pageStep)));
+  };
+
+  /**
+   * 把某一句摆出来。follow 是跟读：句子还看得见就不动，要动也是平滑地翻过去；
+   * 否则是跳转：当场落到锚点线上，再按住直到上方版面稳下来。
+   */
+  const showSentence = (
+    ch: number,
+    sentenceId: string,
+    sentenceIndex: number,
+    mode: "follow" | "jump"
+  ) => {
+    const selector = `[data-sentence-id="${sentenceId}"]`;
+    if (paged) {
+      if (ch !== chapterIndex) {
+        setPopup(null);
+        restoreRef.current = sentenceId;
+        savedSentenceRef.current = sentenceId;
+        setChapterIndex(ch);
+        showLivePosition(ch, sentenceIndex);
+        const jumped = { start: ch, end: ch };
+        rangeRef.current = jumped;
+        setRange(jumped);
+        return;
+      }
+      const element = articleRef.current?.querySelector<HTMLElement>(selector);
+      if (!element) return;
+      const page = pageOf(element);
+      if (page !== pageIndexRef.current) goToPage(page);
+      return;
+    }
+    const element = articleRef.current?.querySelector<HTMLElement>(selector);
+    if (!element) {
+      // 已经走到窗口之外的章去了：按那一章重新开窗，落地后再滚过去。
+      jumpWithin(ch, selector, "anchor");
+      return;
+    }
+    if (mode === "jump") {
+      revealTarget(selector, "anchor");
+      return;
+    }
+    const rect = element.getBoundingClientRect();
+    const delta = followScrollDelta(rect.top, rect.bottom, window.innerHeight, READING_ANCHOR_TOP);
+    if (!delta) return;
+    const smooth =
+      Math.abs(delta) < window.innerHeight * 1.5 &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.scrollBy({ top: delta, behavior: smooth ? "smooth" : "auto" });
+  };
+
+  // 浮条、目录、设置、写想法、问 AI 这些开着时不挪正文，关掉之后下一句再跟上。
+  const followBlocked =
+    !!popup ||
+    textSelection.active ||
+    showChapters ||
+    showSettings ||
+    showReaderMenu ||
+    !!thoughtDraft ||
+    askAiText !== null ||
+    !!inlineAsk;
+
+  useEffect(() => {
+    if (!following || !speechPlaying || !currentSentenceId || speakingChapterIndex < 0) return;
+    if (followPausedRef.current || followBlocked) return;
+    // 跟着读就按朗读句记阅读进度：句子没出舒适区时正文不动、不会有滚动来替它记。
+    const position = positionFor(bookRef.current, speakingChapterIndex, speakingSentenceIndex);
+    savedSentenceRef.current = position.sentenceId;
+    savedOffsetRef.current = 0;
+    rememberPosition(bookRef.current.id, position);
+    progressRef.current(position);
+    showSentence(speakingChapterIndex, currentSentenceId, speakingSentenceIndex, "follow");
+    // showSentence 每次渲染都是新的，只按朗读位置和开关变化来跟。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [following, speechPlaying, currentSentenceId, speakingChapterIndex, followBlocked, followPaused]);
+
+  // 另一台设备读到了别处、用户点了「跳转」。跳过去就别让跟读马上又把正文拽回朗读处。
+  // 只认打开之后才点的：上回点过的那次还留在上层，重新打开这本书时不能再跳一遍。
+  const initialJumpIdRef = useRef(jumpTo?.id);
+  useEffect(() => {
+    if (!jumpTo || jumpTo.id === initialJumpIdRef.current) return;
+    const { position } = jumpTo;
+    const chapter = bookRef.current.chapters[position.chapterIndex];
+    if (!chapter) return;
+    pauseFollow(true);
+    showSentence(position.chapterIndex, position.sentenceId, position.sentenceIndex, "jump");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpTo?.id]);
+
   const showRecall =
-    !paged && !!currentSentenceId && !(speakingMounted && speakingVisible);
+    !!currentSentenceId &&
+    (paged ? following && followPaused : !(speakingMounted && speakingVisible));
 
   const scrollToSpeaking = () => {
+    // 跟读时落到锚点线上：跟读本来就把朗读句放在那儿，放到屏幕正中的话下一句又得挪一次。
+    if (following || paged) {
+      pauseFollow(false);
+      showSentence(speakingChapterIndex, currentSentenceId, speakingSentenceIndex, "jump");
+      return;
+    }
     const selector = `[data-sentence-id="${currentSentenceId}"]`;
     if (articleRef.current?.querySelector(selector)) {
       revealTarget(selector, "center");
@@ -4375,6 +4658,7 @@ function ReaderScreen({
 
     function step() {
       timer = 0;
+      if (restoringRef.current) { arm(WINDOW_IDLE_MS); return; }
       if (touching || selectionActiveRef.current) return;
       const quietFor = performance.now() - lastScrollAt;
       if (quietFor < WINDOW_IDLE_MS) {
@@ -4602,6 +4886,27 @@ function ReaderScreen({
     setPopup({ kind: "mark", anchor, note: created });
   };
 
+  /**
+   * 英文模式下，这一下点在英文段落的哪个词上。英文模式关着就什么都不做；开着时先看段落
+   * 是不是英文，中文段落每次单击只多一次 closest 和一遍字数统计，不去按坐标找字。
+   */
+  const glossTargetAt = (event: MouseEvent<HTMLElement>): GlossTarget | null => {
+    if (!settings.englishMode) return null;
+    const article = articleRef.current;
+    const block =
+      event.target instanceof Element ? event.target.closest(".reader-block") : null;
+    if (!article || !block || !isEnglishText(block.textContent ?? "")) return null;
+    const word = wordAtPoint(article, event.clientX, event.clientY);
+    if (!word) return null;
+    const spans = lookupSpans(word.text, word.start, word.end);
+    if (!spans.length) return null;
+    return {
+      sentenceId: word.sentenceId,
+      spans,
+      midSentence: isMidSentence(word.text, spans[spans.length - 1].start),
+    };
+  };
+
   const handleArticleClick = (event: MouseEvent<HTMLElement>) => {
     // 刚翻过页就别再顺手把那一下当成选句子。
     if (turnedRef.current) {
@@ -4631,6 +4936,20 @@ function ReaderScreen({
         return;
       }
     }
+    // 英文段落里点中一个词：弹释义卡，再点同一个词收起。中文段落、空白、行尾照旧往下走。
+    const target = glossTargetAt(event);
+    if (target) {
+      setPopup(null);
+      setGlossTarget((current) =>
+        current && glossKey(current) === glossKey(target) ? null : target
+      );
+      return;
+    }
+    // 释义卡开着时点空白只是收起它，不顺手切沉浸。
+    if (glossTarget) {
+      setGlossTarget(null);
+      return;
+    }
     // 单击一律只切沉浸模式。想从某处开始听要先划词，再用浮条上的「从这里听」。
     setPopup(null);
     setChromeVisible((value) => !value);
@@ -4643,6 +4962,8 @@ function ReaderScreen({
     setChapterIndex(safe);
     const position = positionFor(currentBook, safe, 0);
     savedSentenceRef.current = position.sentenceId;
+    savedOffsetRef.current = 0;
+    savedPageOffsetRef.current = 0;
     onProgress(position);
     restoreRef.current = landing === "last" ? "last" : null;
     setPopup(null);
@@ -4925,6 +5246,18 @@ function ReaderScreen({
   // 不然浮层的呼吸缺口里会露出还在显示、还能点的浮条，看着像一条横杠。
   // 不改 chromeVisible 本身：浮层关掉后 chrome 要精确回到用户手动切换前的显隐状态。
   const overlayOpen = showChapters || showSettings || Boolean(thoughtDraft) || askAiText !== null;
+  // 菜单、浮层、选区、划线浮条一出来，或者手指开始拖着翻页、英文模式关掉，释义卡就让位。
+  if (
+    glossTarget &&
+    (overlayOpen ||
+      showReaderMenu ||
+      textSelection.active ||
+      activePopup ||
+      isDragging ||
+      !settings.englishMode)
+  ) {
+    setGlossTarget(null);
+  }
   // 进度条的实时页码：分页模式用手指翻页时立刻变的 pageIndex，跟底栏原来那行文字
   // 同一个算法；滚动模式没有 pageIndex，退回 currentPage（阅读位置驱动，锚点线
   // 停稳后 400ms 内更新，跟 TOC 里「第 X 页」用的是同一个近似值）。
@@ -4944,7 +5277,7 @@ function ReaderScreen({
           type="button"
           className="reader-chrome__back"
           aria-label="返回书架"
-          onClick={onBack}
+          onClick={() => { flushReaderProgressRef.current(); onBack(); }}
         >
           <ChevronLeft size={24} />
         </button>
@@ -5001,6 +5334,21 @@ function ReaderScreen({
         <span className="reader-chrome__pos-label">
           {livePage}/{pagination.total}页
         </span>
+        {/* 听读同步时「从这里听」不离开正文，暂停和继续就放在这儿。 */}
+        {onTogglePlayback ? (
+          <button
+            type="button"
+            className="reader-chrome__menu"
+            aria-label={speechPlaying ? "暂停朗读" : "继续朗读"}
+            onClick={onTogglePlayback}
+          >
+            {speechPlaying ? (
+              <Pause size={17} fill="currentColor" />
+            ) : (
+              <Play size={17} fill="currentColor" style={{ marginLeft: 2 }} />
+            )}
+          </button>
+        ) : null}
         <button
           type="button"
           className="reader-chrome__menu"
@@ -5077,6 +5425,16 @@ function ReaderScreen({
         dragging={textSelection.dragging}
       />
 
+      {glossTarget ? (
+        <WordGlossCard
+          key={glossKey(glossTarget)}
+          target={glossTarget}
+          articleRef={articleRef}
+          insets={insets}
+          onClose={closeGloss}
+        />
+      ) : null}
+
       {activePopup ? (
         <ReaderPopover
           popup={activePopup}
@@ -5106,6 +5464,8 @@ function ReaderScreen({
                 : findSentence(book, activePopup.note.sentenceId);
             dismissSelection();
             if (!place) return;
+            // 从这里开始听，跟读也从这里重新接上。
+            pauseFollow(false);
             onStartListening(
               positionFor(book, place.chapterIndex, place.sentenceIndex)
             );
@@ -5339,6 +5699,26 @@ function ReaderScreen({
               />
             </label>
 
+            {/* 英文模式默认关：关着时单击、问 AI 都跟以前一样，打开才点词出释义。 */}
+            <label className="rset-row">
+              <span className="rset-row__label">
+                英文模式
+                <small className="rset-row__hint">点英文单词看中文释义</small>
+              </span>
+              <span className="ai-switch">
+                <input
+                  type="checkbox"
+                  checked={settings.englishMode}
+                  onChange={(event) =>
+                    applySettings({ ...settings, englishMode: event.target.checked })
+                  }
+                />
+                <span className="ai-switch__track">
+                  <span className="ai-switch__thumb" />
+                </span>
+              </span>
+            </label>
+
             <div className="compact-toggle rset-layout">
               {(["scroll", "page"] as const).map((mode) => (
                 <button
@@ -5376,21 +5756,24 @@ interface PlayerControls {
   sleepMode: SleepMode;
   sleepDeadline: number | null;
   activeVoiceURI: string;
-  usingFallback: boolean;
-  download: SpeechDownload | null;
+  pendingVoiceURI: string;
+  voiceError: string;
   start: (bookId: string, position?: BookPosition) => void;
   toggle: () => void;
   stop: () => void;
+  skipSentences: (delta: number) => void;
   skipSeconds: (seconds: number) => void;
   changeChapter: (delta: number) => void;
   setSleepMode: (mode: SleepMode) => void;
+  retryVoiceSwitch: () => void;
+  prefetchVoices: (voiceURIs: string[]) => void;
+  cancelVoicePrefetch: () => void;
   prefetchStart: (book: Book, position: BookPosition) => void;
-  downloadAhead: (bookId: string, chapters: number) => void;
-  cancelDownload: () => void;
+  recentVoiceURIs: string[];
 }
 
-/** 离线缓存一次往后缓存几章。 */
-const DOWNLOAD_CHAPTERS = 3;
+/** 播放页前进、后退一次跳几秒（屏幕上的时间，已经除过倍速）。 */
+const SKIP_SECONDS = 15;
 
 /** 定时关闭还剩多久，每秒走一下；只在播放页开着、定时开着的时候跑。 */
 function useCountdown(deadline: number | null): number | null {
@@ -5447,7 +5830,9 @@ function PlayerScreen({
           player.location.chapterIndex,
           player.location.sentenceIndex
         )
-      : book.listeningPosition ?? initialPosition(book);
+      : (settings.followSpeech
+          ? newerPosition(book.readingPosition, book.listeningPosition)
+          : book.listeningPosition) ?? initialPosition(book);
   const tocList = useMemo(() => tocIndexes(book.chapters), [book.chapters]);
   const tocActive = tocIndexFor(tocList, basePosition.chapterIndex);
   // 进度条和时长只管目录里的这一项，跟微信读书一样一章一章算，不是全书。
@@ -5540,8 +5925,26 @@ function PlayerScreen({
     prefetchStart(book, positionFor(book, prefetchChapter, prefetchSentence));
   }, [book, prefetchChapter, prefetchSentence, playing, prefetchStart]);
 
-  const openVoicePanel = () => setShowVoice(true);
-  const closeVoicePanel = () => setShowVoice(false);
+  /**
+   * 打开音色面板就顺手把几个候选的短首段备上：用户开面板多半就是要换，
+   * 备好之后点下去能命中缓存、同步起播，这才是 1 秒内出声的来源。
+   * 最近用过的排前面，剩下的按云端音色本身的顺序补齐。
+   */
+  const openVoicePanel = () => {
+    setShowVoice(true);
+    if (!activeForBook) return;
+    const candidates = [
+      ...player.recentVoiceURIs,
+      ...EDGE_VOICES.map((voice) => voice.voiceURI),
+    ].filter((voiceURI) => voiceURI !== player.activeVoiceURI);
+    player.prefetchVoices(candidates);
+  };
+
+  const closeVoicePanel = () => {
+    setShowVoice(false);
+    // 面板一关，没人要的准备任务就该停，别再占着上游连接。
+    player.cancelVoicePrefetch();
+  };
 
   const toggleView = () =>
     setViewMode((mode) => (mode === "cover" ? "text" : "cover"));
@@ -5555,15 +5958,6 @@ function PlayerScreen({
         : sleepLeft !== null
           ? formatClock(sleepLeft)
           : `${player.sleepMode} 分钟`;
-
-  const download = player.download?.bookId === book.id ? player.download : null;
-  const downloadLabel = !download
-    ? `离线缓存后面 ${DOWNLOAD_CHAPTERS} 章`
-    : download.running
-      ? `正在缓存 ${Math.round((download.done / Math.max(download.total, 1)) * 100)}%，点此取消`
-      : download.failed
-        ? "有一部分没缓存上，点此重试"
-        : `后面 ${DOWNLOAD_CHAPTERS} 章已缓存，没网也能听`;
 
   return (
     <div className="player-screen">
@@ -5730,7 +6124,7 @@ function PlayerScreen({
           </button>
           <button type="button" onClick={openVoicePanel}>
             <AudioLines size={22} />
-            <small>{player.usingFallback && activeForBook ? "系统声音" : "音色"}</small>
+            <small>{player.pendingVoiceURI && activeForBook ? "切换中" : "音色"}</small>
           </button>
         </div>
       </main>
@@ -5759,23 +6153,6 @@ function PlayerScreen({
             >
               <Bookmark size={19} />
               <span>标记这一句</span>
-            </button>
-            <button
-              type="button"
-              className="book-action"
-              aria-busy={download?.running || undefined}
-              onClick={() =>
-                download?.running
-                  ? player.cancelDownload()
-                  : player.downloadAhead(book.id, DOWNLOAD_CHAPTERS)
-              }
-            >
-              {download?.running ? (
-                <LoaderCircle className="player-buffering-icon" size={19} />
-              ) : (
-                <Download size={19} />
-              )}
-              <span>{downloadLabel}</span>
             </button>
             {activeForBook ? (
               <button
@@ -5864,9 +6241,12 @@ function PlayerScreen({
               />
             </label>
 
-            {player.usingFallback && activeForBook ? (
+            {player.voiceError && activeForBook ? (
               <div className="voice-retry" role="status">
-                <span>云端暂时连不上，正在用手机自带的声音读，恢复后会自动换回来。</span>
+                <span>{player.voiceError}</span>
+                <button type="button" onClick={player.retryVoiceSwitch}>
+                  重试
+                </button>
               </div>
             ) : null}
 
@@ -5874,15 +6254,19 @@ function PlayerScreen({
               {player.voices.map((voice) => {
                 // 没选过（空串）就是默认音色，折算之后再比，默认那一个才会打勾。
                 const chosen = resolvedEdgeVoiceURI(settings.voiceURI) === voice.voiceURI;
-                // 「选中」是用户的意愿，「正在播放」是事实。云端失败退回系统朗读时
-                // 这两者会不一致，必须分开显示，不能拿勾当成已经在用这个声音。
+                // 「选中」是用户的意愿，「正在播放」是事实。音色还在准备时要分开显示。
                 const playing =
-                  activeForBook && player.isPlaying && player.activeVoiceURI === voice.voiceURI;
+                  activeForBook && player.activeVoiceURI === voice.voiceURI;
+                const preparing =
+                  activeForBook && player.pendingVoiceURI === voice.voiceURI;
                 return (
                   <button
                     type="button"
                     key={voice.voiceURI}
-                    className={chosen ? "is-active" : ""}
+                    className={`${chosen ? "is-active" : ""} ${
+                      preparing ? "is-preparing" : ""
+                    }`}
+                    aria-busy={preparing}
                     onClick={() =>
                       onSettingsChange({
                         ...settings,
@@ -5894,7 +6278,12 @@ function PlayerScreen({
                       <strong>{voice.name}</strong>
                       <small>{voice.lang}</small>
                     </span>
-                    {playing ? (
+                    {preparing ? (
+                      <em className="voice-state">
+                        <LoaderCircle className="player-buffering-icon" size={14} />
+                        切换中
+                      </em>
+                    ) : playing ? (
                       <em className="voice-state is-playing">正在播放</em>
                     ) : chosen ? (
                       <Check size={18} />
@@ -5989,10 +6378,6 @@ export default function MotingApp() {
   const pendingSyncedSettingsRef = useRef<ReaderSettings | null>(null);
   const [stats, setStats] = useState<ReadingStats>(DEFAULT_STATS);
   const [sessions, setSessions] = useState<ReadingSession[]>([]);
-  // 导航接在 History API 上：返回回到来处、刷新/被系统回收后还在原地、
-  // 系统返回手势也能用。切板块是平级移动，下钻才进历史栈。
-  const { view, backgroundView, navigate, selectTab, replace: replaceView, goBack } =
-    useAppNavigation();
   const [ready, setReady] = useState(false);
   // 老用户第一次打开新版时，本地库要把正文从书目里搬出去，这一次会多等几秒。
   const [upgrading, setUpgrading] = useState(false);
@@ -6004,10 +6389,23 @@ export default function MotingApp() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [thoughtTarget, setThoughtTarget] = useState<BookNote | null>(null);
   const [thoughtDraft, setThoughtDraft] = useState("");
+  // 切页时取消尚未完成的打开操作，关闭属于上一页的弹层。
+  const openTokenRef = useRef(0);
+  const closePageOverlays = useCallback(() => {
+    openTokenRef.current += 1;
+    setMetadataBook(null);
+    setDeleteTarget(null);
+    setChatBook(null);
+    setConfirmClear(false);
+    setThoughtTarget(null);
+  }, []);
+  const { view, backgroundView, navigate, selectTab, replace: replaceView, goBack } =
+    useAppNavigation(closePageOverlays);
   const [toast, setToast] = useState<{
     id: number;
     message: string;
-    undo?: () => void;
+    /** 提示条右边的按钮：删除后的「撤销」、别的设备进度的「跳转」。 */
+    action?: ToastAction;
     /** 正在退场。提示条要滑下去再消失，不能一到时间就凭空没了。 */
     leaving?: boolean;
   } | null>(null);
@@ -6029,11 +6427,11 @@ export default function MotingApp() {
   const dismissToast = hideToast;
 
   const presentToast = useCallback(
-    (message: string, undo: (() => void) | undefined, duration: number) => {
+    (message: string, action: ToastAction | undefined, duration: number) => {
       if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
       toastIdRef.current += 1;
-      setToast({ id: toastIdRef.current, message, undo });
-      toastTimerRef.current = window.setTimeout(hideToast, duration);
+      setToast({ id: toastIdRef.current, message, action });
+      toastTimerRef.current = duration > 0 ? window.setTimeout(hideToast, duration) : null;
     },
     [hideToast]
   );
@@ -6048,7 +6446,8 @@ export default function MotingApp() {
    * 常用操作快了一步，真误删也救得回来；确认框只留给删整本书那种不可逆的。
    */
   const showUndoToast = useCallback(
-    (message: string, undo: () => void) => presentToast(message, undo, 5200),
+    (message: string, undo: () => void) =>
+      presentToast(message, { label: "撤销", run: undo }, 5200),
     [presentToast]
   );
 
@@ -6119,6 +6518,27 @@ export default function MotingApp() {
   // 云端同步:登录后自动跑,不登录时应用行为与原来完全一致。
   const [syncEnabled, setSyncEnabled] = useState(true);
   const [syncConnected, setSyncConnected] = useState(false);
+  const [syncSessionKnown, setSyncSessionKnown] = useState(false);
+  const syncConnectedRef = useRef(false);
+  const sessionControllerRef = useRef<AbortController | null>(null);
+  const sessionGenerationRef = useRef(0);
+  const checkSessionRef = useRef<() => Promise<void>>(async () => {});
+  const autoSyncTimerRef = useRef<number | null>(null);
+  const flushProgressRef = useRef<() => Promise<void>>(async () => {});
+  const progressEventClockRef = useRef(0);
+  const [queuedProgress, setQueuedProgress] = useState<QueuedProgress[]>([]);
+  const [blockedBooks, setBlockedBooks] = useState<Array<{ bookId: string; reason: string }>>([]);
+  const [pendingResources, setPendingResources] = useState(0);
+  const [pendingRecords, setPendingRecords] = useState(0);
+  const [recordFailures, setRecordFailures] = useState<PushFailure[]>([]);
+  const [lastCompleteAt, setLastCompleteAt] = useState(0);
+  const lastFailureNoticeRef = useRef("");
+  const fullRetryAtRef = useRef(0);
+  const progressControllerRef = useRef<AbortController | null>(null);
+  const progressAgainRef = useRef(false);
+  const fullSyncRunnerRef = useRef<(manual?: boolean) => Promise<void>>(async () => {});
+  const fullRetryTimerRef = useRef<number | null>(null);
+  const fullRetryAttemptRef = useRef(0);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState("");
   const [syncError, setSyncError] = useState("");
@@ -6129,9 +6549,20 @@ export default function MotingApp() {
   const syncReloadTimerRef = useRef<number | null>(null);
   /** 这一轮同步真正写进本地的数据类别；只重读这几类。 */
   const syncChangedRef = useRef(new Set<SyncAppliedKind>());
-  // 同步把云端数据刷回本地时置位,让下面的「写操作后 30s debounce」跳过这一轮,
+  // 同步把云端数据刷回本地时置位,让下面的普通记录自动同步跳过这一轮,
   // 免得「同步→重读→又排一个同步」空转。
   const syncQuietRef = useRef(false);
+  /** 一轮同步进行中又被叫了一次：跑完接着再跑一轮，期间的改动、回前台要拉的都不丢。 */
+  const syncAgainRef = useRef(false);
+  /** 上一轮同步结束的时刻；刚同步完又切回前台就不必再拉。 */
+  const lastSyncEndRef = useRef(0);
+
+  // 同步相关的回调都只读 viewRef，不依赖 view：以前 triggerSync 间接依赖 view.name，
+  // 每切一次页面，开机那段「查会话 + 同步一轮」就重跑一遍。
+  const viewRef = useRef(view);
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
 
   /**
    * 同步把云端记录写进本地后,只重读变了的那几类。
@@ -6163,7 +6594,7 @@ export default function MotingApp() {
         setChats(storedChats);
       }
       if (storedSettings) {
-        if (view.name === "reader") pendingSyncedSettingsRef.current = storedSettings;
+        if (viewRef.current.name === "reader") pendingSyncedSettingsRef.current = storedSettings;
         else setSettings(storedSettings);
       }
       if (storedStats) setStats(storedStats);
@@ -6172,7 +6603,7 @@ export default function MotingApp() {
     } catch {
       // 重读失败不打断应用;下一轮同步或刷新还能拉回。
     }
-  }, [dropContent, view.name]);
+  }, [dropContent]);
 
   useEffect(() => {
     if (view.name === "reader") return;
@@ -6196,13 +6627,64 @@ export default function MotingApp() {
     [reloadFromStorage]
   );
 
+  /** 别的设备的阅读位置落到了正开着的这本书上：阅读器按它跳过去（用户点了「跳转」才有）。 */
+  const [readerJump, setReaderJump] = useState<{
+    id: number;
+    bookId: string;
+    position: BookPosition;
+  } | null>(null);
+  const readerJumpIdRef = useRef(0);
+
+  // 正在读的书被别的设备读到了别处：不擅自挪正文，像微信读书那样问一句。
+  // 没开着这本书的不用问，下次打开本来就落在较新的那处。
+  const handleRemotePosition = useCallback(
+    (bookId: string, position: BookPosition) => {
+      progressEventClockRef.current = Math.max(progressEventClockRef.current, position.updatedAt);
+      const trailing = readingUiTimerRef.current.get(bookId);
+      if (trailing !== undefined) window.clearTimeout(trailing);
+      readingUiTimerRef.current.delete(bookId);
+      const current = viewRef.current;
+      if (current.name !== "reader" || current.bookId !== bookId) return;
+      const meta = booksRef.current.find((book) => book.id === bookId);
+      // 两边其实读在同一处（前后差一两句）就不打扰。
+      const here =
+        pendingReadingProgressRef.current.get(bookId)?.position ?? meta?.readingPosition;
+      if (
+        here &&
+        here.chapterIndex === position.chapterIndex &&
+        Math.abs(here.sentenceIndex - position.sentenceIndex) <= 2
+      ) {
+        return;
+      }
+      const where = meta?.chapterOutline?.length
+        ? `「${chapterLabel(meta.chapterOutline, position.chapterIndex)}」`
+        : ` ${Math.round(position.percent)}%`;
+      presentToast(
+        `另一台设备读到了${where}`,
+        {
+          label: "跳转",
+          run: () => {
+            readerJumpIdRef.current += 1;
+            setReaderJump({ id: readerJumpIdRef.current, bookId, position });
+          },
+        },
+        0
+      );
+    },
+    [presentToast]
+  );
+
   const triggerSync = useCallback(
     async (manual = false) => {
+      if (!manual && (!syncConnectedRef.current || Date.now() < fullRetryAtRef.current)) return;
       if (syncControllerRef.current) {
+        syncAgainRef.current = true;
         if (manual) showToast("正在同步中…");
         return;
       }
+      fullRetryAtRef.current = 0;
       const controller = new AbortController();
+      if (fullRetryTimerRef.current !== null) { window.clearTimeout(fullRetryTimerRef.current); fullRetryTimerRef.current = null; }
       syncControllerRef.current = controller;
       syncSettledRef.current = new Promise<void>((resolve) => {
         settleSyncRef.current = resolve;
@@ -6211,34 +6693,81 @@ export default function MotingApp() {
       setSyncMessage("");
       setSyncError("");
       try {
-        const run = () => runSync({
+        const run = async () => {
+          await flushProgressRef.current();
+          return runSync({
           signal: controller.signal,
+          manual,
           onProgress: setSyncMessage,
           onApplied: scheduleSyncReload,
-        });
-        const result =
-          typeof navigator !== "undefined" && navigator.locks
-            ? await navigator.locks.request(
-                "moting-reader-sync",
-                { mode: "exclusive", signal: controller.signal },
-                run
-              )
-            : await run();
-        setLastSyncAt(result.syncedAt);
-        if (result.failedContent.length) {
-          showToast(`${result.failedContent.length} 本书超出云端大小上限,未能同步`);
-        } else if (result.skipped) {
-          showToast(`${result.skipped} 条记录超出云端上限或数据异常,未能同步`);
-        } else if (manual) {
-          showToast(result.changed ? "同步完成" : "云端没有新变更");
-        }
+          onRemotePosition: handleRemotePosition,
+          onProgressSynced: () => {
+            lastSyncEndRef.current = Date.now();
+            setLastSyncAt(Date.now());
+            setSyncMessage("进度已同步，正在处理书籍资源…");
+          },
+        }); };
+        let first = true;
+        do {
+          syncAgainRef.current = false;
+          const result =
+            typeof navigator !== "undefined" && navigator.locks
+              ? await navigator.locks.request(
+                  "moting-reader-sync",
+                  { mode: "exclusive", signal: controller.signal },
+                  run
+                )
+              : await run();
+          setLastSyncAt(result.syncedAt);
+          lastSyncEndRef.current = Date.now();
+          setPendingResources(result.pendingResources);
+          setBlockedBooks(result.blockedContent);
+          setQueuedProgress(await getProgressQueue());
+          fullRetryAttemptRef.current = 0;
+          setRecordFailures(result.failures);
+          setPendingRecords(result.pendingRecords);
+          if (result.complete) setLastCompleteAt(result.syncedAt);
+          const issueMessage = result.failedContent.length
+            ? `${result.failedContent.length} 本书正文尚未同步，请查看云端同步设置`
+            : result.skipped ? `${result.skipped} 条记录尚未同步，请查看云端同步设置` : "";
+          const notice = issueMessage + result.failures.map((failure) => failure.kind + failure.key + failure.fingerprint + failure.code).sort().join("|");
+          if (issueMessage) {
+            setSyncMessage(issueMessage);
+            if (manual && first || notice !== lastFailureNoticeRef.current) showToast(issueMessage);
+            lastFailureNoticeRef.current = notice;
+            try { localStorage.setItem("moting:sync-issue", notice); } catch { /* 存储受限不影响同步 */ }
+          } else if (result.pendingRecords) {
+            setSyncMessage(`${result.pendingRecords} 条新修改等待同步`);
+            syncAgainRef.current = true;
+          } else if (result.pendingResources) {
+            setSyncMessage(`进度已同步，${result.pendingResources} 项书籍资源等待重试`);
+            if (manual && first) showToast(`进度已同步，${result.pendingResources} 项资源待重试`);
+          } else if (result.conflicts) {
+            if (manual && first) showToast("有并发进度已保留，请在云端同步设置中选择");
+          } else {
+            setSyncMessage(result.complete ? "全部同步完成" : "进度等待云端确认");
+            lastFailureNoticeRef.current = "";
+            try { localStorage.removeItem("moting:sync-issue"); } catch { /* 存储受限不影响同步 */ }
+            if (manual && first) showToast(result.complete ? "同步完成" : "仍有进度待同步，稍后自动重试");
+          }
+          first = false;
+        } while (syncAgainRef.current && !controller.signal.aborted);
       } catch (error) {
         if (!controller.signal.aborted) {
           if (error instanceof SyncError && error.status === 401) {
             setSyncConnected(false);
+            syncConnectedRef.current = false;
+            setSyncSessionKnown(true);
             setSyncError("同步登录已过期,请重新登录");
           } else {
             setSyncError(error instanceof Error ? error.message : "同步失败,请稍后重试");
+            if (fullRetryTimerRef.current !== null) window.clearTimeout(fullRetryTimerRef.current);
+            const delay = retryDelay(++fullRetryAttemptRef.current);
+            fullRetryAtRef.current = Date.now() + delay;
+            fullRetryTimerRef.current = window.setTimeout(() => {
+              fullRetryTimerRef.current = null;
+              if (syncConnectedRef.current) void fullSyncRunnerRef.current();
+            }, delay);
           }
         }
       } finally {
@@ -6250,8 +6779,43 @@ export default function MotingApp() {
         setSyncing(false);
       }
     },
-    [scheduleSyncReload, showToast]
+    [handleRemotePosition, scheduleSyncReload, showToast]
   );
+  useLayoutEffect(() => { fullSyncRunnerRef.current = triggerSync; }, [triggerSync]);
+
+  const triggerProgressSync = useCallback(async (pushOnly = false) => {
+    if (!syncConnectedRef.current) return;
+    if (progressControllerRef.current) { progressAgainRef.current = true; return; }
+    const controller = new AbortController();
+    progressControllerRef.current = controller;
+    try {
+      do {
+        progressAgainRef.current = false;
+        await flushProgressRef.current();
+        const deps = { signal: controller.signal, onApplied: scheduleSyncReload, onRemotePosition: handleRemotePosition };
+        if (pushOnly || document.visibilityState !== "visible") {
+          const count = await pushPending(controller.signal, deps);
+          if (!count) break;
+        }
+        else await runProgressSync(deps);
+        if (controller.signal.aborted) break;
+        setQueuedProgress(await getProgressQueue());
+        setLastSyncAt(Date.now());
+        setSyncError("");
+      } while (progressAgainRef.current && !controller.signal.aborted);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        if (error instanceof SyncError && error.status === 401) {
+          syncConnectedRef.current = false;
+          setSyncConnected(false);
+          setSyncSessionKnown(true);
+        }
+        setSyncError(error instanceof Error ? error.message : "进度待同步，联网后重试");
+      }
+    } finally {
+      if (progressControllerRef.current === controller) progressControllerRef.current = null;
+    }
+  }, [handleRemotePosition, scheduleSyncReload]);
 
   const handleSyncLogin = useCallback(
     async (username: string, password: string) => {
@@ -6264,13 +6828,22 @@ export default function MotingApp() {
         setSyncError(message);
         throw new Error(message);
       }
+      sessionGenerationRef.current += 1;
       setSyncConnected(true);
+      syncConnectedRef.current = true;
+      setSyncSessionKnown(true);
       void triggerSync(true);
     },
     [triggerSync]
   );
 
   const handleSyncLogout = useCallback(async () => {
+    sessionGenerationRef.current += 1;
+    sessionControllerRef.current?.abort();
+    progressControllerRef.current?.abort();
+    syncConnectedRef.current = false;
+    setSyncSessionKnown(true);
+    if (fullRetryTimerRef.current !== null) window.clearTimeout(fullRetryTimerRef.current);
     syncControllerRef.current?.abort();
     syncControllerRef.current = null;
     setSyncing(false);
@@ -6291,11 +6864,6 @@ export default function MotingApp() {
 
   // 升级旧库的提示要在第一次读库之前就订阅上。
   useEffect(() => onStorageUpgrade(setUpgrading), []);
-
-  const viewRef = useRef(view);
-  useEffect(() => {
-    viewRef.current = view;
-  }, [view]);
 
   useEffect(() => {
     let cancelled = false;
@@ -6318,7 +6886,17 @@ export default function MotingApp() {
         storedMetadata,
       ]) => {
         if (cancelled) return;
-        let metas = storedBooks;
+        await recoverReadingBackups(storedBooks);
+        // 恢复阅读器前先获取进度；网络不通时限时回到本机数据，不阻塞启动。
+        const cold = new AbortController();
+        const coldTimer = window.setTimeout(() => cold.abort(), 2500);
+        try {
+          const session = await getSyncSession(cold.signal);
+          if (session.connected) await runProgressSync({ signal: cold.signal });
+        } catch {
+          if (!cancelled) setSyncMessage("先使用本机进度，联网后同步");
+        } finally { window.clearTimeout(coldTimer); }
+        let metas = await getAllBooks();
         if (!metas.length) {
           const demo = createDemoBook();
           await saveBook(demo);
@@ -6399,52 +6977,91 @@ export default function MotingApp() {
     return () => window.clearTimeout(timer);
   }, [ready]);
 
-  // 启动时读同步会话;已登录的设备开机就同步一轮。
+  // 无论当前是否已连接，联网/回前台都可重新检查有效 Cookie。
   useEffect(() => {
-    const controller = new AbortController();
-    getSyncState()
-      .then((state) => {
-        if (!controller.signal.aborted) setLastSyncAt(state.pushedAt);
-      })
-      .catch(() => undefined);
-    getSyncSession(controller.signal)
-      .then(({ connected, enabled }) => {
-        if (controller.signal.aborted) return;
+    if (!ready) return;
+    let stopped = false;
+    let checking = false;
+    let attempt = 0;
+    let retry: number | null = null;
+    getSyncState().then((state) => {
+      setLastSyncAt(state.lastProgressAt ?? state.pushedAt);
+      setLastCompleteAt(state.lastCompleteAt ?? 0);
+      try { lastFailureNoticeRef.current = localStorage.getItem("moting:sync-issue") ?? ""; } catch { /* 存储受限 */ }
+      setRecordFailures(state.pushFailures ?? []);
+      setPendingRecords((state.pushFailures ?? []).length);
+      setBlockedBooks(state.blockedContent ?? []);
+      setPendingResources(state.pendingContent.length + (state.pendingDownloads?.length ?? 0) + state.pendingImages.length);
+    }).catch(() => undefined);
+    getProgressQueue().then(setQueuedProgress).catch(() => undefined);
+    const checkSession = async (force = false) => {
+      if (stopped || checking) return;
+      checking = true;
+      const generation = sessionGenerationRef.current;
+      const controller = new AbortController();
+      sessionControllerRef.current = controller;
+      try {
+        const { connected, enabled } = await getSyncSession(controller.signal);
+        if (stopped || controller.signal.aborted || generation !== sessionGenerationRef.current) return;
+        attempt = 0;
         setSyncEnabled(enabled);
+        setSyncSessionKnown(true);
         setSyncConnected(connected);
-        if (connected) void triggerSync();
-      })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, [triggerSync]);
+        syncConnectedRef.current = connected;
+        if (connected) {
+          void triggerProgressSync();
+          if (force || Date.now() - lastSyncEndRef.current >= RESUME_SYNC_GAP_MS) void triggerSync();
+        }
+      } catch {
+        if (!stopped && !controller.signal.aborted && generation === sessionGenerationRef.current) {
+          setSyncSessionKnown(false);
+          setSyncError("暂时无法连接云端，本机进度已保留，联网后自动重试");
+          retry = window.setTimeout(() => { retry = null; void checkSession(true); }, Math.min(1500 * 2 ** attempt++, 30_000));
+        }
+      } finally {
+        checking = false;
+        if (sessionControllerRef.current === controller) sessionControllerRef.current = null;
+      }
+    };
+    const resume = (event: Event) => {
+      if (document.visibilityState !== "visible") return;
+      if (retry !== null) { window.clearTimeout(retry); retry = null; }
+      if (event.type === "online") fullRetryAtRef.current = 0;
+      void checkSession(event.type === "online");
+    };
+    checkSessionRef.current = () => checkSession(true);
+    void checkSession();
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("pageshow", resume);
+    window.addEventListener("online", resume);
+    return () => {
+      stopped = true;
+      sessionControllerRef.current?.abort();
+      if (retry !== null) window.clearTimeout(retry);
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("pageshow", resume);
+      window.removeEventListener("online", resume);
+    };
+  }, [ready, triggerProgressSync, triggerSync]);
 
-  // 登录后每 5 分钟同步一轮;切到后台时补一次,手机息屏前也能把进度推上去。
+  // 常规记录/资源同步有固定兜底，连续操作不能无限重设计时器。
   useEffect(() => {
     if (!syncConnected) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void triggerSync();
-    }, 5 * 60_000);
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") void triggerSync();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
+    }, 60_000);
+    return () => window.clearInterval(timer);
   }, [syncConnected, triggerSync]);
 
-  // 写操作后 30s debounce 同步:读书进度、划线、改设置等让数据变化时,
-  // 推迟到「安静」满 30 秒再同步——读到哪里都实时写本地,但不会每翻一页都打云端。
-  // 一次真正的写最多换来一轮空同步,空同步不再改这些 state,链路自然停下。
   useEffect(() => {
     if (!syncConnected) return;
-    if (syncQuietRef.current) {
-      syncQuietRef.current = false;
-      return;
+    if (syncQuietRef.current) { syncQuietRef.current = false; return; }
+    if (autoSyncTimerRef.current === null) {
+      autoSyncTimerRef.current = window.setTimeout(() => {
+        autoSyncTimerRef.current = null;
+        void triggerSync();
+      }, 30_000);
     }
-    const timer = window.setTimeout(() => void triggerSync(), 30_000);
-    return () => window.clearTimeout(timer);
   }, [books, notes, chats, settings, sessions, syncConnected, triggerSync]);
 
   // 配色只在读到真实设置之后才动。之前挂载那一刻就按默认设置把书架刷成「霜白」，
@@ -6472,7 +7089,7 @@ export default function MotingApp() {
   );
 
   // 听书每读一句就回调一次。内存里立刻更新（高亮要跟上），
-  // 落盘攒到 20 秒一次、只写书目里的听书位置，停止/切后台时补写。
+  // 每次位置变化立即异步落盘；停止/切后台时等待尚未完成的写入。
   const pendingListeningRef = useRef(new Map<string, BookPosition>());
   const flushTimerRef = useRef<number | null>(null);
 
@@ -6486,7 +7103,10 @@ export default function MotingApp() {
   /** 书架进度节流窗口里被压下的最后一次，到点补上。 */
   const readingUiTimerRef = useRef(new Map<string, number>());
   const readingProgressTimerRef = useRef<number | null>(null);
+  const readingWriteRef = useRef<Promise<void> | null>(null);
+  const listeningWriteRef = useRef<Promise<void> | null>(null);
   const flushReadingProgress = useCallback(async () => {
+    while (readingWriteRef.current) await readingWriteRef.current;
     if (readingProgressTimerRef.current !== null) {
       window.clearTimeout(readingProgressTimerRef.current);
       readingProgressTimerRef.current = null;
@@ -6496,14 +7116,16 @@ export default function MotingApp() {
     );
     pendingReadingProgressRef.current.clear();
     if (!entries.length) return;
+    const write = (async () => {
     try {
-      await saveReadingPositions(entries);
-      const byBookId = new Map(entries.map((entry) => [entry.bookId, entry]));
+      const saved = await saveReadingPositions(entries, { local: true });
+      for (const entry of saved) progressEventClockRef.current = Math.max(progressEventClockRef.current, entry.savedAt);
+      const byBookId = new Map(saved.map((entry) => [entry.bookId, entry]));
       setBooks((current) =>
         current
           .map((book) => {
             const entry = byBookId.get(book.id);
-            return entry
+            return entry && !pendingReadingProgressRef.current.has(book.id) && (book.readingPosition?.updatedAt ?? 0) <= entry.savedAt
               ? {
                   ...book,
                   readingPosition: entry.position,
@@ -6522,15 +7144,19 @@ export default function MotingApp() {
         }
       }
       reportStorageError("reading-position", error);
+      throw error;
     }
+    })();
+    readingWriteRef.current = write;
+    try { await write; } finally { if (readingWriteRef.current === write) readingWriteRef.current = null; }
   }, [reportStorageError]);
 
   const scheduleReadingProgressFlush = useCallback(() => {
     if (readingProgressTimerRef.current !== null) return;
     readingProgressTimerRef.current = window.setTimeout(() => {
       readingProgressTimerRef.current = null;
-      void flushReadingProgress();
-    }, 2500);
+      void flushReadingProgress().catch(() => undefined);
+    }, 0);
   }, [flushReadingProgress]);
 
   // 正在读书/听书时，后台的资料补全这类要在主线程解码图片的活儿一律不跑。
@@ -6778,14 +7404,29 @@ export default function MotingApp() {
     [buildMetadataPatch, commitMetadataPatch]
   );
 
-  /** 把攒着的听书位置写进书目；只写这两个字段，不碰正文。 */
-  const writeListeningProgress = useCallback(() => {
+  /** 保存当前事件；失败保留待保存项，完整同步不能跨过失败。 */
+  const writeListeningProgress = useCallback(async () => {
+    while (listeningWriteRef.current) await listeningWriteRef.current;
     const pending = [...pendingListeningRef.current];
     pendingListeningRef.current.clear();
-    for (const [bookId, position] of pending) {
-      void updateBookMeta(bookId, { listeningPosition: position, updatedAt: position.updatedAt })
-        .catch((error) => reportStorageError("listening-position", error));
-    }
+    const write = (async () => {
+      const results = await Promise.allSettled(pending.map(async ([bookId, position]) => {
+        try {
+          const saved = await saveLocalListeningPosition(bookId, position);
+          progressEventClockRef.current = Math.max(progressEventClockRef.current, saved?.listeningPosition?.updatedAt ?? 0);
+        }
+        catch (error) {
+          const current = pendingListeningRef.current.get(bookId);
+          if (!current || current.updatedAt < position.updatedAt) pendingListeningRef.current.set(bookId, position);
+          reportStorageError("listening-position", error);
+          throw error;
+        }
+      }));
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+    })();
+    listeningWriteRef.current = write;
+    try { await write; } finally { if (listeningWriteRef.current === write) listeningWriteRef.current = null; }
   }, [reportStorageError]);
 
   const flushListeningProgress = useCallback(() => {
@@ -6793,49 +7434,138 @@ export default function MotingApp() {
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
-    writeListeningProgress();
+    return writeListeningProgress();
   }, [writeListeningProgress]);
+
+  const followSpeechRef = useRef(settings.followSpeech);
+  useEffect(() => {
+    followSpeechRef.current = settings.followSpeech;
+  }, [settings.followSpeech]);
 
   const updateListeningProgress = useCallback(
     (bookId: string, position: BookPosition) => {
+      const existing = booksRef.current.find((book) => book.id === bookId)?.listeningPosition;
+      position = { ...position, updatedAt: Math.max(Date.now(), progressEventClockRef.current + 1, position.updatedAt, (existing?.updatedAt ?? 0) + 1,
+        (pendingListeningRef.current.get(bookId)?.updatedAt ?? 0) + 1) };
+      progressEventClockRef.current = position.updatedAt;
       pendingListeningRef.current.set(bookId, position);
+      // 听读同步：听到哪里阅读进度就记到哪里，别的设备打开这本书也落在这儿。
+      // 阅读器正开着这本书时由它自己按正文滚到哪里来记，这里不插手。
+      const current = viewRef.current;
+      const followReading =
+        followSpeechRef.current &&
+        !(current.name === "reader" && current.bookId === bookId);
+      const now = Math.max(position.updatedAt, (booksRef.current.find((book) => book.id === bookId)?.readingPosition?.updatedAt ?? 0) + 1,
+        (pendingReadingProgressRef.current.get(bookId)?.savedAt ?? 0) + 1);
+      const reading = followReading ? { ...position, updatedAt: now } : null;
+      if (reading) {
+        progressEventClockRef.current = now;
+        rememberPosition(bookId, reading);
+        pendingReadingProgressRef.current.set(bookId, {
+          position: reading,
+          lastOpenedAt: now,
+          savedAt: now,
+        });
+        scheduleReadingProgressFlush();
+      }
       setBooks((current) =>
         current.map((book) =>
           book.id === bookId
-            ? { ...book, listeningPosition: position, updatedAt: position.updatedAt }
+            ? {
+                ...book,
+                listeningPosition: position,
+                updatedAt: position.updatedAt,
+                ...(reading
+                  ? { readingPosition: reading, lastOpenedAt: Math.max(book.lastOpenedAt, now) }
+                  : {}),
+              }
             : book
         )
       );
       if (flushTimerRef.current === null) {
         flushTimerRef.current = window.setTimeout(() => {
           flushTimerRef.current = null;
-          writeListeningProgress();
-        }, 20000);
+          void writeListeningProgress().catch(() => undefined);
+        }, 0);
       }
     },
-    [writeListeningProgress]
+    [scheduleReadingProgressFlush, writeListeningProgress]
   );
+
+  useLayoutEffect(() => {
+    flushProgressRef.current = async () => {
+      await Promise.all([flushListeningProgress(), flushReadingProgress()]);
+      if (pendingListeningRef.current.size || pendingReadingProgressRef.current.size) {
+        await Promise.all([flushListeningProgress(), flushReadingProgress()]);
+      }
+    };
+  }, [flushListeningProgress, flushReadingProgress]);
+
+  useEffect(() => () => {
+    syncControllerRef.current?.abort();
+    progressControllerRef.current?.abort();
+    if (autoSyncTimerRef.current !== null) window.clearTimeout(autoSyncTimerRef.current);
+    if (fullRetryTimerRef.current !== null) window.clearTimeout(fullRetryTimerRef.current);
+  }, []);
+
+  const pushProgress = useCallback(() => triggerProgressSync(true), [triggerProgressSync]);
+
+  useEffect(() => {
+    if (!syncConnected) return;
+    let scheduled: number | null = null;
+    let retry: number | null = null;
+    let failures = 0;
+    let stopped = false;
+    const run = async () => {
+      scheduled = null;
+      await triggerProgressSync(document.visibilityState !== "visible");
+      if (stopped) return;
+      // 队列未确认时退避；online 会立即唤醒，不受成功同步去重窗口限制。
+      const pending = (await getProgressQueue()).some((entry) => entry.pending && !entry.rejection);
+      if (pending) {
+        if (retry !== null) window.clearTimeout(retry);
+        retry = window.setTimeout(() => { retry = null; void run(); }, Math.min(1000 * 2 ** failures++, 30_000));
+      } else failures = 0;
+    };
+    const schedule = () => {
+      if (scheduled === null) scheduled = window.setTimeout(() => void run(), 3000);
+    };
+    const wake = () => {
+      if (scheduled !== null) window.clearTimeout(scheduled);
+      if (retry !== null) window.clearTimeout(retry);
+      scheduled = retry = null;
+      failures = 0;
+      void run();
+    };
+    window.addEventListener("moting:progress-pending", schedule);
+    window.addEventListener("online", wake);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void run();
+    }, 8000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      if (scheduled !== null) window.clearTimeout(scheduled);
+      if (retry !== null) window.clearTimeout(retry);
+      window.removeEventListener("moting:progress-pending", schedule);
+      window.removeEventListener("online", wake);
+    };
+  }, [syncConnected, triggerProgressSync]);
 
   useEffect(() => {
     const onHide = () => {
-      if (document.visibilityState === "hidden") {
-        flushListeningProgress();
-        void flushReadingProgress();
-      }
+      if (document.visibilityState === "hidden") void pushProgress();
     };
     document.addEventListener("visibilitychange", onHide);
-    const onPageHide = () => {
-      flushListeningProgress();
-      void flushReadingProgress();
-    };
+    const onPageHide = () => void pushProgress();
     window.addEventListener("pagehide", onPageHide);
     return () => {
       document.removeEventListener("visibilitychange", onHide);
       window.removeEventListener("pagehide", onPageHide);
-      flushListeningProgress();
-      void flushReadingProgress();
+      void flushListeningProgress().catch(() => undefined);
+      void flushReadingProgress().catch(() => undefined);
     };
-  }, [flushListeningProgress, flushReadingProgress]);
+  }, [flushListeningProgress, flushReadingProgress, pushProgress]);
 
   const appUpdate = useAppUpdate();
   const player = useSpeechPlayer({
@@ -6844,9 +7574,27 @@ export default function MotingApp() {
     onProgress: updateListeningProgress,
   });
 
+  // 停止或暂停的那一刻把听书进度推上去。锁屏听书时页面早就在后台，
+  // 不会再有「切到后台」这一下；以前要等下次打开 App 才补推（实测晚过 70 分钟）。
+  const wasPlayingRef = useRef(false);
+  useEffect(() => {
+    const wasPlaying = wasPlayingRef.current;
+    wasPlayingRef.current = player.isPlaying;
+    if (wasPlaying && !player.isPlaying) void pushProgress();
+  }, [player.isPlaying, pushProgress]);
+
+  // 锁屏听书期间也隔一会儿推一次：前台那 5 分钟一轮要求页面可见，后台一轮都不会跑。
+  useEffect(() => {
+    if (!syncConnected || !player.isPlaying) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") void pushProgress();
+    }, BACKGROUND_PUSH_MS);
+    return () => window.clearInterval(timer);
+  }, [syncConnected, player.isPlaying, pushProgress]);
+
   // 一停下来就把攒着的听书进度补写掉，别等那 20 秒。
   useEffect(() => {
-    if (!player.isPlaying) flushListeningProgress();
+    if (!player.isPlaying) void flushListeningProgress().catch(() => undefined);
   }, [player.isPlaying, flushListeningProgress]);
 
   const activeBook = player.location
@@ -6945,7 +7693,12 @@ export default function MotingApp() {
 
   const isReading = view.name === "reader";
 
+  // 挂机、切到后台时计时心跳每 15 秒交回来的还是同一条记录，原样跳过：
+  // 否则每跳一次都换一个 sessions 数组、写一次库，还会把「改动后 30 秒同步」一直往后推。
+  const lastPersistedSessionRef = useRef<ReadingSession | null>(null);
   const persistSession = useCallback((session: ReadingSession) => {
+    if (lastPersistedSessionRef.current === session) return;
+    lastPersistedSessionRef.current = session;
     setSessions((current) => {
       const idx = current.findIndex((item) => item.id === session.id);
       if (idx === -1) return [session, ...current];
@@ -7068,14 +7821,25 @@ export default function MotingApp() {
     setBooks((current) => [metaOf(book), ...current]);
   };
 
-  /** 连点，或者点了 A 马上又点 B：只认最后一次，前面那次读完正文也不跳。 */
-  const openTokenRef = useRef(0);
-
   /** 先把这本书的正文读进来，再进页面；页面第一帧就是完整的。 */
-  const withContent = async (bookId: string): Promise<Book | null> => {
+  const withContent = async (bookId: string, refreshProgress = false): Promise<Book | null> => {
     const token = ++openTokenRef.current;
-    const chapters = await loadContent(bookId);
+    // 快速退出后紧接着重开，也要先等最后一次本地位置落库。
+    await flushProgressRef.current();
     if (token !== openTokenRef.current) return null;
+    if (refreshProgress && syncConnectedRef.current) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 2500);
+      try {
+        await runProgressSync({ signal: controller.signal, onApplied: scheduleSyncReload });
+      } catch { setSyncMessage("先使用本机进度，联网后同步"); }
+      finally { window.clearTimeout(timer); }
+    }
+    const chapters = await loadContent(bookId);
+    const fresh = await getAllBooks();
+    if (token !== openTokenRef.current) return null;
+    booksRef.current = fresh;
+    setBooks(fresh);
     const meta = booksRef.current.find((book) => book.id === bookId);
     if (!chapters || !meta) {
       showToast("这本书的正文读不出来了");
@@ -7085,27 +7849,32 @@ export default function MotingApp() {
   };
 
   const openReader = async (meta: BookMeta, position?: BookPosition) => {
-    const book = await withContent(meta.id);
+    const book = await withContent(meta.id, !position);
     if (!book) return;
+    // 点击打开书时的事件时间，不是渲染期间取时钟。
+    // eslint-disable-next-line react-hooks/purity
     const now = Date.now();
-    const nextPosition =
-      position ??
-      pendingReadingProgressRef.current.get(book.id)?.position ??
-      book.readingPosition ??
-      initialPosition(book);
-    patchBookMeta(book.id, { readingPosition: nextPosition, lastOpenedAt: now, updatedAt: now });
+    // 打开书只更新最近打开时间，不能把旧进度写回书目生成第二份位置。
+    // 笔记／播放器指定的跳转才是真正的新阅读操作，先同步更新兜底和待保存队列。
+    if (position) handleReadProgress(book, position);
+    patchBookMeta(book.id, { lastOpenedAt: now, updatedAt: now });
     navigate({ name: "reader", bookId: book.id });
   };
 
   const openPlayer = async (meta: BookMeta, startPlaying = false) => {
-    const book = await withContent(meta.id);
-    if (!book) return;
+    if (startPlaying) player.preparePlayback();
+    const book = await withContent(meta.id, true);
+    if (!book) {
+      if (startPlaying) player.stop();
+      return;
+    }
     navigate({ name: "player", bookId: book.id });
     if (startPlaying) {
-      player.start(
-        book.id,
-        book.listeningPosition ?? book.readingPosition ?? initialPosition(book)
-      );
+      // 听读同步：在别处（比如另一台设备）读到更后面了，就从读到的地方接着听。
+      const from = settings.followSpeech
+        ? newerPosition(book.readingPosition, book.listeningPosition)
+        : book.listeningPosition ?? book.readingPosition;
+      player.start(book.id, from ?? initialPosition(book));
     }
   };
 
@@ -7216,8 +7985,11 @@ export default function MotingApp() {
 
   const handleReadProgress = useCallback(
     (book: BookMeta, position: BookPosition) => {
-      const now = Date.now();
+      const now = Math.max(Date.now(), progressEventClockRef.current + 1, (booksRef.current.find((item) => item.id === book.id)?.readingPosition?.updatedAt ?? 0) + 1,
+        (pendingReadingProgressRef.current.get(book.id)?.savedAt ?? 0) + 1);
+      progressEventClockRef.current = now;
       const nextPosition = { ...position, updatedAt: now };
+      rememberPosition(book.id, nextPosition);
       pendingReadingProgressRef.current.set(book.id, {
         position: nextPosition,
         lastOpenedAt: now,
@@ -7232,7 +8004,7 @@ export default function MotingApp() {
         readingUiProgressRef.current.set(book.id, Date.now());
         setBooks((current) =>
           current.map((item) =>
-            item.id === book.id
+            item.id === book.id && (item.readingPosition?.updatedAt ?? 0) <= nextPosition.updatedAt
               ? {
                   ...item,
                   readingPosition: nextPosition,
@@ -7426,13 +8198,28 @@ export default function MotingApp() {
               ? player.location.chapterIndex
               : -1
           }
+          speakingSentenceIndex={
+            player.location?.bookId === selectedBook.id
+              ? player.location.sentenceIndex
+              : -1
+          }
+          speechPlaying={
+            player.isPlaying && player.location?.bookId === selectedBook.id
+          }
+          jumpTo={readerJump?.bookId === selectedBook.id ? readerJump : null}
+          onTogglePlayback={
+            settings.followSpeech && player.location?.bookId === selectedBook.id
+              ? player.toggle
+              : undefined
+          }
           chatTurns={selectedBookChat?.turns ?? []}
           onChatChange={(turns) => updateChat(selectedBook.id, turns)}
           onBack={() => goBack({ name: "library" })}
           onProgress={(position) => handleReadProgress(selectedBook, position)}
           onStartListening={(position) => {
             player.start(selectedBook.id, position);
-            navigate({ name: "player", bookId: selectedBook.id });
+            // 听读同步时留在正文里看它跟着走；关着时照旧进播放页。
+            if (!settings.followSpeech) navigate({ name: "player", bookId: selectedBook.id });
           }}
           onHighlight={(parts, color, style) =>
             createHighlights(selectedBook, parts, color, style)
@@ -7465,6 +8252,22 @@ export default function MotingApp() {
           sync={{
             enabled: syncEnabled,
             connected: syncConnected,
+            checkingSession: !syncSessionKnown,
+            pendingProgress: queuedProgress.filter((entry) => entry.pending && !entry.rejection).length,
+            blockedProgress: queuedProgress.filter((entry) => entry.rejection).length,
+            pendingResources,
+            blockedBooks,
+            recordFailures,
+            pendingRecords,
+            lastCompleteAt,
+            conflicts: queuedProgress.filter((entry) => entry.conflict),
+            bookTitles: Object.fromEntries(books.map((book) => [book.id, book.title])),
+            onResolveConflict: async (id, useLocal) => {
+              await resolveProgressConflict(id, useLocal);
+              setQueuedProgress(await getProgressQueue());
+              await reloadFromStorage(new Set(["positions", "books"]));
+              if (useLocal) void triggerProgressSync();
+            },
             syncing,
             message: syncMessage,
             error: syncError,
@@ -7474,12 +8277,14 @@ export default function MotingApp() {
           onClear={() => setConfirmClear(true)}
           onSyncLogin={handleSyncLogin}
           onSyncLogout={() => void handleSyncLogout()}
-          onSyncNow={() => void triggerSync(true)}
+          onSyncNow={() => void (syncSessionKnown ? triggerSync(true) : checkSessionRef.current())}
           update={appUpdate}
           onOpen={(section) => navigate({ name: "settings", section })}
           onBack={() => goBack(view.section ? { name: "settings" } : { name: "home" })}
         />
-      ) : (
+      ) : null}
+      {/* 设置跟阅读器、听书页一样盖在上面，外壳只藏不卸：卸掉的话回来整个主页重建，
+          推荐区重新加载、滚动位置也回到顶上。 */}
         <div
           className={`app-frame${view.name === "find" ? " is-bare" : ""}${frameSuspended ? " is-suspended" : ""}`}
           aria-hidden={frameSuspended}
@@ -7503,6 +8308,7 @@ export default function MotingApp() {
 
           <section className="app-content">
             <div className={`app-tab-content${tabSuspended ? " is-suspended" : ""}`} aria-hidden={tabSuspended} inert={tabSuspended}>
+            <PageActiveContext.Provider value={!frameSuspended && !tabSuspended}>
             {frameView === "home" ? (
               <HomeScreen
                 books={books}
@@ -7546,6 +8352,7 @@ export default function MotingApp() {
                 onOpenChat={setChatBook}
               />
             )}
+            </PageActiveContext.Provider>
             </div>
             {view.name === "history" ? (
               <HistoryScreen sessions={sessions} onBack={() => goBack({ name: "home" })} />
@@ -7613,7 +8420,7 @@ export default function MotingApp() {
             </div>
           ) : null}
         </div>
-      )}
+
 
       <input
         ref={fileInputRef}
@@ -7756,17 +8563,17 @@ export default function MotingApp() {
       {toast ? (
         <div key={toast.id} className={`toast${toast.leaving ? " is-leaving" : ""}`}>
           <span>{toast.message}</span>
-          {toast.undo ? (
+          {toast.action ? (
             <button
               type="button"
               className="toast__undo"
               onClick={() => {
-                const undo = toast.undo;
+                const action = toast.action;
                 dismissToast();
-                undo?.();
+                action?.run();
               }}
             >
-              撤销
+              {toast.action.label}
             </button>
           ) : null}
         </div>

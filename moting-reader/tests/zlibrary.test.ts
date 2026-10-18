@@ -174,3 +174,115 @@ test("truncated stream is an error rather than a successful partial book", async
   const response = await handleZlibrary(request("download", { id: 17, hash: "aa" }), fileFetcher({}, () => new Response("short", { headers: { "content-length": "100" } })));
   await assert.rejects(response.text(), /Incomplete book download/);
 });
+
+test("file lookup retries a temporary failure but never retries quota denial", async () => {
+  let lookups = 0;
+  const response = await handleZlibrary(request("download", { id: 17, hash: "aa" }), fetcher((url) => {
+    if (!url.startsWith(ZLIBRARY_ORIGIN)) return new Response("book");
+    if (++lookups === 1) return new Response(null, { status: 503 });
+    return reply({ file: { extension: "txt", downloadLink: "https://files.example/book" } });
+  }));
+  assert.equal(await response.text(), "book");
+  assert.equal(lookups, 2);
+  let denied = 0;
+  const quota = await handleZlibrary(request("download", { id: 17, hash: "aa" }), fetcher(() => {
+    denied += 1;
+    return new Response(null, { status: 429 });
+  }));
+  assert.equal(quota.status, 429);
+  assert.equal(denied, 1);
+});
+
+test("CDN startup retries once using the same link, including empty or broken first reads", async () => {
+  for (const failure of [() => new Response(null, { status: 503 }), () => { throw new Error("network"); }, () => new Response(""), () => new Response(new ReadableStream({ start(c) { c.error(new Error("first byte failed")); } }))]) {
+    let files = 0;
+    let lookups = 0;
+    const response = await handleZlibrary(request("download", { id: 17, hash: "aa" }), fetcher((url) => {
+      if (url.startsWith(ZLIBRARY_ORIGIN)) {
+        lookups += 1;
+        return reply({ file: { extension: "txt", downloadLink: "https://files.example/book" } });
+      }
+      return ++files === 1 ? failure() : new Response("whole book", { headers: { "content-length": "10" } });
+    }));
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "whole book");
+    assert.equal(response.headers.get("x-book-size"), "10");
+    assert.equal(files, 2);
+    assert.equal(lookups, 1);
+  }
+});
+
+function interruptedFile(close = false) {
+  return new Response(new ReadableStream<Uint8Array>({
+    start(c) { c.enqueue(new TextEncoder().encode("first")); },
+    pull(c) { if (close) c.close(); else c.error(new Error("connection dropped")); },
+  }), { headers: { "content-length": "11", etag: '"book-v1"' } });
+}
+
+test("broken or truncated CDN transfers resume verified bytes without duplicating the prefix", async () => {
+  for (const close of [false, true]) {
+    let calls = 0;
+    const response = await handleZlibrary(request("download", { id: 17, hash: "aa" }, { cookie }), fileFetcher({}, () => {
+      if (++calls === 1) return interruptedFile(close);
+      return new Response("-whole", { status: 206, headers: { "content-range": "bytes 5-10/11", "content-length": "6", etag: '"book-v1"' } });
+    }));
+    assert.equal(await response.text(), "first-whole");
+    assert.equal(calls, 2);
+  }
+});
+
+test("resume forwards Range and its validator, never account credentials", async () => {
+  let calls = 0;
+  const response = await handleZlibrary(request("download", { id: 17, hash: "aa" }, { cookie }), fetcher((url, init) => {
+    if (url.startsWith(ZLIBRARY_ORIGIN)) return reply({ file: { extension: "txt", downloadLink: "https://files.example/book" } });
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.has("cookie"), false);
+    assert.equal(headers.has("remix-userkey"), false);
+    assert.equal(headers.get("accept-encoding"), "identity");
+    if (++calls === 1) return interruptedFile();
+    assert.equal(headers.get("range"), "bytes=5-");
+    assert.equal(headers.get("if-range"), '"book-v1"');
+    return new Response("-whole", { status: 206, headers: { "content-range": "bytes 5-10/11", etag: '"book-v1"' } });
+  }));
+  assert.equal(await response.text(), "first-whole");
+});
+
+test("unsafe resumes never append a full file, wrong range, changed version or compressed bytes", async () => {
+  for (const [status, headers] of [
+    [200, { etag: '"book-v1"' }],
+    [206, { "content-range": "bytes 4-10/11", etag: '"book-v1"' }],
+    [206, { "content-range": "bytes 5-10/12", etag: '"book-v1"' }],
+    [206, { "content-range": "bytes 5-10/11", etag: '"book-v2"' }],
+    [206, { "content-range": "bytes 5-10/11", etag: '"book-v1"', "content-encoding": "gzip" }],
+  ] as Array<[number, Record<string, string>]>) {
+    let calls = 0;
+    const response = await handleZlibrary(request("download", { id: 17, hash: "aa" }), fileFetcher({}, () => ++calls === 1 ? interruptedFile() : new Response("incorrect", { status, headers })));
+    const reader = response.body!.getReader();
+    assert.equal(new TextDecoder().decode((await reader.read()).value), "first");
+    await assert.rejects(reader.read(), /不支持安全续传/);
+    assert.equal(calls, 2);
+  }
+});
+
+test("persistent CDN errors have a bounded retry; HTML and quota failures do not retry", async () => {
+  for (const [status, expectedCalls] of [[503, 2], [429, 1], [403, 1]]) {
+    let calls = 0;
+    const response = await handleZlibrary(request("download", { id: 17, hash: "aa" }), fileFetcher({}, () => { calls += 1; return new Response(null, { status }); }));
+    assert.notEqual(response.status, 200);
+    assert.equal(calls, expectedCalls);
+  }
+  const html = await handleZlibrary(request("download", { id: 17, hash: "aa" }), fileFetcher({}, () => new Response("<!doctype html><html>verify</html>", { headers: { "content-type": "application/octet-stream" } })));
+  assert.equal(html.status, 422);
+});
+
+test("canceling a download closes the upstream stream without another request", async () => {
+  let canceled = false;
+  let calls = 0;
+  const response = await handleZlibrary(request("download", { id: 17, hash: "aa" }), fileFetcher({}, () => {
+    calls += 1;
+    return new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array([65])); }, cancel() { canceled = true; } }));
+  }));
+  await response.body!.cancel();
+  assert.equal(canceled, true);
+  assert.equal(calls, 1);
+});

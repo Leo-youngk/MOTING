@@ -64,6 +64,8 @@ export interface Chapter {
 }
 
 export interface BookPosition {
+  /** 同一句跨多页时，当前页距句首所在页的页数；滚动模式不用。 */
+  pageOffset?: number;
   chapterId: string;
   chapterIndex: number;
   sentenceId: string;
@@ -192,6 +194,11 @@ export interface ReaderSettings {
   /** 新建划线直接沿用最近一次选择；旧设置由 DEFAULT_SETTINGS 补齐。 */
   highlightColor: HighlightColor;
   highlightStyle: HighlightStyle;
+  /**
+   * 英文模式：英文段落里单击单词出中文释义，划英文句子问 AI 时多给「翻译」「拆解句子」两个提问。
+   * 默认关，关着时阅读器的单击、问 AI 跟没有这个功能时完全一样。
+   */
+  englishMode: boolean;
   speechRate: number;
   voiceURI: string;
   /**
@@ -199,6 +206,11 @@ export interface ReaderSettings {
    * 高亮和位置照旧按句子走。同步来的旧设置可能没有这一项。
    */
   speechReplacements?: SpeechReplacement[];
+  /**
+   * 听读同步：听书时正文跟着朗读翻动，听到哪里阅读进度就记到哪里，开始听也从听读两者较新的那处起。
+   * 默认关：关着时听和读各记各的，正文在读者手底下不自己动。
+   */
+  followSpeech: boolean;
   /** 用户自带的 OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1。 */
   aiBaseUrl: string;
   /** 请求经我们的 Worker 转发（绕开跨域限制），密钥随请求过一次服务器，不落盘。 */
@@ -222,6 +234,8 @@ export interface AiChatTurn {
   role: "user" | "assistant";
   content: string;
   reasoning?: string;
+  /** 保留不完整回答时一并保存失败原因，重开对话后仍可继续。 */
+  error?: string;
   /** 触发这轮提问时选中的原文片段，只在换了新片段的那一轮才有值。 */
   quote?: string;
   /** 这条回答是备用模型答的时候记下它的名字（主模型答的不记）。 */
@@ -249,8 +263,6 @@ export interface SpeechReplacement {
 
 export interface SpeechSpan {
   sentenceId: string;
-  /** 云端长批次可以跨章，每句自己记着是哪一章的。 */
-  chapterIndex: number;
   sentenceIndex: number;
   start: number;
   end: number;
@@ -292,9 +304,11 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   readingMode: "scroll",
   highlightColor: "yellow",
   highlightStyle: "underline",
+  englishMode: false,
   speechRate: 1,
   voiceURI: "",
   speechReplacements: [],
+  followSpeech: false,
   aiBaseUrl: "",
   aiApiKey: "",
   aiModel: "",
