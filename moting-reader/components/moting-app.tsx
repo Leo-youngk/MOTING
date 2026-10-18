@@ -65,7 +65,8 @@ import { useAppUpdate } from "../hooks/use-app-update";
 import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
-import { AiRequestError, modelHistory, streamAiChat } from "../lib/ai";
+import { AiRequestError, streamAiChat } from "../lib/ai";
+import { bookAiMessages } from "../lib/ai-context";
 import { fallbackAiProvider } from "../lib/ai-providers";
 import {
   BookMetadataError,
@@ -2732,11 +2733,6 @@ function ReaderPopover({
   );
 }
 
-/** 章节全文太长会把请求撑爆、也烧钱，只带前面这么多字，够回答「这章讲了什么」就行。 */
-const AI_CHAPTER_TEXT_LIMIT = 6000;
-/** 目录也有上限：几百章的网文目录能有上万字，连同章节正文会顶破单条消息的上限（整个请求被拒）。 */
-const AI_TOC_LIMIT = 6000;
-
 /** 刚发出的问题滚到顶栏下面时离顶栏的距离。改它要同步 CSS 里 .ai-chat__latest 的最小高度。 */
 const LATEST_GAP = 16;
 
@@ -2772,7 +2768,7 @@ async function askAi({
   onDelta,
   onModel,
 }: {
-  book: BookMeta;
+  book: Book;
   chapter: Chapter | undefined;
   settings: ReaderSettings;
   history: AiChatTurn[];
@@ -2782,28 +2778,6 @@ async function askAi({
   onDelta: (delta: { content?: string; reasoning?: string }) => void;
   onModel?: (model: string) => void;
 }) {
-  const fullToc = tocIndexes(book.chapterOutline)
-    .map((index, number) => `${number + 1}. ${chapterLabel(book.chapterOutline, index)}`)
-    .join("\n");
-  const toc =
-    fullToc.length > AI_TOC_LIMIT
-      ? `${fullToc.slice(0, AI_TOC_LIMIT)}\n……（目录太长，后面的省略了）`
-      : fullToc;
-  const chapterTitle = chapter ? chapterLabelFor(book.chapterOutline, chapter.id) : "正文";
-  const chapterText = chapter
-    ? flattenChapter(chapter)
-        .map((sentence) => sentence.text)
-        .join("")
-        .slice(0, AI_CHAPTER_TEXT_LIMIT)
-    : "";
-  const chapterContext = chapter
-    ? `\n\n当前章节《${chapterTitle}》正文${chapterText.length >= AI_CHAPTER_TEXT_LIMIT ? "（篇幅较长，只截取了前面一部分）" : ""}：\n${chapterText}`
-    : "";
-  // 英文模式下读的是英文章节：读者英语基础一般，讲解要照顾到。关着英文模式或是中文书，提示词一字不变。
-  const englishNote =
-    settings.englishMode && isEnglishText(chapterText)
-      ? "\n这是一本英文书，读者英语基础一般：讲解一律用中文；翻译要通顺自然；讲句子结构时先找出主干，再讲从句和修饰成分，少用语法术语。"
-      : "";
   await streamAiChat(
     {
       baseUrl: settings.aiBaseUrl,
@@ -2814,13 +2788,7 @@ async function askAi({
       deepThinking: settings.aiDeepThinking,
       signal,
       onModel,
-      messages: [
-        {
-          role: "system",
-          content: `你是《${book.title}》的阅读助手。\n全书目录：\n${toc}${chapterContext}\n\n请结合以上内容和对话上下文简洁作答，除非用户要求，不必逐句复述原文。\n如有需要可使用 Markdown 格式（标题、加粗、列表、代码块等）让回答更清晰，但不必为简短回答刻意加格式。${englishNote}${brief ? "\n这次回答显示在正文旁边的批注里，控制在 200 字以内，直接说结论，不要用标题。" : ""}`,
-        },
-        ...modelHistory(history),
-      ],
+      messages: bookAiMessages({ book, chapterId: chapter?.id, history, brief, englishMode: settings.englishMode }),
     },
     onDelta
   );
@@ -2844,14 +2812,16 @@ function AiAskPanel({
   book,
   chapter,
   settings,
+  loadBook,
   onClose,
 }: {
   text: string;
   initialTurns: AiChatTurn[];
   onTurnsChange: (turns: AiChatTurn[]) => void;
-  book: BookMeta;
+  book: BookMeta | Book;
   chapter: Chapter | undefined;
   settings: ReaderSettings;
+  loadBook?: () => Promise<Book | null>;
   onClose: () => void;
 }) {
   const configured = Boolean(settings.aiBaseUrl && settings.aiModel);
@@ -3036,8 +3006,11 @@ function AiAskPanel({
     let failure = "";
     streamTextRef.current = { content: "", reasoning: "" };
     try {
+      const fullBook = "chapters" in book ? book : await loadBook?.();
+      controller.signal.throwIfAborted();
+      if (!fullBook?.chapters.length) throw new AiRequestError("书籍正文尚未就绪，请重新打开这本书后再试");
       await askAi({
-        book,
+        book: fullBook,
         chapter,
         settings,
         history,
@@ -3289,7 +3262,7 @@ function AiInlineAsk({
   onClose,
 }: {
   text: string;
-  book: BookMeta;
+  book: Book;
   chapter: Chapter | undefined;
   settings: ReaderSettings;
   turns: AiChatTurn[];
@@ -8504,6 +8477,10 @@ export default function MotingApp() {
           initialTurns={chats.find((c) => c.bookId === chatBook.id)?.turns ?? []}
           onTurnsChange={(turns) => updateChat(chatBook.id, turns)}
           book={chatBook}
+          loadBook={async () => {
+            const chapters = await loadContent(chatBook.id);
+            return chapters ? { ...chatBook, chapters } : null;
+          }}
           chapter={undefined}
           settings={settings}
           onClose={() => setChatBook(null)}

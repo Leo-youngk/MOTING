@@ -78,12 +78,14 @@ const HISTORY_MAX_CHARS = 60000;
  *   并成一条，保持一问一答交替——有的服务商见到空的 assistant 或连续两条 user 会直接拒；
  * - 只带最近几轮，不会顶到转发的条数、字数上限。
  */
-export function modelHistory(turns: AiChatTurn[]): AiChatMessage[] {
+export function modelHistory(turns: AiChatTurn[], maxChars = HISTORY_MAX_CHARS): AiChatMessage[] {
   const messages: AiChatMessage[] = [];
   for (const turn of turns) {
-    const text = turn.role === "user" && turn.quote
-      ? `引用原文：\n${turn.quote}\n\n${turn.content}`
-      : turn.content;
+    // 长选段优先裁原文，保留后面的实际问题。
+    const quote = turn.role === "user" && turn.quote
+      ? turn.quote.slice(0, Math.max(0, AI_REQUEST_LIMITS.messageChars - turn.content.length - "引用原文：\n\n\n".length))
+      : "";
+    const text = quote ? `引用原文：\n${quote}\n\n${turn.content}` : turn.content;
     const content = text.trim();
     if (!content) continue;
     const last = messages[messages.length - 1];
@@ -95,7 +97,7 @@ export function modelHistory(turns: AiChatTurn[]): AiChatMessage[] {
   while (start > 0 && messages.length - start < HISTORY_MAX_MESSAGES) {
     const size = Math.min(messages[start - 1].content.length, AI_REQUEST_LIMITS.messageChars);
     // 最后一条（这次的提问）无论多长都得带上。
-    if (start < messages.length && chars + size > HISTORY_MAX_CHARS) break;
+    if (start < messages.length && chars + size > maxChars) break;
     chars += size;
     start--;
   }
