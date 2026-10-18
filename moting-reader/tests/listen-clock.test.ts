@@ -7,6 +7,7 @@ import {
   chapterDuration,
   formatClock,
   listenChapter,
+  sentenceAfterSeconds,
   sentenceAtSeconds,
   sentenceSeconds,
   speechSeconds,
@@ -50,6 +51,23 @@ test("拖到第几秒就落在正在读的那一句，两端越界收回来", ()
   assert.deepEqual(sentenceAtSeconds(first, second.end - 0.01), { chapterIndex: 0, sentenceIndex: 1 });
   assert.deepEqual(sentenceAtSeconds(first, -5), { chapterIndex: 0, sentenceIndex: 0 });
   assert.deepEqual(sentenceAtSeconds(first, 1e9), { chapterIndex: 1, sentenceIndex: 0 });
+});
+
+test("按秒数挪位置：跨章、跳过空章，两头停在端点", () => {
+  const list = [
+    createChapter("第一章", [{ text: "甲乙丙丁。戊己庚辛。" }], 0),
+    createChapter("插图", [], 1),
+    createChapter("第二章", [{ text: "寅卯辰巳午。未申酉戌亥。" }], 2),
+  ] as NonNullable<ReturnType<typeof createChapter>>[];
+  const one = speechSeconds("甲乙丙丁。");
+  // 不满一句停在这一句。
+  assert.deepEqual(sentenceAfterSeconds(list, 0, 0, one - 0.1), { chapterIndex: 0, sentenceIndex: 0 });
+  assert.deepEqual(sentenceAfterSeconds(list, 0, 0, one + 0.1), { chapterIndex: 0, sentenceIndex: 1 });
+  // 跨过空章接到下一章。
+  assert.deepEqual(sentenceAfterSeconds(list, 0, 1, one + 0.1), { chapterIndex: 2, sentenceIndex: 0 });
+  assert.deepEqual(sentenceAfterSeconds(list, 2, 0, -0.1), { chapterIndex: 0, sentenceIndex: 1 });
+  assert.deepEqual(sentenceAfterSeconds(list, 2, 1, 1e6), { chapterIndex: 2, sentenceIndex: 1 });
+  assert.deepEqual(sentenceAfterSeconds(list, 0, 1, -1e6), { chapterIndex: 0, sentenceIndex: 0 });
 });
 
 test("时钟格式：不满一小时 mm:ss，超过带小时", () => {

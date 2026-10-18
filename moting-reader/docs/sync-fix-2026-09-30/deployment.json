@@ -1,0 +1,133 @@
+{
+  "code_commit": "a29423bba49cd8b4db98de621ac8ad71931aa871",
+  "branch": "codex/sync-audit-20260930",
+  "migration": "0001_progress_confirmation.sql",
+  "database_before": {
+    "counts": {
+      "books": 37,
+      "positions": 24,
+      "listening": 18,
+      "notes": 241,
+      "sessions": 208,
+      "settings": 2,
+      "chats": 17,
+      "patches": 20
+    },
+    "columns": {
+      "positions": [
+        "book_id",
+        "data",
+        "updated_at",
+        "server_at"
+      ],
+      "listening": [
+        "book_id",
+        "data",
+        "updated_at",
+        "server_at"
+      ]
+    }
+  },
+  "database_after": {
+    "counts": {
+      "books": 37,
+      "positions": 24,
+      "listening": 18,
+      "notes": 241,
+      "sessions": 208,
+      "settings": 2,
+      "chats": 17,
+      "patches": 20
+    },
+    "columns": {
+      "positions": [
+        "book_id",
+        "data",
+        "updated_at",
+        "server_at",
+        "mutation_id"
+      ],
+      "listening": [
+        "book_id",
+        "data",
+        "updated_at",
+        "server_at",
+        "mutation_id"
+      ]
+    }
+  },
+  "backup_verification": {
+    "backup_bytes": 3062794,
+    "sha256": "b1824665294fec034c45802168deaabc2d4bb617ad308e3f47d493d765559a36",
+    "sqlite_integrity": "ok",
+    "counts_match": true
+  },
+  "worker_modules_match": true,
+  "deployments": {
+    "primary": {
+      "url": "https://moting-reader.if5v.workers.dev",
+      "version_id": "b5016677-a076-4277-b484-720aa0c6318d",
+      "created_on": "2026-09-30T13:54:45.553305Z",
+      "traffic_percent": 100,
+      "module_count": 12
+    },
+    "legacy": {
+      "url": "https://moting-reader.yk2958374240.workers.dev",
+      "version_id": "9bfc8ac8-c598-4393-a7bc-b046636c2948",
+      "created_on": "2026-09-30T13:56:17.448632Z",
+      "traffic_percent": 100,
+      "module_count": 12
+    }
+  },
+  "public_checks": {
+    "primary": {
+      "home_status": 200,
+      "title": "墨听阅读器",
+      "library_visible": true,
+      "/api/sync/session": {
+        "status": 200,
+        "connected": false,
+        "enabled": true,
+        "protocol": 4,
+        "build": "a29423b",
+        "backend": "moting-sync"
+      },
+      "/asset-manifest.json": {
+        "status": 200,
+        "sha256": "2aab8a97af984617bd065cec1995afa351a3ed0547dde8507a1440a287ebd145",
+        "matches_build": true
+      },
+      "/sw.js": {
+        "status": 200,
+        "sha256": "124d63b8c23b484661fa5f66c1236f31564eb0817b8c3678d532c87a6765689e",
+        "v17": true
+      },
+      "page_errors": []
+    },
+    "legacy": {
+      "home_status": 200,
+      "title": "墨听阅读器",
+      "library_visible": true,
+      "/api/sync/session": {
+        "status": 200,
+        "connected": false,
+        "enabled": true,
+        "protocol": 4,
+        "build": "a29423b",
+        "backend": "moting-sync"
+      },
+      "/asset-manifest.json": {
+        "status": 200,
+        "sha256": "2aab8a97af984617bd065cec1995afa351a3ed0547dde8507a1440a287ebd145",
+        "matches_build": true
+      },
+      "/sw.js": {
+        "status": 200,
+        "sha256": "124d63b8c23b484661fa5f66c1236f31564eb0817b8c3678d532c87a6765689e",
+        "v17": true
+      },
+      "page_errors": []
+    }
+  },
+  "production_test_data_written": false
+}

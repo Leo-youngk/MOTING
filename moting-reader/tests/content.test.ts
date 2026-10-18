@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildEdgeSpeechBatches,
   buildSpeechBlocks,
   chaptersFromPlainText,
   charsPerLine,
@@ -28,6 +29,52 @@ test("按中文标点切分朗读句子", () => {
     "可以；",
     "结束。",
   ]);
+});
+
+test("英文句子切开后保留句间空格，拼回去和原文一样", () => {
+  const text = "Hi! How are you? Fine; thanks. “Where are you going?” I asked.";
+  const sentences = splitIntoSentences(text);
+  assert.deepEqual(sentences, [
+    "Hi! ",
+    "How are you? ",
+    "Fine; ",
+    "thanks. “Where are you going?",
+    "” I asked.",
+  ]);
+  assert.equal(sentences.join(""), text);
+  // 朗读文本是去掉首尾空白的，空格只在排版里。
+  const chapter = createChapter("Chapter 1", [{ text }], 0);
+  assert.ok(chapter);
+  assert.equal(chapter.paragraphs[0].sentences[0].speakableText, "Hi!");
+});
+
+test("中文句子之间照旧不留空格，中文里夹的英文句子之间才留", () => {
+  assert.deepEqual(splitIntoSentences("你好！ 我是谁？ 这里；"), ["你好！", "我是谁？", "这里；"]);
+  assert.deepEqual(splitIntoSentences("他说 OK! Fine 就好。"), ["他说 OK! ", "Fine 就好。"]);
+});
+
+test("朗读文本里英文句子之间有空格，中文照旧直接相连", () => {
+  const english = createChapter(
+    "Chapter 1",
+    [{ text: "He was not. “But it is,” returned she; “for Mrs. Long told me.”" }, { text: "Mr. Bennet made no answer." }],
+    0
+  );
+  assert.ok(english);
+  const [block] = buildEdgeSpeechBatches(english);
+  assert.equal(
+    block.text,
+    "He was not. “But it is,” returned she; “for Mrs. Long told me.” Mr. Bennet made no answer."
+  );
+  const sentences = english.paragraphs.flatMap((paragraph) => paragraph.sentences);
+  for (const span of block.spans) {
+    assert.equal(block.text.slice(span.start, span.end), sentences[span.sentenceIndex].speakableText);
+  }
+  // 段内朗读块也一样。
+  assert.equal(buildSpeechBlocks(english)[0].text, "He was not. “But it is,” returned she; “for Mrs. Long told me.”");
+
+  const chinese = createChapter("第一章", [{ text: "甲。乙！" }, { text: "丙；丁。" }], 0);
+  assert.ok(chinese);
+  assert.equal(buildEdgeSpeechBatches(chinese)[0].text, "甲。乙！丙；丁。");
 });
 
 test("清理不适合朗读的标记和链接", () => {
@@ -206,18 +253,33 @@ test("超长段落按句子边界切成多块", () => {
   );
 });
 
-test("系统朗读块里每句记着自己是哪一章", () => {
-  const chapter = createChapter("第三章", [{ text: "甲。乙。" }], 2);
-  assert.ok(chapter);
-  const blocks = buildSpeechBlocks(chapter, 2, (text) => text.replace("乙", "丙"));
-  assert.equal(blocks[0].text, "甲。丙。");
-  assert.deepEqual(
-    blocks[0].spans.map((span) => [span.chapterIndex, span.sentenceIndex]),
-    [
-      [2, 0],
-      [2, 1],
-    ]
+test("云端朗读批次跨段落合并并保持句子下标", () => {
+  const chapter = createChapter(
+    "第一章",
+    [{ text: "甲。乙。" }, { text: "丙。丁。" }, { text: "戊。" }],
+    0
   );
+  assert.ok(chapter);
+
+  const batches = buildEdgeSpeechBatches(chapter, 7);
+  assert.deepEqual(
+    batches.map((batch) => batch.text),
+    ["甲。乙。丙。", "丁。戊。"]
+  );
+  assert.deepEqual(
+    batches.flatMap((batch) => batch.spans.map((span) => span.sentenceIndex)),
+    [0, 1, 2, 3, 4]
+  );
+  for (const batch of batches) {
+    for (const span of batch.spans) {
+      assert.equal(
+        batch.text.slice(span.start, span.end),
+        chapter.paragraphs
+          .flatMap((paragraph) => paragraph.sentences)
+          [span.sentenceIndex].speakableText
+      );
+    }
+  }
 });
 
 test("阅读位置能够跨章节移动并计算进度", () => {

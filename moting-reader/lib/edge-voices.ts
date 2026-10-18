@@ -11,8 +11,7 @@ export const EDGE_VOICE_PREFIX = "edge:";
 export const DEFAULT_EDGE_VOICE = "zh-CN-YunjianNeural";
 
 /**
- * 听书面板和设置里能选的音色。系统自带语音不进这张表：
- * 它们只在云端不可用时自动顶上，界面上会明确提示「已切换到系统朗读」。
+ * 听书面板和设置里能选的云端音色。播放失败仍使用所选云端音色重试。
  */
 export const EDGE_VOICES: PlayerVoice[] = [
   { voiceURI: `${EDGE_VOICE_PREFIX}zh-CN-YunjianNeural`, name: "云健 · 云端男声", lang: "zh-CN 浑厚沉稳" },

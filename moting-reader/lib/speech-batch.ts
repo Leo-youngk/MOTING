@@ -2,28 +2,30 @@ import { buildBoundaryTimeline, TICKS_PER_SECOND } from "./speech-timeline.ts";
 import type { SpeechBoundary } from "./types.ts";
 import type { WordBoundary } from "./speech-timeline.ts";
 
+export interface SpeechTextChunk {
+  text: string;
+  start: number;
+  /** 只有结构化切片（splitStructuredSpeech）才有：这一片读完之后接多长的停顿。 */
+  breakAfter?: SpeechBreak;
+}
+
 /**
- * 一片读完之后接多长的停顿。客户端组段时用换行把结构带给 Worker：
+ * 结构化文本的停顿类型。新客户端组文本时用换行把结构带过来：
  * 一个换行是换段，两个是标题前后，三个以上是换章；段内切开的看切在什么标点上。
  */
-export type SpeechBreak =
-  | "none"
-  | "clause"
-  | "sentence"
-  | "paragraph"
-  | "heading"
-  | "chapter";
+export type SpeechBreak = "none" | "clause" | "sentence" | "paragraph" | "heading" | "chapter";
 
 export const PARAGRAPH_SEPARATOR = "\n";
 export const HEADING_SEPARATOR = "\n\n";
 export const CHAPTER_SEPARATOR = "\n\n\n";
+/** 新客户端发来的文本带这个格式号；老客户端（每句后面一个换行）不带，照旧处理。 */
+export const STRUCTURED_SPEECH_FORMAT = 2;
 
 /**
  * 从这片最后一个字读完，到下一片第一个字出声，中间一共静多久（1× 下的秒数）。
- *
  * 句号、逗号两档照云健自己在一次合成里的停顿：2026-10 用 ffmpeg 量过，句末约 0.66 秒、
- * 逗号约 0.3 秒。以前拼接处原样保留每片结尾约 0.88 秒的静音，再加下一片开头 0.18 秒，
- * 段落中间会随机冒出一秒多的停顿；而真正换段、换章的地方反倒没有额外停顿。
+ * 逗号约 0.3 秒。不整理的话每片结尾自带约 0.88 秒静音，加上下一片开头 0.18 秒，
+ * 每个拼接处都会多停 0.4 秒左右；真正换段、换章的地方反倒没有额外停顿。
  */
 export const BREAK_GAP_SECONDS: Record<SpeechBreak, number> = {
   none: 0.25,
@@ -39,21 +41,14 @@ const LEADING_SILENCE_SECONDS = 0.18;
 /** 最后一个词的结束时间离真正收声差几十毫秒，至少留这么多尾巴，免得吃掉字音。 */
 const MIN_TAIL_SECONDS = 0.12;
 
-export interface SpeechTextChunk {
-  /** 原文切片，不含两片之间作分隔用的换行。 */
-  text: string;
-  /** 这一片在整批文本里从第几个字符开始。 */
-  start: number;
-  breakAfter: SpeechBreak;
-}
-
 export interface SpeechChunkResult {
   audio: Uint8Array;
   boundaries: WordBoundary[];
 }
 
-const PRIMARY_BREAK = /[。！？!?；;…]/;
+const PRIMARY_BREAK = /[。！？!?；;\n]/;
 const SECONDARY_BREAK = /[，,、：:\s]/;
+const SENTENCE_END = /[。！？!?；;…]/;
 /** 句末标点后面紧跟的收尾引号、括号要跟着这一句走，不能单独甩到下一片开头。 */
 const CLOSING = /[”’」』》）)\]】"']/;
 /** 有字可读：一片里全是标点、星号这类符号时，微软会一个字节都不回。 */
@@ -90,7 +85,7 @@ function isSurrogateSplit(text: string, index: number): boolean {
   return previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff;
 }
 
-/** 在 [minimum, end) 里从后往前找切点，返回切点（不含）和这一刀的停顿类型。 */
+/** 在 [minimum, end) 里从后往前找切点：换行、句末标点、逗号，实在没有才硬切。 */
 function findCut(
   text: string,
   start: number,
@@ -101,18 +96,14 @@ function findCut(
     if (text[index] === "\n") return { cut: index, next: index + 1, breakAfter: "paragraph" };
   }
   for (let index = end - 1; index >= minimum; index -= 1) {
-    if (!PRIMARY_BREAK.test(text[index])) continue;
+    if (!SENTENCE_END.test(text[index])) continue;
     let cut = index + 1;
-    while (cut < text.length && (PRIMARY_BREAK.test(text[cut]) || CLOSING.test(text[cut]))) {
-      cut += 1;
-    }
+    while (cut < text.length && (SENTENCE_END.test(text[cut]) || CLOSING.test(text[cut]))) cut += 1;
     if (cut > end) cut = index + 1;
     return { cut, next: cut, breakAfter: "sentence" };
   }
   for (let index = end - 1; index >= minimum; index -= 1) {
-    if (SECONDARY_BREAK.test(text[index])) {
-      return { cut: index + 1, next: index + 1, breakAfter: "clause" };
-    }
+    if (SECONDARY_BREAK.test(text[index])) return { cut: index + 1, next: index + 1, breakAfter: "clause" };
   }
   let cut = end;
   if (cut > start + 1 && isSurrogateSplit(text, cut)) cut -= 1;
@@ -120,16 +111,10 @@ function findCut(
 }
 
 /**
- * 微软的单次合成有长度上限，长批次在 Worker 里按自然停顿切开，但保留每一片的原始下标，
- * 后面才能把各片的词级时间轴拼回整批文本。
- *
- * 两个以上换行（标题、换章）一定切开，因为只有在两片之间才能插静音；
- * 段内切点依次挑换行、句末标点、逗号，实在没有才按长度硬切。
+ * 结构化文本的切片：两个以上换行（标题、换章）一定切开，因为只有在两片之间才能插静音；
+ * 段内切点依次挑换行、句末标点、逗号。分隔用的换行不进任何一片，start 是原文下标。
  */
-export function splitSpeechText(
-  text: string,
-  maxLength = 360
-): SpeechTextChunk[] {
+export function splitStructuredSpeech(text: string, maxLength = 360): SpeechTextChunk[] {
   if (!Number.isFinite(maxLength) || maxLength < 1) {
     throw new RangeError("maxLength 必须是正整数");
   }
@@ -141,14 +126,12 @@ export function splitSpeechText(
     while (position < end) {
       while (position < end && text[position] === "\n") position += 1;
       if (position >= end) break;
-
       if (end - position <= limit) {
         let cut = end;
         while (cut > position && text[cut - 1] === "\n") cut -= 1;
         chunks.push({ text: text.slice(position, cut), start: position, breakAfter: sectionBreak });
         return;
       }
-
       const minimum = position + Math.floor(limit / 2);
       const { cut, next, breakAfter } = findCut(text, position, position + limit, minimum);
       chunks.push({ text: text.slice(position, cut), start: position, breakAfter });
@@ -162,8 +145,59 @@ export function splitSpeechText(
     pushSection(sectionStart, match.index, breakOfRun(match[0].length));
     sectionStart = match.index + match[0].length;
   }
-  if (sectionStart < text.length) {
-    pushSection(sectionStart, text.length, trailingBreak(text));
+  if (sectionStart < text.length) pushSection(sectionStart, text.length, trailingBreak(text));
+  return chunks;
+}
+
+/**
+ * 微软的单次合成有长度上限；长批次在服务端按自然停顿切开，但保留每一字符的
+ * 原始下标，后面才能把各段词级时间轴重新拼回整批文本。
+ */
+export function splitSpeechText(
+  text: string,
+  maxLength = 360
+): SpeechTextChunk[] {
+  if (!Number.isFinite(maxLength) || maxLength < 1) {
+    throw new RangeError("maxLength 必须是正整数");
+  }
+
+  const chunks: SpeechTextChunk[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(text.length, start + Math.floor(maxLength));
+    if (end < text.length) {
+      const minimum = start + Math.floor(maxLength / 2);
+      let naturalEnd = -1;
+      for (let index = end - 1; index >= minimum; index -= 1) {
+        if (PRIMARY_BREAK.test(text[index])) {
+          naturalEnd = index + 1;
+          break;
+        }
+      }
+      if (naturalEnd < 0) {
+        for (let index = end - 1; index >= minimum; index -= 1) {
+          if (SECONDARY_BREAK.test(text[index])) {
+            naturalEnd = index + 1;
+            break;
+          }
+        }
+      }
+      if (naturalEnd > start) end = naturalEnd;
+      // 不在 UTF-16 代理对中间硬切，避免 emoji 变成两个非法字符。
+      const previous = text.charCodeAt(end - 1);
+      const next = text.charCodeAt(end);
+      if (
+        previous >= 0xd800 &&
+        previous <= 0xdbff &&
+        next >= 0xdc00 &&
+        next <= 0xdfff
+      ) {
+        end -= 1;
+      }
+    }
+
+    chunks.push({ text: text.slice(start, end), start });
+    start = end;
   }
   return chunks;
 }
@@ -176,57 +210,10 @@ const MPEG2_LAYER3_BITRATES = [
 ];
 const SAMPLE_RATES = [44100, 48000, 32000];
 
-export interface Mp3Frame {
-  offset: number;
-  length: number;
-  seconds: number;
-}
-
-interface FrameFormat {
-  mpeg1: boolean;
-  sampleRate: number;
-  bitrate: number;
-  mono: boolean;
-}
-
-function frameFormat(audio: Uint8Array, offset: number): FrameFormat | null {
-  if (audio[offset] !== 0xff || (audio[offset + 1] & 0xe0) !== 0xe0) return null;
-  const versionBits = (audio[offset + 1] >> 3) & 0x03;
-  const layerBits = (audio[offset + 1] >> 1) & 0x03;
-  const bitrateIndex = (audio[offset + 2] >> 4) & 0x0f;
-  const sampleRateIndex = (audio[offset + 2] >> 2) & 0x03;
-  if (
-    versionBits === 1 ||
-    layerBits !== 1 ||
-    bitrateIndex === 0 ||
-    bitrateIndex === 15 ||
-    sampleRateIndex === 3
-  ) {
-    return null;
-  }
-  const mpeg1 = versionBits === 3;
-  const rateDivisor = versionBits === 2 ? 2 : versionBits === 0 ? 4 : 1;
-  return {
-    mpeg1,
-    sampleRate: SAMPLE_RATES[sampleRateIndex] / rateDivisor,
-    bitrate:
-      (mpeg1 ? MPEG1_LAYER3_BITRATES[bitrateIndex] : MPEG2_LAYER3_BITRATES[bitrateIndex]) * 1000,
-    mono: audio[offset + 3] >> 6 === 3,
-  };
-}
-
-function frameBytes(format: FrameFormat, padding: number): number {
-  return Math.floor(((format.mpeg1 ? 144 : 72) * format.bitrate) / format.sampleRate + padding);
-}
-
-function frameSeconds(format: FrameFormat): number {
-  return (format.mpeg1 ? 1152 : 576) / format.sampleRate;
-}
-
-/** 逐帧扫一遍 MP3（跳过 ID3 和帧间杂字节），拿到每帧的位置和时长。 */
-export function mp3Frames(audio: Uint8Array): Mp3Frame[] {
-  const frames: Mp3Frame[] = [];
+/** 逐帧扫一遍 MP3：每一帧的位置、字节数、时长。跳过开头的 ID3 和帧之间的杂字节。 */
+export function mp3Frames(audio: Uint8Array): { offset: number; length: number; duration: number }[] {
   let offset = 0;
+  const frames: { offset: number; length: number; duration: number }[] = [];
 
   if (
     audio.length >= 10 &&
@@ -243,57 +230,95 @@ export function mp3Frames(audio: Uint8Array): Mp3Frame[] {
   }
 
   while (offset + 4 <= audio.length) {
-    const format = frameFormat(audio, offset);
-    if (!format) {
+    if (audio[offset] !== 0xff || (audio[offset + 1] & 0xe0) !== 0xe0) {
       offset += 1;
       continue;
     }
-    const length = frameBytes(format, (audio[offset + 2] >> 1) & 0x01);
-    if (length < 4 || offset + length > audio.length) {
+
+    const versionBits = (audio[offset + 1] >> 3) & 0x03;
+    const layerBits = (audio[offset + 1] >> 1) & 0x03;
+    const bitrateIndex = (audio[offset + 2] >> 4) & 0x0f;
+    const sampleRateIndex = (audio[offset + 2] >> 2) & 0x03;
+    const padding = (audio[offset + 2] >> 1) & 0x01;
+    if (
+      versionBits === 1 ||
+      layerBits !== 1 ||
+      bitrateIndex === 0 ||
+      bitrateIndex === 15 ||
+      sampleRateIndex === 3
+    ) {
       offset += 1;
       continue;
     }
-    frames.push({ offset, length, seconds: frameSeconds(format) });
-    offset += length;
+
+    const mpeg1 = versionBits === 3;
+    const rateDivisor = versionBits === 2 ? 2 : versionBits === 0 ? 4 : 1;
+    const sampleRate = SAMPLE_RATES[sampleRateIndex] / rateDivisor;
+    const bitrate =
+      (mpeg1
+        ? MPEG1_LAYER3_BITRATES[bitrateIndex]
+        : MPEG2_LAYER3_BITRATES[bitrateIndex]) * 1000;
+    const frameLength = Math.floor(
+      ((mpeg1 ? 144 : 72) * bitrate) / sampleRate + padding
+    );
+    if (frameLength < 4 || offset + frameLength > audio.length) {
+      offset += 1;
+      continue;
+    }
+
+    frames.push({ offset, length: frameLength, duration: (mpeg1 ? 1152 : 576) / sampleRate });
+    offset += frameLength;
   }
+
   return frames;
 }
 
 /** 逐帧计算 MP3 时长；比拿最后一个词的结束时间更能覆盖句末静音和编码延迟。 */
 export function mp3DurationSeconds(audio: Uint8Array): number {
-  return mp3Frames(audio).reduce((total, frame) => total + frame.seconds, 0);
+  return mp3Frames(audio).reduce((seconds, frame) => seconds + frame.duration, 0);
+}
+
+function frameHeader(audio: Uint8Array, offset: number): { length: number; duration: number } | null {
+  const frames = mp3Frames(audio.subarray(offset, offset + 4096));
+  return frames.length && frames[0].offset === 0 ? frames[0] : null;
 }
 
 /**
- * 照着这段音频的格式造一帧数字静音：边信息全零（part2_3_length = 0，不带任何频谱数据），
+ * 照着这段音频的格式造一帧数字静音：边信息全零（part2_3_length = 0，不带频谱数据），
  * main_data_begin 也是 0，不借前面的比特池，插在两次合成之间不会把谁解坏。
  * LAME 编码纯静音时出的就是这种帧。
  */
-function silentFrame(audio: Uint8Array, frame: Mp3Frame): { bytes: Uint8Array; seconds: number } | null {
-  const format = frameFormat(audio, frame.offset);
-  if (!format) return null;
-  const bytes = new Uint8Array(frameBytes(format, 0));
+function silentFrameLike(audio: Uint8Array, offset: number): { bytes: Uint8Array; duration: number } | null {
+  const header = frameHeader(audio, offset);
+  if (!header) return null;
+  const padded = (audio[offset + 2] >> 1) & 0x01;
+  const bytes = new Uint8Array(header.length - padded);
   bytes[0] = 0xff;
-  // 保留版本、层；保护位置 1，表示不带 CRC。
-  bytes[1] = audio[frame.offset + 1] | 0x01;
-  // 保留码率、采样率、私有位；去掉填充位，帧长就是上面算的那个数。
-  bytes[2] = audio[frame.offset + 2] & ~0x02;
-  bytes[3] = audio[frame.offset + 3];
-  return { bytes, seconds: frameSeconds(format) };
+  bytes[1] = audio[offset + 1] | 0x01; // 保护位置 1：不带 CRC。
+  bytes[2] = audio[offset + 2] & ~0x02; // 去掉填充位。
+  bytes[3] = audio[offset + 3];
+  return { bytes, duration: header.duration };
 }
 
-function boundaryEnd(boundaries: WordBoundary[]): number {
-  return boundaries.reduce(
-    (end, boundary) =>
-      Math.max(end, (boundary.offset + boundary.duration) / TICKS_PER_SECOND),
-    0
-  );
+/** 云健的输出格式（MPEG-2 Layer III、24kHz、48kbps、单声道）的一帧数字静音，24 毫秒。 */
+const EDGE_SILENT_FRAME = (() => {
+  const bytes = new Uint8Array(144);
+  bytes.set([0xff, 0xf3, 0x64, 0xc4]);
+  return bytes;
+})();
+
+/** 一段指定长短的数字静音 MP3（给全是符号、读不出声的那一片占时间用）。 */
+export function silentMp3(seconds: number): Uint8Array {
+  const count = Math.max(1, Math.round(seconds / (576 / 24000)));
+  const audio = new Uint8Array(EDGE_SILENT_FRAME.length * count);
+  for (let index = 0; index < count; index += 1) audio.set(EDGE_SILENT_FRAME, index * EDGE_SILENT_FRAME.length);
+  return audio;
 }
 
 /**
  * 把一片合成结果的结尾整理成想要的停顿：收声之后留够 gap 减去下一片开头自带的静音，
  * 多出来的整帧裁掉，不够的补静音帧。只动结尾——MP3 的比特池只往前借，从后面截断不会
- * 把前面的帧解坏。返回整理后的音频和它的时长。
+ * 把前面的帧解坏。返回整理后的音频和它的时长；词边界的时间不受影响。
  */
 export function fitChunkAudio(
   audio: Uint8Array,
@@ -301,41 +326,44 @@ export function fitChunkAudio(
   gapSeconds: number
 ): { audio: Uint8Array; seconds: number } {
   const frames = mp3Frames(audio);
-  const total = frames.reduce((sum, frame) => sum + frame.seconds, 0);
-  const speechEnd = boundaryEnd(boundaries);
+  const total = frames.reduce((sum, frame) => sum + frame.duration, 0);
+  const speechEnd = boundaryDuration(boundaries);
   if (!frames.length || speechEnd <= 0 || speechEnd > total + 0.5) {
     return { audio, seconds: total || speechEnd };
   }
-
   const target = speechEnd + Math.max(MIN_TAIL_SECONDS, gapSeconds - LEADING_SILENCE_SECONDS);
-
   if (target < total) {
     let seconds = 0;
     let end = 0;
     for (const frame of frames) {
       if (seconds >= target) break;
-      seconds += frame.seconds;
+      seconds += frame.duration;
       end = frame.offset + frame.length;
     }
     return { audio: audio.subarray(0, end), seconds };
   }
-
-  const silence = silentFrame(audio, frames[frames.length - 1]);
-  const missing = target - total;
-  const count = silence ? Math.round(missing / silence.seconds) : 0;
+  const silence = silentFrameLike(audio, frames[frames.length - 1].offset);
+  const count = silence ? Math.round((target - total) / silence.duration) : 0;
   if (!silence || count <= 0) return { audio, seconds: total };
-
   const padded = new Uint8Array(audio.length + silence.bytes.length * count);
   padded.set(audio, 0);
   for (let index = 0; index < count; index += 1) {
     padded.set(silence.bytes, audio.length + index * silence.bytes.length);
   }
-  return { audio: padded, seconds: total + silence.seconds * count };
+  return { audio: padded, seconds: total + silence.duration * count };
+}
+
+function boundaryDuration(boundaries: WordBoundary[]): number {
+  return boundaries.reduce(
+    (duration, boundary) =>
+      Math.max(duration, (boundary.offset + boundary.duration) / TICKS_PER_SECOND),
+    0
+  );
 }
 
 /**
- * 把多个独立 MP3 及其词级时间轴拼成浏览器眼中的一个长媒体资源，
- * 并按每片之后的停顿类型整理拼接处的静音。没出声的片（全是符号）直接跳过。
+ * 把多个独立 MP3 及其词级时间轴拼成浏览器眼中的一个长媒体资源。
+ * 结构化切片（带 breakAfter）的片按停顿类型整理拼接处的静音；没出声的片直接跳过。
  */
 export function joinSpeechChunks(
   chunks: SpeechTextChunk[],
@@ -361,13 +389,14 @@ export function joinSpeechChunks(
       });
     }
 
-    const fitted = fitChunkAudio(
-      result.audio,
-      result.boundaries,
-      BREAK_GAP_SECONDS[chunk.breakAfter]
-    );
-    pieces.push(fitted.audio);
-    timeOffset += fitted.seconds;
+    if (chunk.breakAfter) {
+      const fitted = fitChunkAudio(result.audio, result.boundaries, BREAK_GAP_SECONDS[chunk.breakAfter]);
+      pieces.push(fitted.audio);
+      timeOffset += fitted.seconds;
+    } else {
+      pieces.push(result.audio);
+      timeOffset += mp3DurationSeconds(result.audio) || boundaryDuration(result.boundaries);
+    }
   }
 
   const audio = new Uint8Array(

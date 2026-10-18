@@ -137,3 +137,98 @@ test("an error body wrapped in an array still shows its message", async () => {
     );
   });
 });
+
+test("an array-wrapped error inside HTTP 200 keeps the upstream reason", async () => {
+  await withFetch(sse(['data: [{"error":{"code":503,"message":"模型过载"}}]\n\n']), async () => {
+    await assert.rejects(streamAiChat(options, () => {}), /模型过载/);
+  });
+});
+
+test("EOF after partial output is reported and the partial text is preserved", async () => {
+  await withFetch(sse(['data: {"choices":[{"delta":{"content":"半截"}}]}\n\n']), async () => {
+    let text = "";
+    await assert.rejects(streamAiChat(options, delta => { text += delta.content ?? ""; }), /中途断开/);
+    assert.equal(text, "半截");
+  });
+});
+
+test("finish_reason stop is accepted even when the provider omits DONE", async () => {
+  await withFetch(sse(['data: {"choices":[{"delta":{"content":"完整"},"finish_reason":"stop"}]}\r\n\r\n']), async () => {
+    let text = "";
+    await streamAiChat(options, delta => { text += delta.content ?? ""; });
+    assert.equal(text, "完整");
+  });
+});
+
+test("length-limited output continues once with the existing answer as context", async () => {
+  const original = globalThis.fetch;
+  const requests: { messages: { role: string; content: string }[] }[] = [];
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return requests.length === 1
+      ? sse(['data: {"choices":[{"delta":{"content":"开头"},"finish_reason":"length"}]}\n\n'])
+      : sse(['data: {"choices":[{"delta":{"content":"结尾"},"finish_reason":"stop"}]}\n\n']);
+  };
+  try {
+    let text = "";
+    await streamAiChat(options, delta => { text += delta.content ?? ""; });
+    assert.equal(text, "开头结尾");
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[1].messages.at(-2), { role: "assistant", content: "开头" });
+    assert.match(requests[1].messages.at(-1)!.content, /不要重复/);
+  } finally { globalThis.fetch = original; }
+});
+
+test("continuation is bounded and content filtering is reported", async () => {
+  for (const reason of ["length", "content_filter"]) {
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return sse([`data: {"choices":[{"delta":{"content":"部分"},"finish_reason":"${reason}"}]}\n\n`]); };
+    try {
+      await assert.rejects(streamAiChat(options, () => {}), reason === "length" ? /长度上限/ : /拦截/);
+      assert.equal(calls, reason === "length" ? 2 : 1);
+    } finally { globalThis.fetch = original; }
+  }
+});
+
+test("canceling an active reply cancels the upstream reader", async () => {
+  const controller = new AbortController();
+  let canceled = false;
+  const encoder = new TextEncoder();
+  const response = new Response(new ReadableStream({
+    start(stream) { stream.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"开头"}}]}\n\n')); },
+    cancel() { canceled = true; },
+  }));
+  await withFetch(response, async () => {
+    await assert.rejects(streamAiChat({ ...options, signal: controller.signal }, () => controller.abort()));
+  });
+  assert.equal(canceled, true);
+});
+
+test("unexpected tool completion is not mistaken for a complete text reply", async () => {
+  await withFetch(sse(['data: {"choices":[{"delta":{"content":"部分"},"finish_reason":"tool_calls"}]}\n\n']), async () => {
+    await assert.rejects(streamAiChat(options, () => {}), /提前结束/);
+  });
+});
+
+
+test("continuation after cross-provider fallback stays on the provider that answered", async () => {
+  const original = globalThis.fetch;
+  const fallbackProvider = { name: "备用", baseUrl: "https://backup.example/v1", apiKey: "backup-key", model: "backup-model" };
+  const calls: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_url, init) => {
+    calls.push(JSON.parse(String(init?.body)));
+    return calls.length === 1
+      ? sse(['data: {"choices":[{"delta":{"content":"上半段"},"finish_reason":"length"}]}\n\n'], { "x-ai-model": "backup-model", "x-ai-provider": "fallback" })
+      : sse(['data: {"choices":[{"delta":{"content":"下半段"},"finish_reason":"stop"}]}\n\n'], { "x-ai-model": "backup-model" });
+  };
+  try {
+    let text = "";
+    await streamAiChat({ ...options, fallbackProvider }, delta => { text += delta.content ?? ""; });
+    assert.equal(text, "上半段下半段");
+    assert.equal(calls[1].baseUrl, fallbackProvider.baseUrl);
+    assert.equal(calls[1].apiKey, fallbackProvider.apiKey);
+    assert.equal(calls[1].model, fallbackProvider.model);
+    assert.equal(calls[1].fallbackProvider, undefined);
+  } finally { globalThis.fetch = original; }
+});

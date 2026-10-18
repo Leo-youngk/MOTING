@@ -292,6 +292,76 @@ function rangeFor(
   return range;
 }
 
+/** 句内 [start, end) 这一截的 Range。所在的章被章节窗口摘掉了就是 null。 */
+export function sentenceRange(
+  article: HTMLElement,
+  sentenceId: string,
+  start: number,
+  end: number
+): Range | null {
+  const place = (offset: number) => ({ chapterIndex: 0, sentenceIndex: 0, sentenceId, offset });
+  return rangeFor(article, { anchor: place(start), focus: place(end) });
+}
+
+/** 轻点时手指的误差：落点出了字形框这么几像素也还算点在这个词上。 */
+const TAP_SLOP = 3;
+
+export interface WordAtPoint {
+  /** 词所在的句子元素。 */
+  element: HTMLElement;
+  sentenceId: string;
+  /** 句子的纯文本，和 sentence.text 对得上。 */
+  text: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * 轻点落在哪个词上（点词释义用）。
+ *
+ * 点到行尾空白、段间留白时 caretRangeFromPoint 也会就近吸到某个字上，所以还要核对
+ * 这个词的字形框真的盖住了落点：上下放宽到整行高（行距里的空隙算这一行），左右只放宽几像素。
+ * 点在字的右半边时 caret 落在字后面，前后两个位置的词都要试。
+ */
+export function wordAtPoint(
+  article: HTMLElement,
+  x: number,
+  y: number
+): WordAtPoint | null {
+  const caret = caretInArticle(article, x, y);
+  const element = sentenceElementOf(caret?.node ?? null);
+  if (!caret || !element || !article.contains(element)) return null;
+
+  const text = element.textContent ?? "";
+  const at = offsetInSentence(element, caret.node, caret.offset);
+  const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight) || 0;
+  for (const offset of [at, at - 1]) {
+    if (offset < 0 || offset >= text.length) continue;
+    const word = expandToWord(text, offset);
+    if (!/\p{L}/u.test(text.slice(word.start, word.end))) continue;
+    const range = sentenceRange(article, element.dataset.sentenceId ?? "", word.start, word.end);
+    const covered = Array.from(range?.getClientRects() ?? []).some((rect) => {
+      const pad = Math.max(0, (lineHeight - rect.height) / 2);
+      return (
+        x >= rect.left - TAP_SLOP &&
+        x <= rect.right + TAP_SLOP &&
+        y >= rect.top - pad &&
+        y <= rect.bottom + pad
+      );
+    });
+    if (covered) {
+      return {
+        element,
+        sentenceId: element.dataset.sentenceId ?? "",
+        text,
+        start: word.start,
+        end: word.end,
+      };
+    }
+  }
+  return null;
+}
+
 function toRect(rect: DOMRect): Rect {
   return {
     top: rect.top,

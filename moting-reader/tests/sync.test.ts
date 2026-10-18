@@ -1,3 +1,4 @@
+import { recordHash, recordObjectKey, storedBlob, INLINE_RECORD_BYTES, utf8Bytes, retryDelay, type RecordKind } from "../lib/sync-record.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { handleSync, type SyncEnv } from "../worker/sync.ts";
@@ -51,14 +52,32 @@ function createMemoryStore(): SyncStore & { rows: Map<SyncTable, Map<string, Syn
       return clockValue;
     },
     async applyPush(batch) {
-      if (!batch.length) return;
+      if (!batch.length) return [];
       clockValue = Math.max(clockValue, Date.now() * 1000) + batch.length;
       const base = clockValue - batch.length;
       batch.forEach(({ table: name, row }, index) => {
         const store = table(name);
         const existing = store.get(row.key);
-        if (existing && row.updatedAt <= existing.updatedAt) return; // 新者胜:旧的被拒
-        store.set(row.key, { ...row, bookId: row.bookId ?? existing?.bookId ?? null, serverAt: base + index });
+        if (name === "positions" || name === "listening") {
+          if (existing && row.mutationId) {
+            if (row.mutationId === existing.mutationId) return;
+            if (row.bootstrap ? (existing.mutationId || row.updatedAt < existing.updatedAt) : existing.serverAt !== row.baseServerRev) return;
+          } else if (existing && (existing.mutationId || row.updatedAt <= existing.updatedAt)) return;
+        } else if (existing && row.updatedAt <= existing.updatedAt) return;
+        store.set(row.key, { ...row, bookId: row.bookId ?? existing?.bookId ?? null, serverAt: base + index + 1 });
+      });
+      return batch.map(({ table: name, row }) => {
+        const stored = table(name).get(row.key)!;
+        if (name !== "positions" && name !== "listening") return {
+          kind: name as RecordKind, key: row.key, updatedAt: row.updatedAt,
+          status: stored.updatedAt === row.updatedAt && stored.data === row.data ? "accepted" as const : "stale" as const,
+          serverAt: stored.serverAt,
+        };
+        const saved = table(name).get(row.key)!;
+        return { kind: name as "positions" | "listening", key: row.key, mutationId: row.mutationId,
+          status: !row.mutationId && saved.mutationId ? "upgrade" as const
+            : row.mutationId && saved.mutationId !== row.mutationId && !(row.bootstrap && saved.data === row.data) ? "conflict" as const : "accepted" as const,
+          record: { key: saved.key, data: JSON.parse(saved.data), updatedAt: saved.updatedAt, serverAt: saved.serverAt, mutationId: saved.mutationId } };
       });
     },
     async since(name, watermark, through, limit) {
@@ -87,8 +106,9 @@ function createMemoryBucket() {
       const found = objects.get(key);
       return found ? { size: found.buffer.byteLength } : null;
     },
-    async put(key: string, value: ArrayBuffer) {
-      objects.set(key, { buffer: value, contentType: "application/json" });
+    async put(key: string, value: ArrayBuffer | string) {
+      const buffer = typeof value === "string" ? new TextEncoder().encode(value).buffer : value;
+      objects.set(key, { buffer, contentType: "application/json" });
     },
   };
 }
@@ -168,11 +188,11 @@ test("push without a valid session is rejected with 401", async () => {
 // ---------------------------------------------------------------------------
 // push/pull 的记录级 LWW 收敛。
 
-async function pullAll(e: SyncEnv, cookie: string, since = 0) {
-  const pages: Array<Record<string, Array<{ key: string; updatedAt: number; data?: unknown; deletedAt?: number }>> & { cursor: number; hasMore: boolean }> = [];
+async function pullAll(e: SyncEnv, cookie: string, since = 0, recordBlobs = false) {
+  const pages: Array<Record<string, Array<{ key: string; updatedAt: number; data?: unknown; blob?: unknown; deletedAt?: number }>> & { cursor: number; hasMore: boolean }> = [];
   let cursor = since;
   for (;;) {
-    const page = await jsonOf<(typeof pages)[number]>(await handleSync(syncRequest("pull", { since: cursor }, { cookie }), e));
+    const page = await jsonOf<(typeof pages)[number]>(await handleSync(syncRequest("pull", { since: cursor, recordBlobs }, { cookie }), e));
     pages.push(page);
     cursor = page.cursor;
     if (!page.hasMore) break;
@@ -217,8 +237,8 @@ test("pull pages across tables by server_at without skipping or repeating rows",
   assert.deepEqual(tail.pages[0].notes.map((row) => row.key), ["late"]);
 });
 
-test("a record over the D1 row limit is skipped and reported, the rest of the batch still lands", async () => {
-  const { e } = env();
+test("a legacy record over the D1 limit is stored in R2 and round-trips alongside small records", async () => {
+  const { e, store, bucket } = env();
   const cookie = await loginCookie(e);
   const huge = JSON.stringify({ id: "big", blob: "x".repeat(2_000_000) });
   const response = await handleSync(
@@ -226,10 +246,12 @@ test("a record over the D1 row limit is skipped and reported, the rest of the ba
     e
   );
   assert.equal(response.status, 200);
-  assert.deepEqual((await jsonOf<{ tooLarge: Record<string, string[]> }>(response)).tooLarge, { chats: ["big"] });
+  assert.deepEqual((await jsonOf<{ tooLarge: Record<string, string[]> }>(response)).tooLarge, {});
   const { pages } = await pullAll(e, cookie);
   assert.deepEqual(pages[0].notes.map((row) => row.key), ["n1"]);
-  assert.equal(pages[0].chats.length, 0);
+  assert.deepEqual(pages[0].chats[0].data, JSON.parse(huge));
+  assert.ok(store.rows.get("chats")!.get("big")!.data.length < 200);
+  assert.equal(bucket.objects.size, 1);
 });
 
 test("pull returns rows at or after the watermark so a device never loses the other's data", async () => {
@@ -362,6 +384,146 @@ test("content download 404s for a book the cloud never received", async () => {
     e
   );
   assert.equal(response.status, 404);
+});
+
+test("protocol 5 uploads immutable blobs, confirms references, and supports old and new pulls", async () => {
+  const { e, store, bucket } = env();
+  const cookie = await loginCookie(e);
+  for (const [key, size] of [["seven", 7_390_299], ["two", 2_355_294]] as const) {
+    const unit = "中文🌿\"\\\n";
+    const base = JSON.stringify({ blob: "" });
+    const unitBytes = utf8Bytes(JSON.stringify(unit)) - 2;
+    const body = JSON.stringify({ blob: unit.repeat(Math.floor((size - utf8Bytes(base)) / unitBytes)) });
+    const hash = await recordHash(body);
+    const path = `record/chats/${key}/${hash}`;
+    const upload = await handleSync(syncRequest(path, null, { cookie }, { method: "POST", body }), e);
+    assert.equal(upload.status, 200);
+    const blob = { hash, bytes: utf8Bytes(body) };
+    const push = await handleSync(syncRequest("push", { chats: [{ key, data: "", blob, updatedAt: 10 }] }, { cookie }), e);
+    const result = await jsonOf<{ recordReceipts: Array<{ status: string }>; issues: unknown[] }>(push);
+    assert.equal(result.recordReceipts[0].status, "accepted");
+    assert.equal(result.issues.length, 0);
+    assert.deepEqual(storedBlob(store.rows.get("chats")!.get(key)!.data), blob);
+    const head = await handleSync(syncRequest(path, null, { cookie }, { method: "HEAD" }), e);
+    assert.equal(head.status, 200);
+    assert.equal(Number(head.headers.get("x-record-bytes")), blob.bytes);
+    const newerPages = await pullAll(e, cookie, 0, true);
+    const newer = { chats: newerPages.pages.flatMap((page) => page.chats) };
+    if (key === "two") assert.ok(newerPages.pages.length >= 2, "reference pages must budget decoded bytes");
+    assert.deepEqual(newer.chats.find((item) => item.key === key)?.blob, blob);
+    assert.equal(newer.chats.find((item) => item.key === key)?.data, undefined);
+    const downloaded = await handleSync(syncRequest(path, null, { cookie }), e);
+    assert.equal(await downloaded.text(), body);
+    const legacy = await pullAll(e, cookie);
+    assert.deepEqual(legacy.pages.flatMap((page) => page.chats).find((item) => item.key === key)?.data, JSON.parse(body));
+  }
+  assert.equal(bucket.objects.size, 2);
+});
+
+test("a missing R2 body is never committed and reports a retryable reason", async () => {
+  const { e, store } = env();
+  const cookie = await loginCookie(e);
+  const body = JSON.stringify({ blob: "x".repeat(INLINE_RECORD_BYTES + 1) });
+  const blob = { hash: await recordHash(body), bytes: utf8Bytes(body) };
+  const response = await jsonOf<{ issues: Array<{ code: string; retryable: boolean }>; recordReceipts: unknown[] }>(
+    await handleSync(syncRequest("push", { chats: [{ key: "missing", data: "", blob, updatedAt: 1 }] }, { cookie }), e));
+  assert.equal(response.issues[0].code, "storage_unavailable");
+  assert.equal(response.issues[0].retryable, true);
+  assert.equal(response.recordReceipts.length, 0);
+  assert.equal(store.rows.get("chats")?.has("missing") ?? false, false);
+});
+
+test("an R2 outage affects one large record while other records are still confirmed", async () => {
+  const { e, store, bucket } = env();
+  const cookie = await loginCookie(e);
+  bucket.put = async () => { throw new Error("isolated outage"); };
+  const response = await jsonOf<{ issues: Array<{ kind: string; bytes: number; retryable: boolean }>; recordReceipts: Array<{ key: string }> }>(
+    await handleSync(syncRequest("push", {
+      chats: [{ key: "big", data: JSON.stringify({ blob: "中".repeat(100_000) }), updatedAt: 1 }],
+      notes: [{ key: "ok", bookId: "b1", data: "{}", updatedAt: 1 }],
+    }, { cookie }), e));
+  assert.equal(response.issues[0].kind, "chats");
+  assert.ok(response.issues[0].bytes > INLINE_RECORD_BYTES);
+  assert.equal(response.issues[0].retryable, true);
+  assert.equal(response.recordReceipts[0].key, "ok");
+  assert.equal(store.rows.get("chats")?.size ?? 0, 0);
+});
+
+test("a lost D1 confirmation reuses the persisted R2 body and repeated writes are idempotent", async () => {
+  const { e, store, bucket } = env();
+  const cookie = await loginCookie(e);
+  const apply = store.applyPush.bind(store);
+  let puts = 0;
+  const put = bucket.put.bind(bucket);
+  bucket.put = async (...args) => { puts++; return put(...args); };
+  store.applyPush = async () => { throw new Error("isolated transaction failure"); };
+  const payload = { chats: [{ key: "b1", data: JSON.stringify({ blob: "x".repeat(400_000) }), updatedAt: 2 }] };
+  assert.equal((await handleSync(syncRequest("push", payload, { cookie }), e)).status, 502);
+  assert.equal(bucket.objects.size, 1);
+  assert.equal(store.rows.get("chats")?.size ?? 0, 0);
+  store.applyPush = apply;
+  await handleSync(syncRequest("push", payload, { cookie }), e);
+  const rev = store.rows.get("chats")!.get("b1")!.serverAt;
+  await handleSync(syncRequest("push", payload, { cookie }), e);
+  assert.equal(puts, 1);
+  assert.equal(store.rows.get("chats")!.get("b1")!.serverAt, rev);
+});
+
+test("a late old blob cannot overwrite a newer snapshot and receives a stale receipt", async () => {
+  const { e, store } = env();
+  const cookie = await loginCookie(e);
+  const send = (updatedAt: number, character: string) => handleSync(syncRequest("push", {
+    chats: [{ key: "b1", data: JSON.stringify({ blob: character.repeat(300_000) }), updatedAt }],
+  }, { cookie }), e);
+  await send(20, "n");
+  const latest = store.rows.get("chats")!.get("b1")!.data;
+  const response = await jsonOf<{ recordReceipts: Array<{ status: string; updatedAt: number }> }>(await send(10, "o"));
+  assert.equal(response.recordReceipts[0].status, "stale");
+  assert.equal(response.recordReceipts[0].updatedAt, 10);
+  assert.equal(store.rows.get("chats")!.get("b1")!.data, latest);
+});
+
+test("legacy pull cannot advance past an unavailable blob; the same cursor works after recovery", async () => {
+  const { e, bucket } = env();
+  const cookie = await loginCookie(e);
+  const body = JSON.stringify({ blob: "x".repeat(300_000) });
+  await handleSync(syncRequest("push", { chats: [{ key: "b1", data: body, updatedAt: 1 }] }, { cookie }), e);
+  const key = recordObjectKey("chats", "b1", await recordHash(body));
+  const object = bucket.objects.get(key)!;
+  bucket.objects.delete(key);
+  const response = await handleSync(syncRequest("pull", { since: 0 }, { cookie }), e);
+  assert.equal(response.status, 503);
+  assert.equal((await jsonOf<{ cursor?: number }>(response)).cursor, undefined);
+  bucket.objects.set(key, object);
+  assert.deepEqual((await pullAll(e, cookie)).pages[0].chats[0].data, JSON.parse(body));
+});
+
+test("record objects require authentication and reject mismatched hashes and invalid JSON", async () => {
+  const { e, bucket } = env();
+  const cookie = await loginCookie(e);
+  const hash = await recordHash("{}");
+  const path = `record/chats/b1/${hash}`;
+  assert.equal((await handleSync(syncRequest(path, null), e)).status, 401);
+  assert.equal((await handleSync(syncRequest(path, null, { cookie }, { method: "POST", body: "{bad" }), e)).status, 400);
+  assert.equal((await handleSync(syncRequest(path, null, { cookie }, { method: "POST", body: "{\"changed\":true}" }), e)).status, 400);
+  assert.equal(bucket.objects.size, 0);
+  const response = await jsonOf<{ issues: Array<{ retryable: boolean; reason: string }> }>(
+    await handleSync(syncRequest("push", { chats: [{ key: "b1", data: "@moting-sync-r2-v1:{}", updatedAt: 1 }] }, { cookie }), e));
+  assert.equal(response.issues[0].retryable, false);
+  assert.match(response.issues[0].reason, /JSON/);
+});
+
+test("batch limits count encoded Chinese, emoji, and JSON escapes including the protocol envelope", () => {
+  const chats = Array.from({ length: 12 }, (_, i) => ({ key: `c${i}`, updatedAt: i + 1,
+    data: JSON.stringify({ text: "中文🌿\"\\\n".repeat(100) }) }));
+  const limit = 5000;
+  const batches = splitPayload({ chats }, 400, limit);
+  assert.ok(batches.length > 1);
+  for (const batch of batches) assert.ok(utf8Bytes(JSON.stringify({ ...batch, protocol: 5 })) <= limit);
+  assert.deepEqual(batches.flatMap((batch) => batch.chats!), chats);
+  assert.equal(retryDelay(1), 30_000);
+  assert.equal(retryDelay(2), 60_000);
+  assert.equal(retryDelay(100), 900_000);
 });
 
 test("pull fixes one server_at snapshot before scanning tables", async () => {
@@ -578,4 +740,15 @@ test("legacy conversations preserve question and answer adjacency", () => {
   const merged = mergeChatTurns(left, right);
   assert.deepEqual(merged.map(t => t.content), ["旧问题", "旧回答", "A", "答A", "B", "答B"]);
   assert.deepEqual(mergeChatTurns(right, left), merged);
+});
+
+
+test("HLS preparation and media require a sync session and reject cross-origin requests", async () => {
+  const { e } = env();
+  for (const [path, body] of [["audio-stream/session", { text: "测试", seconds: 600 }], ["audio-stream/missing.mp3", null], ["hls/prepare", { text: "测试" }], ["hls/finish", { ids: [] }], ["hls/audio/missing.mp3", null]] as const) {
+    assert.equal((await handleSync(syncRequest(path, body), e)).status, 401);
+  }
+  const cookie = await loginCookie(e);
+  assert.equal((await handleSync(syncRequest("hls/prepare", { text: "测试" }, { cookie, origin: "https://other.example" }), e)).status, 403);
+  assert.equal((await handleSync(syncRequest("hls/prepare", { text: "" }, { cookie }), e)).status, 400);
 });

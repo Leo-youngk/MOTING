@@ -13,8 +13,7 @@ const ORIGIN = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
  * 这么久一条消息都没有就是连接死了，早点断开交给上层重试，比干等总超时强。
  */
 const SYNTHESIS_IDLE_TIMEOUT_MS = 10000;
-/** 单片总时长兜底。360 字一片实测 9–11 秒，留足余量。 */
-const SYNTHESIS_TIMEOUT_MS = 45000;
+const SYNTHESIS_TIMEOUT_MS = 30000;
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
 
 const EDGE_UPDATES_URL = "https://edgeupdates.microsoft.com/api/products";
@@ -180,12 +179,14 @@ async function synthesizeOnce(
   text: string,
   voice: string,
   version: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onAudio?: (audio: Uint8Array) => void | Promise<void>
 ): Promise<SynthesisResult> {
   const connectionId = crypto.randomUUID().replace(/-/g, "");
+  // 微软已迁移 Edge 朗读接口；旧 Bing 地址即使 token 正确也会返回 403。
   const url =
-    "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1" +
-    `?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}` +
+    "https://api.msedgeservices.com/tts/cognitiveservices/websocket/v1" +
+    `?Ocp-Apim-Subscription-Key=${TRUSTED_CLIENT_TOKEN}` +
     `&Sec-MS-GEC=${await securityToken()}` +
     `&Sec-MS-GEC-Version=1-${version}` +
     `&ConnectionId=${connectionId}`;
@@ -193,6 +194,7 @@ async function synthesizeOnce(
   const response = await fetch(url, {
     headers: {
       Upgrade: "websocket",
+      "Sec-WebSocket-Version": "13",
       Origin: ORIGIN,
       "User-Agent": userAgentFor(version),
       "Accept-Language": "en-US,en;q=0.9",
@@ -207,7 +209,8 @@ async function synthesizeOnce(
   if (!socket) throw new HandshakeError(response.status);
   socket.accept();
 
-  const audioFrames: (Blob | ArrayBuffer)[] = [];
+  const chunks: Uint8Array[] = [];
+  let pending = Promise.resolve();
   const boundaries: WordBoundary[] = [];
   let audioBytes = 0;
   let onAbort: (() => void) | null = null;
@@ -254,7 +257,20 @@ async function synthesizeOnce(
           }
           return;
         }
-        audioFrames.push(event.data as Blob | ArrayBuffer);
+        const frame = event.data as Blob | ArrayBuffer;
+        // Serialize asynchronous Blob conversion so websocket frame order is preserved.
+        pending = pending.then(async () => {
+          const buffer = frame instanceof ArrayBuffer ? frame : await frame.arrayBuffer();
+          const view = new Uint8Array(buffer);
+          const headerLength = view.length >= 2 ? (view[0] << 8) | view[1] : -1;
+          if (headerLength < 0 || 2 + headerLength > view.length) {
+            throw new SynthesisTransportError("朗读服务返回了无效音频帧");
+          }
+          const audio = view.subarray(2 + headerLength);
+          if (audio.length) { chunks.push(audio); await onAudio?.(audio); }
+        });
+        // Attach immediately to avoid an unhandled rejection before turn.end.
+        pending.catch(error => fail(error instanceof Error ? error : new Error(String(error))));
         return;
       }
 
@@ -295,14 +311,13 @@ async function synthesizeOnce(
       fail(new SynthesisTransportError("朗读服务连接中断"));
     });
 
-    // 只认 turn.end。以前收到过几帧音频就把提前关闭当成功，残缺的音频会被当成整段
-    // 缓存一年，以后每次读到这里都会少掉后半截。
     socket.addEventListener("close", (event: CloseEvent) => {
       fail(new SynthesisTransportError(`朗读服务提前关闭：${event.code}`));
     });
 
     onAbort = () => fail(new DOMException("朗读请求已取消", "AbortError"));
     signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
   });
 
   try {
@@ -311,7 +326,7 @@ async function synthesizeOnce(
         "Content-Type:application/json; charset=utf-8\r\n" +
         "Path:speech.config\r\n\r\n" +
         '{"context":{"synthesis":{"audio":{"metadataoptions":' +
-        '{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},' +
+        '{"sentenceBoundaryEnabled":false,"wordBoundaryEnabled":true},' +
         '"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}'
     );
 
@@ -326,6 +341,7 @@ async function synthesizeOnce(
         `${escapeXml(text)}</prosody></voice></speak>`
     );
     await finished;
+    await pending;
   } finally {
     if (onAbort) signal.removeEventListener("abort", onAbort);
     try {
@@ -333,20 +349,6 @@ async function synthesizeOnce(
     } catch {
       // 服务端可能已经关闭，忽略。
     }
-  }
-
-  // Workers 的二进制帧是 Blob，拿不到同步字节，只能收完再逐帧转换。
-  // 每帧前 2 字节是大端头部长度，其后是头部文本，剩下才是音频。
-  const chunks: Uint8Array[] = [];
-  for (const frame of audioFrames) {
-    const buffer =
-      frame instanceof ArrayBuffer ? frame : await (frame as Blob).arrayBuffer();
-    const view = new Uint8Array(buffer);
-    const headerLength = view.length >= 2 ? (view[0] << 8) | view[1] : -1;
-    if (headerLength < 0 || 2 + headerLength > view.length) {
-      throw new SynthesisTransportError("朗读服务返回了无效音频帧");
-    }
-    chunks.push(view.subarray(2 + headerLength));
   }
 
   const audio = new Uint8Array(
@@ -365,15 +367,16 @@ async function synthesizeOnce(
 export async function synthesizeSpeech(
   text: string,
   voice: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onAudio?: (audio: Uint8Array) => void | Promise<void>
 ): Promise<SynthesisResult> {
   const version = await edgeVersion(false, signal);
   try {
-    return await synthesizeOnce(text, voice, version, signal);
+    return await synthesizeOnce(text, voice, version, signal, onAudio);
   } catch (error) {
     if (!(error instanceof HandshakeError)) throw error;
     const fresh = await edgeVersion(true, signal);
     if (fresh === version) throw error;
-    return synthesizeOnce(text, voice, fresh, signal);
+    return synthesizeOnce(text, voice, fresh, signal, onAudio);
   }
 }

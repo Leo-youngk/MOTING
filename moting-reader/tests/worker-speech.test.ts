@@ -49,7 +49,7 @@ function harness(script: Array<Error | "empty" | "ok"> = []) {
 
 test("单片临时失败会换条连接重试，用户听不出来", async () => {
   const run = harness([new SynthesisTransportError("朗读服务提前关闭：1006")]);
-  const result = await synthesizeBatch("那年冬天，雪下得特别早。", "zh-CN-YunjianNeural", new AbortController().signal, run.deps);
+  const result = await synthesizeBatch("那年冬天，雪下得特别早。", "zh-CN-YunjianNeural", new AbortController().signal, { ...run.deps, structured: true });
 
   assert.equal(run.calls.length, 2);
   assert.deepEqual(run.waits, [500]);
@@ -70,7 +70,7 @@ test("握手一直被拒就报服务不可用（503），客户端据此暂时�
 
 test("全是符号的片不送去合成", async () => {
   const run = harness();
-  await synthesizeBatch("上一段。\n\n＊　＊　＊\n\n下一段。", "zh-CN-YunjianNeural", new AbortController().signal, run.deps);
+  await synthesizeBatch("上一段。\n\n＊　＊　＊\n\n下一段。", "zh-CN-YunjianNeural", new AbortController().signal, { ...run.deps, structured: true });
   assert.deepEqual(run.calls, ["上一段。", "下一段。"]);
 });
 
@@ -93,7 +93,7 @@ test("有字却没回音频的片再试一次，还是没有就跳过这片", as
     "第一段。\n\n第二段。",
     "zh-CN-YunjianNeural",
     new AbortController().signal,
-    run.deps
+    { ...run.deps, structured: true }
   );
   assert.deepEqual(run.calls.sort(), ["第一段。", "第一段。", "第二段。"]);
   assert.deepEqual(result.timeline.map((entry) => entry.charIndex), [6]);
@@ -117,4 +117,10 @@ test("控制字符在送去合成之前换成空格", async () => {
   const run = harness();
   await synthesizeBatch("第一行\u000b第二行。", "zh-CN-YunjianNeural", new AbortController().signal, run.deps);
   assert.deepEqual(run.calls, ["第一行 第二行。"]);
+});
+
+test("老客户端的文本（每句后面一个换行）照旧切片，不当成结构化文本", async () => {
+  const run = harness();
+  await synthesizeBatch("第一句。\n第二句。\n", "zh-CN-YunjianNeural", new AbortController().signal, run.deps);
+  assert.deepEqual(run.calls, ["第一句。\n第二句。\n"]);
 });

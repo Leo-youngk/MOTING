@@ -53,11 +53,17 @@ npm run deploy:dry-run
 
 ## 内容模型
 
-文本按 `Book → Chapter → Paragraph → Sentence` 逐层拆分。朗读时不直接按句子送 TTS，而是把相邻句子合并成 `SpeechBlock`，块内用 `SpeechSpan` 记录每句在合并文本里的 `start`/`end` 偏移和所属章 `chapterIndex`，用来把朗读进度映射回具体句子做高亮。云端分段在 `lib/speech-segments.ts`（可以跨章），系统朗读的小块是 `buildSpeechBlocks()`（一段一块，上限 240 字，不跨章）。
+文本按 `Book → Chapter → Paragraph → Sentence` 逐层拆分。朗读时不直接按句子送 TTS，而是通过 `buildSpeechBlocks()` 把相邻句子合并成 `SpeechBlock`（单块上限 240 字），每块内用 `SpeechSpan` 记录每个句子在合并文本中的 `start`/`end` 偏移，用来把 TTS 的朗读进度映射回具体句子做高亮。
+
+从章节中间开始播放时用 `sliceSpeechBlock()` 裁掉前面的部分，并重算偏移量。
 
 本地库（IndexedDB）里书目和正文分开存：`books` 表只有书目（含从正文算出的目录 `chapterOutline`），正文在 `contents` 表。书库、主页、同步只碰书目；进阅读器、播放器、单书笔记之前才读那一本的正文（`MotingApp` 的 `loadContent`）。
 
 连续阅读（上下滑动）只挂视口附近几章。**滑动中（手在屏上或惯性里）不许改视口上方的 DOM**：iOS Safari 没有 scroll anchoring，惯性期间脚本发的 `scrollBy` 会被丢掉或掐断惯性，补偿一丢正文就整章地跳。所以滑动中只往下接章；往上接章、摘章、把段落从估算占位换成真实排版（`data-primed`）都在停稳 200ms 后由 `planChapterWindow()` 一步步做，每步在同一个任务里改完并补偿。跳转（目录、回到朗读处）当场把目标章和上一章整章排好再滚过去。改这块要跑 `tests/reader-scroll-browser.py`，它模拟了上面两个 iOS 特性。
+
+正文默认不跟着朗读动（用户定的）。设置里「听读同步」开关（`ReaderSettings.followSpeech`，默认关）打开后才跟：朗读句走出「锚点线到屏幕四分之三」就平滑翻到锚点线上（`lib/follow-speech.ts`），分页模式翻到那一页；手指在正文上一滑就停跟，点右下角小圆点接上；「从这里听」留在正文里，底栏多暂停键；听书进度同时记成阅读进度，开始听从听读两者较新的那处起。
+
+划词浮条五个动作（划线 / 想法 / 复制 / 从这里听 / 问 AI）一排摆齐、图标在字上面，约 278px 宽，375px 屏也放得下；默认摆在选区下方（用户定的），下方放不下才翻到上方；不要再收回「更多」二级。改它跑 `tests/reader-selection-browser.py`。
 
 书名、章名只在显示时处理（`lib/display-title.ts`）：列表和播放条用去掉营销括注的短书名，书籍资料页用全名；章名是「未知 / Unknown」这类占位词的章算上一章的续页，目录里不单列、阅读页不另起章首。
 
@@ -75,15 +81,17 @@ npm run deploy:dry-run
 
 ## 听书
 
-- 合成走 Worker 转发微软 Edge 朗读（`worker/edge-tts.ts`、`worker/speech.ts`），只认 `turn.end` 才算合成完；单片失败换条连接再试（最多 3 次），读不出来的文本回 422，服务问题回 503。一律按 1× 合成，倍速交给 `playbackRate`。
-- 云端分段分三档（`lib/speech-segments.ts`）：点下去先合成 360 字，开播就预取 1500 字，之后按全书固定的约 4000 字网格走、可以跨章。网格让长批次的文本跟起播位置无关，缓存和离线下载才能复用；一格读十几分钟，后台很少需要换音源（iOS 主屏应用后台换源并不总能成功，WebKit bug 261858）。
-- 段落、标题、换章用 1/2/3 个换行带给 Worker。Edge 不收自定义 SSML，停顿只能在拼接时做：`lib/speech-batch.ts` 按帧裁掉每片结尾约 0.9 秒的自带静音、需要时补数字静音帧，句末约 0.66 秒、换段 0.8、标题前后 1.1、换章 1.8。改了停顿规则要把 Worker 的 `TTS_CACHE_VERSION` 和 `lib/speech-persist.ts` 的缓存名一起加一。
-- 播放器（`hooks/use-speech-player.ts`）从头到尾只用一个 `<audio>`：换源只换 `src`，等网络时放静音占位，缓存命中必须同步起播（中间一 await，后台的 `play()` 就会被 iOS 拦掉）。系统打断不会通知页面，靠监听元素的 `pause` 事件同步状态，锁屏的播放键才按得动。
-- 云端连不上先等 1.5 秒重试，再失败才用系统声音顶上并提示，冷却 30 秒起（连着失败翻倍，最多 5 分钟），冷却期间顺手试一下云端，通了下一块就换回来。
-- 合成结果按（文本, 音色）先进内存（40MB LRU）再落本机 Cache Storage（`moting-tts-v2`，200MB LRU），重开应用、离线缓存都靠它；SW 只清 `moting-shell-*`，不会动它。
-- 前进/后退 15 秒按屏幕时钟（已除倍速）在真实时间轴上跳，跳出当前音频才按字数估算。定时关闭到点是暂停不是停止，「本章结束后」按目录项算（续页算在内），停在换章前的静音里。
-- 读音纠正（`settings.speechReplacements`）只改送去合成的文字，长规则优先、纯字面替换。
-- 改这块要跑 `tests/listen-browser.py`（拦 `/api/tts` 回构造的 MP3，假的 `speechSynthesis`，可拨快的时钟）。
+- 听书走 `/api/tts` 分段（`use-speech-player.ts` 的 `playAt`），一个 `<audio>` 从头用到尾，换段只换 `src`。**原生 HLS 连续音频的接手默认关着**：线上遥测（D1 `audio_telemetry`）显示 2026-10-02 起 iPhone 上 7 次接手全部停在 `readyState=1`、一次都没出过声，每次白卡 8 秒再退回分段，用户听到的就是「听一会儿停一下、转圈加载」。代码和 Worker 那边（`/api/sync/live/*`、Queue `moting-audio`、R2 `live-hls-v1/`，每 120 字一个 packed MP3、片间 `EXT-X-DISCONTINUITY`）都留着，排查时在那台设备上 `localStorage.setItem("moting:live-hls", "1")` 再重开应用才会建会话、备好 75 秒后接手；接手 8 秒没出声、卡住 12 秒、媒体出错都退回分段。PR #20 自写的 MPEG-TS 封装已经撤回（`docs/LISTENING_REGRESSION_2026-10-08.md`），那批会话 `state.format === 2`，接口回 410。要重新默认打开，先拿真机遥测证明接手真的能出声，Chromium 里用 MP3 替身跑通的测试不算。
+- 合成走 Worker 转发微软 Edge 朗读（`worker/edge-tts.ts`）：使用 `api.msedgeservices.com/tts/cognitiveservices/websocket/v1` 和 `Ocp-Apim-Subscription-Key` 查询参数，显式带 `Sec-WebSocket-Version: 13`；旧 Bing 朗读地址已出现持续 403。只认 `turn.end` 才算合成完；单片失败换条连接再试（`worker/speech.ts`，最多 3 次），`/api/tts` 读不出来的文本回 422、服务问题回 503。一律按 1× 合成，倍速交给 `playbackRate`。
+- 送去合成的文字带结构（`lib/speech-text.ts`）：段落、标题、换章用 1/2/3 个换行。Edge 不收自定义 SSML，停顿只能在拼接时做（`lib/speech-batch.ts` 的 `fitChunkAudio`）：按帧裁掉每片结尾多余的自带静音、需要时补静音帧，句末约 0.66 秒、换段 0.8、标题前后 1.1、换章 1.8。会话和 `/api/tts` 请求都带 `format: 2`（会话里存成 `session.json` 的 `textFormat`，跟上面那个撤回标记 `state.format` 无关）；不带的是还没更新的老客户端，照旧切片、原样拼接。改了停顿规则要换 `/api/tts` 的缓存键（`worker/index.ts` 的 `cacheKeyFor`）。
+- 老路径分段三档（`lib/speech-segments.ts`）：起播 360 字、开播就预取 1500 字，之后 4800 字一批，可以跨章。
+- 系统打断（来电、Siri、拔耳机）只暂停元素、不通知页面：两条路都监听元素的 `pause` 事件同步成暂停，**不自动续播**（拔了耳机不该外放），锁屏的播放键才按得动。
+- 听书只用所选云端音色（当前为云健），播放器不调用系统朗读 API。云端网络错误、空音频和无效 MP3 自动以同一音色再试两次（间隔 1.5 / 3 秒）；持续失败暂停在原位置，点播放重新请求云端。恢复必须确认加载的是有效云端 MP3，不能恢复静音占位；解码失败清除对应内存缓存。
+- 首页自动播放先在点击事件里调用 `preparePlayback()` 激活同一个音频元素，再异步读取正文。缓冲只在真实音频 `playing` 后结束；8 秒内媒体时钟未启动就保留位置并显示重试提示。旧 `play()` 的延迟拒绝不影响后一次恢复。音频正文也按每次读取检查取消、断流超时和 20MB 上限。
+- 前进/后退 15 秒按真实时间轴跳（屏幕时间，已除倍速），落在那一刻正在读的那句开头；跳出已加载的音频才按字数估算（`sentenceAfterSeconds`）。锁屏进度条跟播放页一样按目录项一章一章算，能拖。
+- 定时关闭到点是暂停不是停止；「本章结束后」按目录项算（续页算在内），在换章前的静音里停、位置挪到下一章开头，连续音频不用为它换源。
+- 读音纠正（`settings.speechReplacements`）只改送去合成的文字，长规则优先、纯字面替换；规则进分段和会话的缓存键。
+- 改这块要跑 `tests/speech-chapter-browser.mjs`（真实《豆棚閒話》文本 + Chromium 真解码 MP3；HLS 控制流程用 MP3 替身，不等于 iPhone 实测），命令写在文件头。
 
 ## AI 对话
 
@@ -91,3 +99,13 @@ npm run deploy:dry-run
 - 回答的 Markdown 按块渲染（`lib/markdown-blocks.ts`，只在切开和不切渲染结果一样的地方切），流式时只重新解析最后一块，最后一块先过 `remend` 补齐没写完的加粗、链接；`lib/markdown-plugins.ts` 里的 `remark-cjk-friendly` 让紧挨中文标点的 `**` 也能加粗。
 - 发给模型的历史走 `modelHistory`（`lib/ai.ts`）：去掉空回答、合并连着的提问、只带最近 30 条 / 6 万字。Worker 转发的条数字数上限是同一个 `AI_REQUEST_LIMITS`，改一处两边都生效。流里夹的错误、一个字都没给的回答都当失败，显示在那一问下面并给「重试」，不写进对话记录。
 - 上游忙（503、429、5xx）时 Worker 自动重试并换备用模型（`worker/ai-upstream.ts`）：主模型 2 次 → 备用模型 2 次 → 主模型最后 1 次，间隔带抖动，总共最多等 30 秒；只在回答开始流出之前重试。备用模型是设置「AI 助手」里的 `aiFallbackModel`，从接口返回的模型列表里选，不在代码里写死；用到它的那条回答下面注明（响应头 `x-ai-model`）。每次重试、换模型、最终失败都写进 Workers 日志。上游的报错（Gemini 兼容接口外面包一层数组）由 Worker 解开并翻成中文。
+
+## 英文模式
+
+- 阅读页「主题与设置」里行距下面的「英文模式」开关（`ReaderSettings.englishMode`），**默认关，关着时阅读器跟没有这个功能时完全一样**。打开后：
+  - 英文段落里单击一个词，词上方浮出释义卡（`components/word-gloss.tsx`）。只认英文段落（`isEnglishText`），中文段落、空白、行尾的单击照旧切沉浸；点已有划线、长按、分页模式左右两成翻页区的行为都不变；卡开着时点空白只收卡。
+  - 划英文句子「问 AI」时，建议提问换成「翻译成中文 / 拆解句子结构 / 这段在说什么」；当前章节是英文时系统提示里加一句「用中文讲解、拆句先找主干」。
+- 词典是本地的，不走 AI：`scripts/build-dictionary.mjs` 从 ECDICT（MIT）裁出常用词，按首字母拆成 `public/dict/<版本>/a.json … z.json`，查词逻辑和变形还原在 `lib/dictionary.ts`。规则还原不对的变形由生成脚本核对后写进 `forms`，所以**改了 `stemCandidates` 要重新生成数据**。数据有变化要把 `DICTIONARY_PATH` 的版本号加一：service worker 对静态文件缓存优先，同一路径永远读旧的。
+- 英文句子之间的空格：`splitIntoSentences` 切开英文句子时把原文里的空格留在前一句末尾（句子是挨着排的，丢了就成了「Hi!How」）；拼朗读文本时英文句子之间补空格（`speechSeparator`）。只认英文交界，中文照旧。排版上的修正只对新导入的书生效（已导入的英文书重新导入才改过来），朗读拼接对已导入的书也生效。
+- 英文朗读音色还没加：按「新音色先给用户试听」的规矩，等用户选定。
+- 改这块跑 `tests/dictionary.test.ts`、`tests/content.test.ts` 和 `tests/word-gloss-browser.py`。

@@ -218,14 +218,17 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, onToast, initia
   }
 
   async function logout() {
+    const controller = new AbortController();
+    authController.current = controller;
     setAuthBusy(true);
     setError("");
     try {
-      await logoutZlibrary();
+      await logoutZlibrary(controller.signal);
+      if (controller.signal.aborted) return;
       setConnected(false);
       setShowAccount(false);
       toastRef.current("已退出 Z-Library");
-    } catch (error) { showError(error); }
+    } catch (error) { if (!controller.signal.aborted) showError(error); }
     finally { setAuthBusy(false); }
   }
 
@@ -240,7 +243,7 @@ export function OnlineLibrary({ books, onImport, onOpen, onBack, onToast, initia
       if (controller.signal.aborted) return;
       setSaving(true);
       await onImport(file, `zlibrary:${bookKey(book)}`, setProgress);
-      toastRef.current(`《${book.title}》已加入书库`);
+      if (!controller.signal.aborted) toastRef.current(`《${book.title}》已加入书库`);
     } catch (error) {
       if (!controller.signal.aborted) showError(error, true);
     } finally {
