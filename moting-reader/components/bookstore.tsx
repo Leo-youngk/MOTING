@@ -1,18 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { ArrowRight, BookOpen, ChevronLeft, ChevronRight, Search, Trophy, X } from "lucide-react";
+import { ArrowRight, BookOpen, ChevronLeft, ChevronRight, RefreshCw, Search, Trophy, X } from "lucide-react";
 import {
   fetchWereadBook,
-  fetchWereadRecommend,
-  fetchWereadSimilar,
   searchWeread,
   wereadCoverDisplayUrl,
   wereadCoverUrl,
 } from "../lib/weread";
 import { displayTitle } from "../lib/display-title";
-import { loadCatalog, peekCatalog, rankOf, type StoreCatalog } from "../lib/store-catalog";
-import { readFeed } from "../lib/store-snapshot";
+import {
+  loadCatalog, peekCatalog, rankOf, preferredRanking, rememberRanking,
+  RANKING_KINDS, RANKING_LABELS, RANKING_NOTES, type RankingKind, type StoreCatalog,
+} from "../lib/store-catalog";
+import { isDiscoveryHidden, recordBookOpen, setDiscoveryHidden } from "../lib/store-snapshot";
+import { discoveryDay, discoveryHash, discoveryKey, isOwnedBook } from "../lib/store-discovery";
+import { useStoreDiscovery } from "../hooks/use-store-discovery";
+import { useBookExposure } from "../hooks/use-book-exposure";
 import {
   formatRatingCount,
   formatReadingCount,
@@ -25,7 +29,7 @@ import {
   type WereadBookDetail,
   type WereadLane,
 } from "../lib/weread-types";
-import type { BookMeta } from "../lib/types";
+import type { BookMeta, ReadingSession } from "../lib/types";
 import "./bookstore.css";
 
 /** 横滑轨道里先露几本，其余收进「全部」里，免得一条流拖出几十张图。 */
@@ -132,11 +136,15 @@ export function StoreCard({
   priority?: boolean;
   onOpen: (book: WereadBook) => void;
 }) {
+  const exposureRef = useBookExposure(book);
   return (
     <button
+      ref={exposureRef}
       type="button"
       className={`store-card${dense ? " store-card--dense" : ""}`}
-      onClick={() => onOpen(book)}
+      data-book-id={book.bookId}
+      data-discovery-key={discoveryKey(book)}
+      onClick={() => { recordBookOpen(book); onOpen(book); }}
     >
       <span className="store-card__art">
         <Cover book={book} size="card" priority={priority} />
@@ -194,8 +202,10 @@ export function StoreRow({
   priority?: boolean;
   onOpen: (book: WereadBook) => void;
 }) {
+  const exposureRef = useBookExposure(book);
   return (
-    <button type="button" className="store-row" onClick={() => onOpen(book)}>
+    <button ref={exposureRef} type="button" className="store-row" data-book-id={book.bookId}
+      data-discovery-key={discoveryKey(book)} onClick={() => { recordBookOpen(book); onOpen(book); }}>
       {rank ? (
         <span className={`store-rank${rank <= 3 ? " store-rank--top" : ""}`}>
           {String(rank).padStart(2, "0")}
@@ -259,6 +269,7 @@ export function RankSkeleton() {
 
 export function Bookstore({
   books,
+  sessions,
   onBack,
   onFindBook,
   initialBookId = "",
@@ -266,6 +277,7 @@ export function Bookstore({
 }: {
   /** 本地书库。最近读的那本会被当成「相似推荐」的种子。 */
   books: BookMeta[];
+  sessions: ReadingSession[];
   onBack: () => void;
   onFindBook: (title: string, author: string) => void;
   /** 从主页的书城条点进来时带的书，直接落在这本书的详情上。 */
@@ -273,24 +285,18 @@ export function Bookstore({
   /** 从主页搜索框进来时带的词，一进来就搜。 */
   initialQuery?: string;
 }) {
-  // 「为你推荐」跟主页用的是同一份：主页已经取到过的话，进书城直接画，不再出骨架。
-  const [initialFeed] = useState(() => readFeed());
-  const [lanes, setLanes] = useState<WereadLane[]>(() =>
-    initialFeed
-      ? [{ kind: "recommend", title: "为你推荐", subtitle: "微信读书按你的阅读记录挑的", books: initialFeed.books }]
-      : []
-  );
-  const [loading, setLoading] = useState(!initialFeed);
+  const discovery = useStoreDiscovery(books, sessions);
+  const loading = discovery.loading;
+  const lanes: WereadLane[] = discovery.feed?.books.length ? [{
+    kind: "recommend", title: "为你推荐", subtitle: "结合阅读兴趣，优先发现没看过的书", books: discovery.feed.books,
+  }] : [];
   const [error, setError] = useState("");
-  /**
-   * 推荐流单独的错误。
-   * 不能跟搜索共用那个顶部的红条——推荐要个性化所以得实时查接口，
-   * 它挂了不代表榜单和分类也挂了（那两个读的是本地书目文件）。
-   * 一条流的失败不该盖住一整页还能用的东西。
-   */
-  const [laneError, setLaneError] = useState("");
+  const laneError = discovery.error;
 
   const [category, setCategory] = useState<string>(() => preferredCategory());
+  const [rankingKind, setRankingKind] = useState<RankingKind>(preferredRanking);
+  const [rankTurn, setRankTurn] = useState(0);
+  const [, setFeedbackRevision] = useState(0);
   /**
    * 分类下的两种看法，缺一不可：
    * rank 是挑出来的好书（按推荐值，卡评分人数），browse 是这个分类里能一直往下翻的全部书。
@@ -318,72 +324,6 @@ export function Bookstore({
   const [detail, setDetail] = useState<WereadBookDetail | null>(null);
   const [detailError, setDetailError] = useState("");
   const searchController = useRef<AbortController | null>(null);
-
-  // 种子取最近打开、且不是内置示例的那本书。没有就只出「为你推荐」。
-  const seedTitle = books.find((book) => book.format !== "demo")?.title ?? "";
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const signal = controller.signal;
-
-    // 刻意不在开头 setLoading(true)：换种子时保留旧内容直到新数据到位，
-    // 既避开在 effect 同步阶段 setState，也不会让整页闪一下骨架屏再跳回来。
-    const loadLanes = async () => {
-      // 主页已经取到过「为你推荐」就直接用那一份（初始状态里已经画上了），只补相似推荐。
-      if (!initialFeed) {
-        try {
-          const recommend = await fetchWereadRecommend(0, 20, signal);
-          if (signal.aborted) return;
-          // 推荐一到就渲染。相似推荐要先搜种子书再查相似，是串着的两跳，
-          // 从前把三个请求攒齐才 setLanes，进书城得盯着骨架屏等三四秒。
-          setLanes(
-            recommend.books.length
-              ? [
-                  {
-                    kind: "recommend",
-                    title: "为你推荐",
-                    subtitle: "微信读书按你的阅读记录挑的",
-                    books: recommend.books,
-                  },
-                ]
-              : []
-          );
-          setError("");
-          setLoading(false);
-        } catch (reason) {
-          if (signal.aborted) return;
-          setLaneError(reason instanceof Error ? reason.message : "推荐暂时取不到");
-          setLoading(false);
-          return;
-        }
-      }
-
-      // 相似推荐要先拿种子书在微信读书里的 bookId，本地书库里没有这个 id。
-      if (!seedTitle) return;
-      try {
-        const matched = await searchWeread(seedTitle, 0, 1, signal);
-        const target = matched.books[0];
-        if (!target || signal.aborted) return;
-        const similar = await fetchWereadSimilar(target.bookId, 0, 20, "", signal);
-        if (!similar.books.length || signal.aborted) return;
-        setLanes((current) => [
-          ...current,
-          {
-            kind: "similar",
-            title: `因为你在读《${seedTitle}》`,
-            seedTitle,
-            subtitle: "微信读书的相似推荐",
-            books: similar.books,
-          },
-        ]);
-      } catch {
-        // 相似推荐拿不到就少一条流，不影响书城其余部分。
-      }
-    };
-
-    void loadLanes();
-    return () => controller.abort();
-  }, [seedTitle, initialFeed]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -423,7 +363,7 @@ export function Bookstore({
   // 榜和「全部」都从同一份书目算出来，这两步得在任何提前返回之前做完——
   // 详情页和「全部」页都会提前 return，hook 的调用顺序不能因此变。
   const shelf = useMemo(() => catalog?.books ?? [], [catalog]);
-  const ranked = useMemo(() => rankOf(shelf, RANK_LIMIT), [shelf]);
+  const ranked = useMemo(() => rankOf(shelf, RANK_LIMIT, rankingKind), [shelf, rankingKind]);
 
   function openBook(book: WereadBook) {
     setDetail(null);
@@ -435,9 +375,17 @@ export function Bookstore({
     if (next === category) return;
     setCatalogLoading(true);
     setRankAll(false);
+    setRankTurn(0);
     setBrowseShown(BROWSE_STEP);
     setCategory(next);
     rememberCategory(next);
+  }
+
+  function pickRanking(next: RankingKind) {
+    setRankingKind(next);
+    rememberRanking(next);
+    setRankAll(false);
+    setRankTurn(0);
   }
 
   function pickMode(next: "rank" | "browse") {
@@ -569,7 +517,19 @@ export function Bookstore({
             去找这本书
             <ArrowRight size={17} />
           </button>
+          {shown ? (
+            <button type="button" className="secondary-button"
+              aria-pressed={isDiscoveryHidden(shown)}
+              onClick={() => {
+                setDiscoveryHidden(shown, !isDiscoveryHidden(shown));
+                setFeedbackRevision((value) => value + 1);
+              }}>
+              {isDiscoveryHidden(shown) ? "撤销不感兴趣" : "不感兴趣"}
+            </button>
+          ) : null}
         </div>
+        {shown && isDiscoveryHidden(shown)
+          ? <p className="store-muted store-feedback" role="status">已从推荐中隐藏这本书，可以随时撤销。</p> : null}
 
         <div className="store-detail__body">
           <h3>简介</h3>
@@ -593,6 +553,7 @@ export function Bookstore({
   }
 
   if (expanded) {
+    const visibleExpanded = expanded.books.filter((book) => !isDiscoveryHidden(book) && !isOwnedBook(book, books));
     return (
       <section className="store" aria-label={expanded.title}>
         <header className="ios-nav-bar">
@@ -603,10 +564,10 @@ export function Bookstore({
           <span>{expanded.title}</span>
         </header>
         <p className="store-expanded__note">
-          {expanded.subtitle} · 共 {expanded.books.length} 本
+          {expanded.subtitle} · 共 {visibleExpanded.length} 本
         </p>
         <div className="store-grid">
-          {expanded.books.map((book, index) => (
+          {visibleExpanded.map((book, index) => (
             <StoreCard
               key={book.bookId}
               book={book}
@@ -620,7 +581,12 @@ export function Bookstore({
     );
   }
 
-  const rankShown = rankAll ? ranked : ranked.slice(0, RANK_PREVIEW);
+  const rankPages = Math.max(1, Math.ceil(ranked.length / RANK_PREVIEW));
+  const rankOffset = rankAll ? 0 : Math.min(
+    ((discoveryHash(`${discovery.feed?.day ?? discoveryDay()}:${category}:${rankingKind}`) + rankTurn) % rankPages) * RANK_PREVIEW,
+    Math.max(0, ranked.length - RANK_PREVIEW),
+  );
+  const rankShown = rankAll ? ranked : ranked.slice(rankOffset, rankOffset + RANK_PREVIEW);
   const browseShownBooks = shelf.slice(0, browseShown);
 
   return (
@@ -703,14 +669,19 @@ export function Bookstore({
               <div>
                 <h3>
                   {mode === "rank" ? <Trophy size={15} aria-hidden="true" /> : null}
-                  {mode === "rank" ? `${category}榜` : category}
+                  {mode === "rank" ? `${category} · ${RANKING_LABELS[rankingKind]}` : category}
                 </h3>
                 <small>
                   {mode === "rank"
-                    ? `按微信读书推荐值排序${shelf.length ? ` · 从 ${shelf.length} 本里挑的` : ""}，墨听自己排的`
+                    ? `${RANKING_NOTES[rankingKind]}${!rankAll && rankShown.length ? ` · 选看第 ${rankOffset + 1}～${rankOffset + rankShown.length} 名` : ""}`
                     : `这个分类下的 ${shelf.length} 本书，按微信读书的顺序`}
                 </small>
               </div>
+              {mode === "rank" && !rankAll && ranked.length > RANK_PREVIEW ? (
+                <button type="button" className="text-button store-lane__more" onClick={() => setRankTurn((turn) => turn + 1)}>
+                  换一组<RefreshCw size={13} aria-hidden="true" />
+                </button>
+              ) : null}
             </div>
 
             <div className="store-chips" role="group" aria-label="榜单分类">
@@ -725,6 +696,16 @@ export function Bookstore({
                 </button>
               ))}
             </div>
+
+            {mode === "rank" ? (
+              <div className="store-chips" role="group" aria-label="榜单类型">
+                {RANKING_KINDS.map((kind) => (
+                  <button key={kind} type="button" aria-pressed={rankingKind === kind} onClick={() => pickRanking(kind)}>
+                    {RANKING_LABELS[kind]}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
             <div className="store-modes" role="group" aria-label="查看方式">
               <button type="button" aria-pressed={mode === "rank"} onClick={() => pickMode("rank")}>
@@ -776,7 +757,7 @@ export function Bookstore({
                     <StoreCard
                       key={book.bookId}
                       book={book}
-                      rank={index + 1}
+                      rank={rankOffset + index + 1}
                       dense
                       priority={index < 6}
                       onOpen={openBook}
@@ -795,7 +776,7 @@ export function Bookstore({
               </>
             ) : (
               <p className="store-muted store-rank-empty">
-                这个分类里评分人数够多的书太少，排不出可信的榜。换个分类试试。
+                这个分类里符合当前榜单条件的书太少，换个榜单或分类试试。
               </p>
             )}
           </div>
@@ -815,6 +796,9 @@ export function Bookstore({
                     <h3>{lane.title}</h3>
                     <small>{lane.subtitle}</small>
                   </div>
+                  <button type="button" className="text-button store-lane__more" onClick={discovery.shuffle}>
+                    换一批<RefreshCw size={13} aria-hidden="true" />
+                  </button>
                   {lane.books.length > LANE_PREVIEW ? (
                     <button
                       type="button"
@@ -846,10 +830,14 @@ export function Bookstore({
             ))
           )}
 
+          {discovery.notice ? <p className="store-muted" role="status">{discovery.notice}</p> : null}
+          {!loading && !laneError && !lanes.length
+            ? <p className="store-muted">暂时没有合适的推荐，可以换个分类逛逛。</p> : null}
+
           <p className="store-credit">
             书目、推荐值与封面来自微信读书{catalog?.generatedAt ? `（${catalog.generatedAt} 抓取）` : ""}
             ，是随应用一起发的一份快照，不会实时变。
-            榜单是墨听按推荐值自己排的，不是微信读书的官方榜单。
+            榜单是墨听依据推荐值或在读人数整理的，不是微信读书的官方榜单。推荐会轮换，展示过的书会降低出现频率。
           </p>
         </>
       )}

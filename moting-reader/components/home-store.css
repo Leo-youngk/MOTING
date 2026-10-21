@@ -8,6 +8,15 @@
   margin-bottom: 26px;
 }
 
+.home-store__rank .section-head h2 {
+  font-size: var(--text-lg);
+  flex-wrap: wrap;
+}
+
+.home-store__rank .section-head h2 svg {
+  flex: 0 0 auto;
+}
+
 /* 榜不是微信读书的官方榜，是按它的推荐值自己排的，这一行交代清楚。 */
 .home-store__note {
   margin: -8px 0 12px;
