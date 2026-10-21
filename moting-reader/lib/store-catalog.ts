@@ -1,4 +1,4 @@
-import { CATEGORY_SLUGS, type WereadBook } from "./weread-types";
+import { CATEGORY_SLUGS, WEREAD_CATEGORIES, type WereadBook } from "./weread-types.ts";
 
 /**
  * 书城的分类书目。
@@ -72,9 +72,71 @@ export function peekCatalog(category: string): StoreCatalog | null {
  * 门槛不能降——三十个人打出的 96% 说明不了任何事，
  * 让这种书占住榜首，整条榜就没人信了。宁可榜短一点。
  */
-export function rankOf(books: WereadBook[], limit: number): WereadBook[] {
+export const RANKING_KINDS = ["quality", "popular", "hidden"] as const;
+export type RankingKind = (typeof RANKING_KINDS)[number];
+export const RANKING_LABELS: Record<RankingKind, string> = {
+  quality: "口碑榜",
+  popular: "热读榜",
+  hidden: "小众口碑",
+};
+export const RANKING_NOTES: Record<RankingKind, string> = {
+  quality: "至少 500 人评价，按推荐值排序",
+  popular: "按书目快照中的在读人数排序",
+  hidden: "500～1 万人评价、推荐值至少 85%，按推荐值排序",
+};
+
+export function preferredRanking(): RankingKind {
+  try {
+    const saved = window.localStorage.getItem("moting:store-ranking");
+    if (RANKING_KINDS.includes(saved as RankingKind)) return saved as RankingKind;
+  } catch { /* 隐私模式仍可使用默认口碑榜。 */ }
+  return "quality";
+}
+
+export function rememberRanking(kind: RankingKind) {
+  try { window.localStorage.setItem("moting:store-ranking", kind); }
+  catch { /* 当前页面仍然保留选择。 */ }
+}
+
+export function rankOf(books: WereadBook[], limit: number, kind: RankingKind = "quality"): WereadBook[] {
   return books
-    .filter((book) => book.rating !== null && (book.ratingCount ?? 0) >= RANKABLE_MIN_COUNT)
-    .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))
+    .filter((book) => kind === "popular"
+      ? (book.readingCount ?? 0) > 0
+      : book.rating !== null && (book.ratingCount ?? 0) >= RANKABLE_MIN_COUNT &&
+        (kind !== "hidden" || (book.rating! >= 850 && book.ratingCount! < 10_000)))
+    .sort((a, b) => (kind === "popular"
+      ? (b.readingCount ?? 0) - (a.readingCount ?? 0)
+      : (b.rating ?? 0) - (a.rating ?? 0)) ||
+      (b.ratingCount ?? 0) - (a.ratingCount ?? 0) || a.bookId.localeCompare(b.bookId))
     .slice(0, limit);
+}
+
+let poolTask: Promise<{ catalogs: StoreCatalog[]; books: WereadBook[]; unavailable: number }> | null = null;
+
+/** 仅加载现有静态书目，最多三路并行；换批不会放大上游请求。 */
+export function loadDiscoveryPool() {
+  if (poolTask) return poolTask;
+  poolTask = (async () => {
+    const catalogs: StoreCatalog[] = [];
+    let unavailable = 0;
+    for (let i = 0; i < WEREAD_CATEGORIES.length; i += 3) {
+      const results = await Promise.allSettled(WEREAD_CATEGORIES.slice(i, i + 3).map(loadCatalog));
+      for (const result of results) {
+        if (result.status === "fulfilled") catalogs.push(result.value);
+        else unavailable += 1;
+      }
+    }
+    if (!catalogs.length) throw new CatalogError("书目暂时读不到，检查网络后重试");
+    return {
+      catalogs,
+      books: catalogs.flatMap((catalog) => catalog.books.map((book) => ({
+        ...book, category: book.category ?? catalog.category,
+      }))),
+      unavailable,
+    };
+  })().catch((error: unknown) => {
+    poolTask = null;
+    throw error;
+  });
+  return poolTask;
 }

@@ -119,10 +119,8 @@ export const CATEGORY_SLUGS: Record<string, string> = {
 const CATEGORY_KEY = "moting:store-category";
 
 /**
- * 主页和书城看同一个分类的榜。
- *
- * 在书城里选过就一直跟着那个选择走；没选过的话按天轮换——固定钉死在「小说」
- * 会让主页那条榜天天长一个样，而榜本身 6 小时才换一次内容。
+ * 完整书城沿用上次选择；没有选择时按本地日期轮换。
+ * 首页另行轮换分类和榜单视角，不被这里的偏好固定。
  */
 export function preferredCategory(): string {
   try {
@@ -131,7 +129,8 @@ export function preferredCategory(): string {
   } catch {
     // 隐私模式下读不到，落到按天轮换即可。
   }
-  const day = Math.floor(Date.now() / 86_400_000);
+  const now = new Date();
+  const day = Math.floor(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / 86_400_000);
   return WEREAD_CATEGORIES[day % WEREAD_CATEGORIES.length];
 }
 

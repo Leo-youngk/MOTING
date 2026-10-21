@@ -1036,6 +1036,8 @@ function HomeScreen({
 
       {/* 书城接在「继续读」下面：逛新书比回看统计更常用，统计往下滚就是。 */}
       <HomeStore
+        books={books}
+        sessions={sessions}
         onOpenStore={() => onOpenStore()}
         onOpenBook={(bookId) => onOpenStore(bookId)}
       />
@@ -8334,6 +8336,7 @@ export default function MotingApp() {
                 <Bookstore
                   key={view.query ?? ""}
                   books={books}
+                  sessions={sessions}
                   initialBookId={view.bookId ?? ""}
                   initialQuery={view.query ?? ""}
                   onBack={() => goBack({ name: "home" })}

@@ -362,7 +362,14 @@
 }
 
 .store-detail__actions {
+  display: grid;
+  gap: var(--text-xs);
   margin-bottom: 22px;
+}
+
+.store-feedback {
+  margin-top: calc(-1 * var(--text-sm));
+  font-size: var(--text-md);
 }
 
 .store-detail__actions .primary-button {
