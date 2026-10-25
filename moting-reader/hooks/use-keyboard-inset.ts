@@ -2,8 +2,8 @@
 
 import { useEffect } from "react";
 
-/** 小于这个高度的视口变化算地址栏收合，不算键盘。 */
-const KEYBOARD_THRESHOLD = 30;
+/** 地址栏收合也会缩小视觉视口，只有输入中且明显缩高时才按软键盘处理。 */
+const KEYBOARD_THRESHOLD = 100;
 
 /**
  * 把软键盘挡住的高度写成 `--keyboard-inset` 挂在 <html> 上。
@@ -22,10 +22,23 @@ export function useKeyboardInset() {
 
     const sync = () => {
       frame = 0;
-      const raw = window.innerHeight - viewport.height - viewport.offsetTop;
-      const inset = raw > KEYBOARD_THRESHOLD ? Math.round(raw) : 0;
+      const focused = document.activeElement;
+      const editing = focused instanceof HTMLElement &&
+        focused.matches("input:not([type=range]):not([type=checkbox]):not([type=radio]), textarea, [contenteditable=true]");
+      // iOS 会把视觉视口向上平移以露出输入框。键盘是否打开看总缩高，
+      // 浮层的上下边分别跟 offsetTop 和底部遮挡量走，不能只抬高底边。
+      const shrunken = window.innerHeight - viewport.height > KEYBOARD_THRESHOLD;
+      const unzoomed = Math.abs(viewport.scale - 1) < 0.05;
+      // blur 比键盘退场早；等视口恢复后才撤掉避让，关闭时不会先掉到键盘下面。
+      const open = unzoomed && shrunken &&
+        (editing || root.hasAttribute("data-keyboard-open"));
+      const inset = open
+        ? Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop))
+        : 0;
       root.style.setProperty("--keyboard-inset", `${inset}px`);
-      root.toggleAttribute("data-keyboard-open", inset > 0);
+      root.style.setProperty("--visual-viewport-top", `${open ? Math.max(0, Math.round(viewport.offsetTop)) : 0}px`);
+      root.style.setProperty("--visual-viewport-height", `${Math.round(viewport.height)}px`);
+      root.toggleAttribute("data-keyboard-open", open);
     };
 
     const schedule = () => {
@@ -35,13 +48,19 @@ export function useKeyboardInset() {
 
     viewport.addEventListener("resize", schedule);
     viewport.addEventListener("scroll", schedule);
+    document.addEventListener("focusin", schedule);
+    document.addEventListener("focusout", schedule);
     sync();
 
     return () => {
       if (frame) cancelAnimationFrame(frame);
       viewport.removeEventListener("resize", schedule);
       viewport.removeEventListener("scroll", schedule);
+      document.removeEventListener("focusin", schedule);
+      document.removeEventListener("focusout", schedule);
       root.style.removeProperty("--keyboard-inset");
+      root.style.removeProperty("--visual-viewport-top");
+      root.style.removeProperty("--visual-viewport-height");
       root.removeAttribute("data-keyboard-open");
     };
   }, []);

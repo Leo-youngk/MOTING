@@ -7,6 +7,14 @@
    色值按用户给的效果图取样。
    阅读器内部另有一套 --reader-* 纸张变量，不受这里影响。 */
 :root {
+  /* 按浏览器实际安全区排版，兼容显示缩放、横屏和主屏幕 PWA，不识别机型。 */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --tap-target: 44px;
+  --visual-viewport-top: 0px;
+  --sheet-top-gap: max(40px, calc(var(--safe-top) + 8px));
   /* 软键盘挡住的高度，由 useKeyboardInset 量出来写进来。 */
   --keyboard-inset: 0px;
   /* 底部面板（sheet）的动效：iOS 的 sheet 手感，进出同一条曲线。退场时长和组件里的
@@ -47,13 +55,13 @@
   --dur-fast: 160ms;
   --dur-base: 240ms;
   /*
-   * 底栏离屏幕底边多远：有 Home 指示条的机型把底栏压进安全区，停在指示条上沿；
+   * 底栏离屏幕底边多远：有 Home 指示条的机型完整避开安全区；
    * 没有指示条的留 10px。迷你播放条、页面底部留白都从这两个值推出来，改一处全跟着走。
    * 高度写死成整数：高度带小数时，iOS 滚动中每一帧取整不一样，底栏里的图标会上下跳一个像素。
    * 贴底的浮层（底栏、迷你播放条、提示条）还要再往下探 --viewport-fill-bottom：见 use-viewport-fill.ts，
    * iOS 桌面图标打开时布局视口有时会比物理屏矮一个状态栏，不探的话底栏会整条抬高几十像素。
    */
-  --tabbar-bottom: max(10px, calc(env(safe-area-inset-bottom) - 20px));
+  --tabbar-bottom: max(10px, var(--safe-bottom));
   --tabbar-height: 64px;
   --mini-player-height: 66px;
   --paper: #fafbfd;
@@ -433,6 +441,7 @@ button:disabled {
 
 .app-content {
   min-height: 100dvh;
+  padding-inline: var(--safe-left) var(--safe-right);
   padding-bottom: calc(var(--tabbar-bottom) + var(--tabbar-height) + 28px);
 }
 
@@ -453,7 +462,7 @@ button:disabled {
 .screen {
   width: min(100%, 780px);
   margin: 0 auto;
-  padding: calc(14px + env(safe-area-inset-top)) 0 0;
+  padding: calc(14px + var(--safe-top)) 0 0;
 }
 
 /* 横向留白统一交给这个变量，横滑书架要能出血到屏幕边缘，
@@ -521,8 +530,8 @@ button:disabled {
 
 .icon-button {
   display: inline-flex;
-  width: 44px;
-  height: 44px;
+  width: var(--tap-target);
+  height: var(--tap-target);
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -908,8 +917,8 @@ button:disabled {
   right: -6px;
   bottom: -6px;
   display: flex;
-  width: 34px;
-  height: 34px;
+  width: var(--tap-target);
+  height: var(--tap-target);
   align-items: center;
   justify-content: center;
   padding-left: 2px;
@@ -1551,8 +1560,8 @@ button:disabled {
 
 .grid-book__more {
   display: inline-flex;
-  width: 30px;
-  height: 26px;
+  width: var(--tap-target);
+  height: var(--tap-target);
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
@@ -2253,14 +2262,13 @@ button:disabled {
 
 .ai-chat {
   /* 顶栏的高度（含刘海区）。消息区的上内边距、最新一问的最小高度都按它算。 */
-  --chat-top: calc(env(safe-area-inset-top) + 68px);
+  --chat-top: calc(var(--safe-top) + 68px);
   position: fixed;
   z-index: 120;
   inset: 0;
-  /* iOS standalone 的布局视口有时比物理屏矮一个状态栏。底色填满差值，
-     输入卡只借用其中 16px，让它更贴底，剩余空间仍保护 Home Indicator。 */
+  /* 补齐 standalone 的底部缺口；输入框跟底栏一样完整避开 Home 指示条。 */
   bottom: calc(-1 * var(--viewport-fill-bottom, 0px));
-  padding-bottom: max(0px, calc(var(--viewport-fill-bottom, 0px) - 16px));
+  padding-inline: var(--safe-left) var(--safe-right);
   display: flex;
   flex-direction: column;
   background: var(--paper);
@@ -2278,8 +2286,9 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding-inline: 18px;
-  padding-top: env(safe-area-inset-top);
+  padding-left: max(18px, calc(var(--safe-left) + 8px));
+  padding-right: max(18px, calc(var(--safe-right) + 8px));
+  padding-top: var(--safe-top);
   background: var(--paper);
 }
 
@@ -2308,6 +2317,7 @@ button:disabled {
 
 .ai-chat__scroll {
   display: flex;
+  min-height: 0;
   flex: 1;
   flex-direction: column;
   overflow-y: auto;
@@ -2390,6 +2400,7 @@ button:disabled {
 
 .ai-chat__starter {
   flex: 0 0 auto;
+  min-height: var(--tap-target);
   max-width: 60%;
   padding: 7px 12px;
   border: 1px solid var(--line-soft);
@@ -2432,13 +2443,14 @@ button:disabled {
   display: flex;
   width: min(100%, 720px);
   flex-direction: column;
+  flex-shrink: 0;
   margin: 0 auto;
-  /* 安全区只留必要的底边距离；外层已补过 iOS 全屏缺口。 */
-  padding: 6px 16px max(8px, calc(env(safe-area-inset-bottom) - 20px));
+  padding: 6px 16px max(8px, var(--safe-bottom));
 }
 
 /* 键盘弹起时底边停在键盘上沿（不再往下探物理屏底，那块已被键盘盖住）。 */
 html[data-keyboard-open] .ai-chat {
+  top: var(--visual-viewport-top);
   bottom: var(--keyboard-inset);
   padding-bottom: 0;
 }
@@ -2483,7 +2495,7 @@ html[data-keyboard-open] .ai-chat__composer {
 /* 已有对话时，只需一行输入和发送；建议提问只出现在空对话。 */
 .ai-chat__input.has-history {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 38px;
+  grid-template-columns: minmax(0, 1fr) var(--tap-target);
   align-items: end;
   gap: 8px;
 }
@@ -2523,8 +2535,8 @@ html[data-keyboard-open] .ai-chat__composer {
 
 .ai-chat__send {
   display: inline-flex;
-  width: 38px;
-  height: 38px;
+  width: var(--tap-target);
+  height: var(--tap-target);
   flex-shrink: 0;
   margin-left: auto;
   align-items: center;
@@ -3018,6 +3030,8 @@ input[type="range"] {
   justify-content: center;
   gap: 14px;
   padding: 0 16px var(--tabbar-bottom);
+  padding-left: max(16px, var(--safe-left));
+  padding-right: max(16px, var(--safe-right));
   pointer-events: none;
   /* 单独合成一层：滚动时整条底栏由合成器平移，里面的图标不跟着页面一起重画。 */
   will-change: transform;
@@ -3029,6 +3043,10 @@ input[type="range"] {
 
 /* 键盘顶上来时这条要么被埋、要么浮在键盘上，原生 App 都是直接收起。 */
 html[data-keyboard-open] .bottom-bar {
+  display: none;
+}
+
+html[data-keyboard-open] .mini-player {
   display: none;
 }
 
@@ -3111,11 +3129,11 @@ html[data-keyboard-open] .bottom-bar {
 .mini-player {
   position: fixed;
   z-index: 35;
-  right: 16px;
+  right: max(16px, var(--safe-right));
   bottom: calc(
     var(--tabbar-bottom) + var(--tabbar-height) + 8px - var(--viewport-fill-bottom, 0px)
   );
-  left: 16px;
+  left: max(16px, var(--safe-left));
   display: flex;
   max-width: 560px;
   height: var(--mini-player-height);
@@ -3179,14 +3197,14 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .mini-player__toggle.icon-button {
-  width: 40px;
-  height: 40px;
+  width: var(--tap-target);
+  height: var(--tap-target);
   flex: 0 0 auto;
   background: var(--paper-deep);
 }
 
 .mini-player__stop.icon-button {
-  width: 34px;
+  width: var(--tap-target);
   flex: 0 0 auto;
   color: var(--muted);
 }
@@ -3228,10 +3246,12 @@ html[data-keyboard-open] .bottom-bar {
   z-index: 30;
   top: 0;
   display: grid;
-  min-height: calc(54px + env(safe-area-inset-top));
+  min-height: calc(54px + var(--safe-top));
   grid-template-columns: 48px 1fr 48px;
   align-items: center;
-  padding: env(safe-area-inset-top) 6px 0;
+  padding: var(--safe-top) 6px 0;
+  padding-left: max(6px, var(--safe-left));
+  padding-right: max(6px, var(--safe-right));
   background: var(--paper);
 }
 
@@ -3270,12 +3290,16 @@ html[data-keyboard-open] .bottom-bar {
    放在里面的胶囊/按钮上（.reader-chrome__remain、__pos-label、__menu）。 */
 .reader-chrome--top {
   top: 0;
-  padding: calc(env(safe-area-inset-top) + 10px) 12px 12px;
+  padding: calc(var(--safe-top) + 10px) 12px 12px;
+  padding-left: max(12px, var(--safe-left));
+  padding-right: max(12px, var(--safe-right));
 }
 
 .reader-chrome--bottom {
   bottom: 0;
-  padding: 12px 12px calc(env(safe-area-inset-bottom) + 12px);
+  padding: 12px 12px calc(var(--safe-bottom) + 12px);
+  padding-left: max(12px, var(--safe-left));
+  padding-right: max(12px, var(--safe-right));
 }
 
 /* 底栏右侧是一组按钮（问 AI、阅读设置），靠这一下推成一组，别被 space-between 摊开。 */
@@ -3305,13 +3329,13 @@ html[data-keyboard-open] .bottom-bar {
 .reader-recall {
   position: fixed;
   z-index: 29;
-  right: 16px;
-  bottom: calc(env(safe-area-inset-bottom) + 78px);
+  right: max(16px, var(--safe-right));
+  bottom: calc(var(--safe-bottom) + 78px);
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: var(--tap-target);
+  height: var(--tap-target);
   border: 0.5px solid var(--glass-edge);
   border-radius: var(--radius-pill);
   background: var(--glass-fill);
@@ -3362,7 +3386,7 @@ html[data-keyboard-open] .bottom-bar {
    .reader-chrome__remain 用同一套胶囊样式，位置对称（从底边算距离）。 */
 .reader-chrome__pos-label {
   position: absolute;
-  bottom: calc(env(safe-area-inset-bottom) + 10px);
+  bottom: calc(var(--safe-bottom) + 10px);
   left: 50%;
   display: flex;
   align-items: center;
@@ -3391,7 +3415,7 @@ html[data-keyboard-open] .bottom-bar {
    正上方的留白区，不会盖住正文行。 */
 .reader-chrome__remain {
   position: absolute;
-  top: calc(env(safe-area-inset-top) + 10px);
+  top: calc(var(--safe-top) + 10px);
   left: 50%;
   display: flex;
   align-items: center;
@@ -3418,8 +3442,8 @@ html[data-keyboard-open] .bottom-bar {
 .reader-chrome__menu {
   display: inline-flex;
   flex-shrink: 0;
-  width: 40px;
-  height: 40px;
+  width: var(--tap-target);
+  height: var(--tap-target);
   align-items: center;
   justify-content: center;
   border-radius: 50%;
@@ -3456,8 +3480,8 @@ html[data-keyboard-open] .bottom-bar {
 .reader-menu {
   position: fixed;
   z-index: 31;
-  right: 14px;
-  bottom: calc(env(safe-area-inset-bottom) + 66px);
+  right: max(14px, var(--safe-right));
+  bottom: calc(var(--safe-bottom) + 66px);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -3486,9 +3510,12 @@ html[data-keyboard-open] .bottom-bar {
 }
 
 .reader-article {
-  width: min(calc(100% - 42px), var(--reader-width));
+  width: min(
+    calc(100% - 42px - 2 * max(var(--safe-left), var(--safe-right))),
+    var(--reader-width)
+  );
   margin: 0 auto;
-  padding: calc(env(safe-area-inset-top) + 60px) 0 140px;
+  padding: calc(var(--safe-top) + 60px) 0 140px;
   /* iOS 长按正文会先弹一层系统 callout，跟我们自己的划线浮条打架。 */
   -webkit-touch-callout: none;
 }
@@ -3612,8 +3639,8 @@ html[data-keyboard-open] .bottom-bar {
 
 .reader-shell.is-paged .reader-article {
   height: 100%;
-  padding: calc(env(safe-area-inset-top) + 56px) 0
-    calc(env(safe-area-inset-bottom) + 52px);
+  padding: calc(var(--safe-top) + 56px) 0
+    calc(var(--safe-bottom) + 52px);
   column-fill: auto;
   column-gap: 48px;
   transition: transform 260ms cubic-bezier(0.32, 0.72, 0, 1);
@@ -3841,7 +3868,7 @@ html[data-keyboard-open] .bottom-bar {
 /* 跳章时滚到这一节的顶部，留出的这段正好等于正文的上边距，
    否则章名会顶到屏幕最上沿、被顶栏压住。 */
 .reader-chapter {
-  scroll-margin-top: calc(env(safe-area-inset-top) + 60px);
+  scroll-margin-top: calc(var(--safe-top) + 60px);
 }
 
 /* 连续滚动里章与章直接相接，靠章首那块标题分隔，不另加分隔线。 */
@@ -4131,11 +4158,14 @@ html[data-keyboard-open] .bottom-bar {
 
 .player-main {
   display: flex;
-  width: min(calc(100% - 40px), 480px);
+  width: min(
+    calc(100% - 40px - 2 * max(var(--safe-left), var(--safe-right))),
+    480px
+  );
   flex-direction: column;
   align-items: center;
   margin: 0 auto;
-  padding: 10px 0 calc(20px + env(safe-area-inset-bottom));
+  padding: 10px 0 calc(20px + var(--safe-bottom));
 }
 
 /*
@@ -4146,7 +4176,7 @@ html[data-keyboard-open] .bottom-bar {
   --stage-width: clamp(
     160px,
     calc(
-      (100dvh - 520px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) * 0.72
+      (100dvh - 542px - var(--safe-top) - var(--safe-bottom)) * 0.72
     ),
     260px
   );
@@ -4262,7 +4292,7 @@ html[data-keyboard-open] .bottom-bar {
   --range-track: color-mix(in srgb, currentColor 12%, transparent);
   display: block;
   width: 100%;
-  height: 22px;
+  height: var(--tap-target);
   margin: 0;
   background: transparent;
   -webkit-appearance: none;
@@ -4472,11 +4502,12 @@ html[data-keyboard-open] .bottom-bar {
   left: 0;
   /* 底边要停在键盘上沿。这里不能写 inset: 0 或 dvh：iOS 弹键盘不缩布局视口，
      那两个值都不会变，贴底的输入框就埋在键盘底下了。 */
-  bottom: var(--keyboard-inset);
+  bottom: calc(-1 * var(--viewport-fill-bottom, 0px));
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  padding-top: 40px;
+  padding-top: var(--sheet-top-gap);
+  padding-inline: var(--safe-left) var(--safe-right);
   background: rgb(25 23 20 / 34%);
   backdrop-filter: blur(5px);
   animation: fade-in var(--dur-base) ease;
@@ -4493,7 +4524,7 @@ html[data-keyboard-open] .bottom-bar {
   max-height: min(82dvh, 760px);
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 8px 20px calc(22px + env(safe-area-inset-bottom));
+  padding: 8px 20px calc(22px + var(--safe-bottom));
   border: 0.5px solid var(--glass-edge);
   border-bottom: 0;
   border-radius: 20px 20px 0 0;
@@ -4521,10 +4552,15 @@ html[data-keyboard-open] .bottom-bar {
   }
 }
 
-/* 40px 是 backdrop 的 padding-top。键盘弹起时 safe-area-inset-bottom 在 standalone
+/* 键盘弹起时 safe-area-inset-bottom 在 standalone
    下不保证归零，底部留白干脆写死。 */
+html[data-keyboard-open] .modal-backdrop {
+  top: var(--visual-viewport-top);
+  bottom: var(--keyboard-inset);
+}
+
 html[data-keyboard-open] .modal-sheet {
-  max-height: min(calc(100dvh - var(--keyboard-inset) - 40px), 760px);
+  max-height: min(calc(var(--visual-viewport-height, 100dvh) - var(--sheet-top-gap)), 760px);
   padding-bottom: 22px;
 }
 
@@ -4637,7 +4673,8 @@ html[data-keyboard-open] .modal-sheet {
   display: flex;
   height: 100%;
   flex-direction: column;
-  padding: calc(env(safe-area-inset-top) + 16px) 20px 0;
+  /* 面板的顶边已避开状态栏，内部不再重复加一次安全区。 */
+  padding: 16px 20px 0;
 }
 
 .toc__head {
@@ -4696,7 +4733,7 @@ html[data-keyboard-open] .modal-sheet {
   margin: 0 -20px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 4px 20px 20px;
+  padding: 4px 20px max(20px, var(--safe-bottom));
 }
 
 .toc__item {
@@ -4767,7 +4804,7 @@ html[data-keyboard-open] .modal-sheet {
 .modal-sheet--toc {
   width: 100%;
   max-height: none;
-  height: calc(100dvh - env(safe-area-inset-top) - 6px);
+  height: calc(100dvh - var(--sheet-top-gap) + var(--viewport-fill-bottom, 0px));
   padding: 0;
   border-radius: 26px 26px 0 0;
   /* 大 sheet 不做全屏实时模糊：观感与 Apple 接近，但避免整屏 backdrop-filter 的
@@ -5247,13 +5284,13 @@ html[data-keyboard-open] .modal-sheet {
 .toast {
   position: fixed;
   z-index: 140;
-  right: 18px;
+  right: max(18px, var(--safe-right));
   bottom: calc(
     var(--tabbar-bottom) + var(--tabbar-height) + 16px - var(--viewport-fill-bottom, 0px)
   );
-  left: 18px;
+  left: max(18px, var(--safe-left));
   width: fit-content;
-  max-width: calc(100% - 36px);
+  max-width: calc(100% - max(18px, var(--safe-left)) - max(18px, var(--safe-right)));
   margin: auto;
   padding: 11px 16px;
   border-radius: var(--radius-md);
@@ -5278,7 +5315,7 @@ html[data-keyboard-open] .modal-sheet {
 
 /* 手机上没有底栏的页（在线找书）：底栏收起，迷你播放条和提示条落到底栏原来的位置。
    宽屏的底栏是左侧栏，照常留着。 */
-@media (max-width: 719.98px) {
+@media (max-width: 719.98px), (max-height: 599.98px) {
   .app-frame.is-bare .bottom-bar {
     display: none;
   }
@@ -5295,6 +5332,65 @@ html[data-keyboard-open] .modal-sheet {
     bottom: calc(
       var(--tabbar-bottom) + var(--mini-player-height) + 20px - var(--viewport-fill-bottom, 0px)
     );
+  }
+}
+
+/* 手机横放仍是触屏界面。封面和操作并排，播放、目录、定时都留在当前屏内。 */
+@media (min-width: 600px) and (max-height: 599.98px) and (orientation: landscape) {
+  .player-main {
+    display: grid;
+    width: min(
+      calc(100% - 40px - 2 * max(var(--safe-left), var(--safe-right))),
+      840px
+    );
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    column-gap: 32px;
+    padding-top: 4px;
+  }
+
+  .player-stage {
+    --stage-width: clamp(
+      120px,
+      calc((100dvh - var(--safe-top) - var(--safe-bottom) - 84px) / 1.4),
+      200px
+    );
+    grid-column: 1;
+    grid-row: 1 / span 6;
+  }
+
+  .player-main > :not(.player-stage) {
+    grid-column: 2;
+    min-width: 0;
+  }
+
+  .player-title {
+    margin-top: 0;
+  }
+
+  .player-line {
+    display: none;
+  }
+
+  .player-seek {
+    margin-top: 12px;
+  }
+
+  .player-controls {
+    gap: 24px;
+    margin: 4px 0 8px;
+  }
+
+  .player-controls .player-primary-control {
+    width: 64px;
+    height: 64px;
+  }
+
+  .player-tools {
+    padding-block: 4px;
+  }
+
+  .player-tools button {
+    min-height: 48px;
   }
 }
 
@@ -5356,7 +5452,7 @@ html[data-keyboard-open] .modal-sheet {
   }
 }
 
-@media (min-width: 720px) {
+@media (min-width: 720px) and (min-height: 600px) {
   .screen > *:not(.shelf):not(.home-row) {
     margin-inline: 36px;
   }
@@ -5392,7 +5488,7 @@ html[data-keyboard-open] .modal-sheet {
   }
 }
 
-@media (min-width: 960px) {
+@media (min-width: 960px) and (min-height: 600px) {
   .app-frame {
     display: grid;
     grid-template-columns: 230px minmax(0, 1fr);
@@ -5445,7 +5541,7 @@ html[data-keyboard-open] .modal-sheet {
     align-items: stretch;
     justify-content: flex-start;
     gap: 10px;
-    padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+    padding: 20px 16px calc(20px + var(--safe-bottom));
     border-right: 1px solid var(--line-soft);
     background: color-mix(in srgb, var(--paper) 90%, transparent);
     backdrop-filter: var(--glass-blur);

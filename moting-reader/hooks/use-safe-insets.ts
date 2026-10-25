@@ -30,10 +30,10 @@ function measure(): SafeInsets {
     "height:0",
     "visibility:hidden",
     "pointer-events:none",
-    "padding-top:env(safe-area-inset-top,0px)",
-    "padding-bottom:env(safe-area-inset-bottom,0px)",
-    "padding-left:env(safe-area-inset-left,0px)",
-    "padding-right:env(safe-area-inset-right,0px)",
+    "padding-top:var(--safe-top)",
+    "padding-bottom:var(--safe-bottom)",
+    "padding-left:var(--safe-left)",
+    "padding-right:var(--safe-right)",
   ].join(";");
   document.body.appendChild(probe);
   const style = getComputedStyle(probe);

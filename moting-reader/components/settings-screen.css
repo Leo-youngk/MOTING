@@ -5,6 +5,7 @@
 
 .settings-screen {
   min-height: 100dvh;
+  padding-inline: var(--safe-left) var(--safe-right);
   background: var(--paper);
 }
 
@@ -14,10 +15,10 @@
   z-index: 30;
   top: 0;
   display: grid;
-  min-height: calc(58px + env(safe-area-inset-top));
+  min-height: calc(58px + var(--safe-top));
   grid-template-columns: 56px minmax(0, 1fr) 56px;
   align-items: center;
-  padding: env(safe-area-inset-top) 8px 0;
+  padding: var(--safe-top) 8px 0;
   background: color-mix(in srgb, var(--paper) 86%, transparent);
   backdrop-filter: var(--glass-blur);
 }
@@ -85,7 +86,7 @@
 .settings-main {
   width: min(calc(100% - 32px), 600px);
   margin: 0 auto;
-  padding: 6px 0 calc(40px + env(safe-area-inset-bottom));
+  padding: 6px 0 calc(40px + var(--safe-bottom));
 }
 
 .settings-section {
