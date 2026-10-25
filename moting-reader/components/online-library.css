@@ -9,14 +9,18 @@
   height: 100dvh;
   min-width: 0;
   flex-direction: column;
-  padding-top: calc(2px + env(safe-area-inset-top));
+  padding-top: calc(2px + var(--safe-top));
+}
+
+html[data-keyboard-open] .screen.online-screen {
+  height: var(--visual-viewport-height, 100dvh);
 }
 
 .online-bar {
   display: grid;
   height: 44px;
   flex: 0 0 auto;
-  grid-template-columns: 40px minmax(0, 1fr) 40px;
+  grid-template-columns: var(--tap-target) minmax(0, 1fr) var(--tap-target);
   align-items: center;
   margin-bottom: 8px;
 }
@@ -33,8 +37,8 @@
 
 .online-round {
   display: inline-flex;
-  width: 40px;
-  height: 40px;
+  width: var(--tap-target);
+  height: var(--tap-target);
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -106,7 +110,7 @@
   min-height: 0;
   flex: 1;
   margin: 12px -4px 0;
-  padding: 4px 4px calc(16px + env(safe-area-inset-bottom));
+  padding: 4px 4px calc(16px + var(--safe-bottom));
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior-y: none;
