@@ -100,6 +100,12 @@ npm run deploy:dry-run
 - 发给模型的历史走 `modelHistory`（`lib/ai.ts`）：去掉空回答、合并连着的提问、只带最近 30 条 / 6 万字。Worker 转发的条数字数上限是同一个 `AI_REQUEST_LIMITS`，改一处两边都生效。流里夹的错误、一个字都没给的回答都当失败，显示在那一问下面并给「重试」，不写进对话记录。
 - 上游忙（503、429、5xx）时 Worker 自动重试并换备用模型（`worker/ai-upstream.ts`）：主模型 2 次 → 备用模型 2 次 → 主模型最后 1 次，间隔带抖动，总共最多等 30 秒；只在回答开始流出之前重试。备用模型是设置「AI 助手」里的 `aiFallbackModel`，从接口返回的模型列表里选，不在代码里写死；用到它的那条回答下面注明（响应头 `x-ai-model`）。每次重试、换模型、最终失败都写进 Workers 日志。上游的报错（Gemini 兼容接口外面包一层数组）由 Worker 解开并翻成中文。
 
+## AI 数据接口
+
+「设置 → AI 数据接口」为外部 Bot 提供独立的只读密钥。接口在 `worker/knowledge-api.ts`、密钥管理在 `worker/knowledge-keys.ts`，分别由 Worker 入口和同步会话路由注册。只导出已同步书目、划线、想法及完整 AI 对话；电子书全文、设置和服务商密钥不导出。大记录复用现有 R2 引用并校验哈希。
+
+新增数据库只需增量迁移 `0002_knowledge_api.sql`；已有密钥和用户内容保留。主、旧两个域名均需部署，旧入口通过 `SYNC_UPSTREAM` 代理 `/api/knowledge/v1/*`。改这块运行 `tests/knowledge-api.test.ts` 和生产构建后的 `tests/worker-knowledge.test.mjs`；接入说明见 `docs/AI_DATA_API.md`。PR #30 原来只合并在开发分支，已补回 `master`，不要再用缺少接口文件的旧分支作为部署基线。
+
 ## 英文模式
 
 - 阅读页「主题与设置」里行距下面的「英文模式」开关（`ReaderSettings.englishMode`），**默认关，关着时阅读器跟没有这个功能时完全一样**。打开后：
