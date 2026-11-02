@@ -4,6 +4,8 @@
 
 本项目不需要账号或 API Key。书籍、进度、标记和设置默认保存在当前浏览器的 IndexedDB 中，不会主动上传原始文件。
 
+可选的云端同步支持跨设备合并书籍、划线、想法与 AI 对话。「设置 → AI 数据接口」可创建独立 Bearer Token，让 Grok bot 分页只读访问这些已同步内容。接入方法与权限范围见 [AI 数据接口](docs/AI_DATA_API.md)。
+
 ## 已实现功能
 
 - 导入 EPUB、文字型 PDF、TXT 和 Markdown，单个文件上限 50 MB。
