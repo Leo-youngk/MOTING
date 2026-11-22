@@ -231,6 +231,8 @@ export interface AiChatTurn {
   id?: string;
   /** 回答所对应的问题 ID。 */
   replyTo?: string;
+  /** 由「继续回答」生成的续写指令。 */
+  continuation?: boolean;
   role: "user" | "assistant";
   content: string;
   reasoning?: string;

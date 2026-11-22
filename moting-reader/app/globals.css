@@ -2337,6 +2337,14 @@ button:disabled {
   padding: 16px 20px 24px;
 }
 
+.ai-chat__older {
+  align-self: center;
+  min-height: 44px;
+  padding: 0 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
 /* 最新一问连同回答至少占满顶栏以下的一屏，问题才能滚到顶栏下面、回答有地方往下长。
    40px = 滚到位时离顶栏的 16px（LATEST_GAP）+ 对话底部的 24px 内边距。 */
 .ai-chat__latest {

@@ -1,3 +1,4 @@
+import { summarizeChat } from "../lib/chat-rounds.ts";
 import { APP_BUILD } from "../lib/build-info.ts";
 import { KNOWLEDGE_API_PATH } from "../lib/knowledge-api.ts";
 import { MAX_RECORD_BYTES, recordHash, recordObjectKey, storedBlob, utf8Bytes } from "../lib/sync-record.ts";
@@ -86,6 +87,7 @@ function turnInfo(value: unknown, index: number): Json {
   const turn = object(value);
   if (turn.role !== "user" && turn.role !== "assistant" || typeof turn.content !== "string") throw new KnowledgeError("云端对话轮次格式异常", 503, "invalid_record");
   const result: Json = { index, role: turn.role, content: turn.content, incomplete: Boolean(turn.error) };
+  if (turn.continuation === true) result.continuation = true;
   for (const key of ["id", "replyTo", "quote", "model", "reasoning"]) if (typeof turn[key] === "string") result[key] = turn[key];
   return result;
 }
@@ -155,7 +157,7 @@ async function list(request: Request, db: D1Database, bucket: R2Bucket | undefin
     } else {
       const turns = chatTurns(value);
       const bookTitle = text(metas.get(row.book_id)?.title);
-      item = { bookId: row.book_id, bookTitle, updatedAt: row.updated_at, version: row.server_at, turnCount: turns.length,
+      item = { bookId: row.book_id, bookTitle, updatedAt: row.updated_at, version: row.server_at, turnCount: turns.length, roundCount: summarizeChat(turns).rounds,
         detailPath: `${KNOWLEDGE_API_PATH}/chats/${encodeURIComponent(row.book_id)}` };
       matches = !q || bookTitle.toLowerCase().includes(q) || turns.some((value) => {
         const turn = object(value);
@@ -203,7 +205,7 @@ async function chatDetail(request: Request, db: D1Database, bucket: R2Bucket | u
   }
   offset += turns.length;
   return knowledgeJson({ bookId, bookTitle, updatedAt: row.updated_at, version: row.server_at,
-    totalTurns: source.length, turns, nextCursor: offset < source.length ? encodeCursor({ type: "chat", bookId, version: row.server_at, offset }) : null,
+    totalTurns: source.length, roundCount: summarizeChat(source).rounds, turns, nextCursor: offset < source.length ? encodeCursor({ type: "chat", bookId, version: row.server_at, offset }) : null,
     syncedOnly: true });
 }
 

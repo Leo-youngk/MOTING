@@ -1,5 +1,6 @@
 import { KNOWLEDGE_API_PATH } from "../lib/knowledge-api.ts";
 
+const roundCount = { type: "integer", description: "收到正文回答的提问数。重试和续写归入原问题。" };
 const string = { type: "string" };
 const timestamp = { type: "integer", format: "int64", description: "Unix 毫秒" };
 const version = { type: "integer", format: "int64", description: "云端单调版本；不是 Unix 毫秒" };
@@ -22,13 +23,13 @@ export function knowledgeOpenApi(origin: string): object {
         parameter("thoughtsOnly", { type: "boolean" }, "仅返回带想法的笔记"), parameter("kind", { type: "string", enum: ["highlight", "listening-mark"] }, "可选：只读划线或听书标记")], responses: response(page("Note")) } },
       "/chats": { get: { operationId: "listMotingChats", summary: "列出 AI 对话", description: "返回对话目录，通过 detailPath 获取原始提问、回答和引用；关键词检索书名、对话和引用。", parameters: [...paging, ...filters], responses: response(page("ChatSummary")) } },
       "/chats/{bookId}": { get: { operationId: "readMotingChat", summary: "读取一本书的完整对话", description: "按原顺序分页，回答不截断。阅读分页期间版本变化返回 409 conversation_changed，需重新遍历。", parameters: [{ name: "bookId", in: "path", required: true, schema: string }, ...paging],
-        responses: response({ type: "object", properties: { bookId: string, bookTitle: string, updatedAt: timestamp, version, totalTurns: { type: "integer" }, turns: { type: "array", items: ref("Turn") }, nextCursor, syncedOnly: { const: true } }, required: ["bookId", "turns", "totalTurns", "nextCursor"] }) } },
+        responses: response({ type: "object", properties: { bookId: string, bookTitle: string, updatedAt: timestamp, version, roundCount, totalTurns: { type: "integer" }, turns: { type: "array", items: ref("Turn") }, nextCursor, syncedOnly: { const: true } }, required: ["bookId", "turns", "totalTurns", "roundCount", "nextCursor"] }) } },
     },
     components: { securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "moting_ro_…" } }, schemas: {
       Book: { type: "object", properties: { id: string, title: string, author: string, chapterCount: { type: "integer" }, createdAt: { type: ["integer", "null"] }, updatedAt: timestamp, version }, required: ["id", "title", "author"] },
       Note: { type: "object", properties: { id: string, bookId: string, bookTitle: string, chapterId: string, chapterTitle: string, sentenceId: string, kind: { type: "string", enum: ["highlight", "listening-mark"] }, excerpt: string, thought: string, groupId: string, createdAt: { type: ["integer", "null"] }, updatedAt: timestamp, version, start: { type: "integer" }, end: { type: "integer" }, color: string, highlightStyle: string }, required: ["id", "bookId", "excerpt", "thought", "groupId"] },
-      ChatSummary: { type: "object", properties: { bookId: string, bookTitle: string, updatedAt: timestamp, version, turnCount: { type: "integer" }, detailPath: string }, required: ["bookId", "detailPath", "turnCount"] },
-      Turn: { type: "object", properties: { index: { type: "integer" }, id: string, replyTo: string, role: { type: "string", enum: ["user", "assistant"] }, content: string, quote: string, model: string, reasoning: string, incomplete: { type: "boolean" } }, required: ["index", "role", "content", "incomplete"] },
+      ChatSummary: { type: "object", properties: { bookId: string, bookTitle: string, updatedAt: timestamp, version, roundCount, turnCount: { type: "integer" }, detailPath: string }, required: ["bookId", "detailPath", "turnCount", "roundCount"] },
+      Turn: { type: "object", properties: { index: { type: "integer" }, id: string, replyTo: string, role: { type: "string", enum: ["user", "assistant"] }, content: string, quote: string, model: string, reasoning: string, continuation: { type: "boolean" }, incomplete: { type: "boolean" } }, required: ["index", "role", "content", "incomplete"] },
       Error: { type: "object", properties: { error: { type: "object", properties: { code: string, message: string }, required: ["code", "message"] } }, required: ["error"] },
     } },
   };
