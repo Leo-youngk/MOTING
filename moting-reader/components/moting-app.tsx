@@ -117,7 +117,6 @@ import {
   sentenceAtSeconds,
   sentenceSeconds,
 } from "../lib/listen-clock";
-import { springTo } from "../lib/motion";
 import {
   getSyncSession,
   loginSync,
@@ -133,6 +132,7 @@ import {
   clearLibrary,
   getAllBookMetadata,
   getAllBooks,
+  getDisplayBookMeta,
   getAllChats,
   getAllNotes,
   getAllSessions,
@@ -1054,6 +1054,8 @@ function HomeScreen({
 
 function LibraryScreen({
   books,
+  query,
+  setQuery,
   onImport,
   onFind,
   onOpen,
@@ -1063,6 +1065,8 @@ function LibraryScreen({
   onDelete,
 }: {
   books: BookMeta[];
+  query: string;
+  setQuery: (value: string) => void;
   onImport: () => void;
   /** 去在线找书。带上关键词就进去直接搜。 */
   onFind: (query: string) => void;
@@ -1072,7 +1076,6 @@ function LibraryScreen({
   onOpenMetadata: (book: BookMeta) => void;
   onDelete: (book: BookMeta) => void;
 }) {
-  const [query, setQuery] = useState("");
   const [sheetBook, setSheetBook] = useState<BookMeta | null>(null);
   const [showSources, setShowSources] = useState(false);
 
@@ -1417,14 +1420,17 @@ function BookMetadataSheet({
 
 function ListenScreen({
   books,
+  query,
+  setQuery,
   onPlay,
   onOpenPlayer,
 }: {
   books: BookMeta[];
+  query: string;
+  setQuery: (value: string) => void;
   onPlay: (book: BookMeta) => void;
   onOpenPlayer: (book: BookMeta) => void;
 }) {
-  const [query, setQuery] = useState("");
   const started = books
     .filter((book) => book.listeningPosition)
     .sort(
@@ -3686,9 +3692,6 @@ function ReaderScreen({
   const [showReaderMenu, setShowReaderMenu] = useState(false);
   // 沉浸阅读：默认露出浮层控件，点空白处收起，只留正文。
   const [chromeVisible, setChromeVisible] = useState(true);
-  // 分页模式横向翻页的跟手位移：拖拽中实时跟手指、松手后弹簧归零。
-  const [dragX, setDragX] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
   const [popup, setPopup] = useState<ReaderPopupState | null>(null);
   const [thoughtDraft, setThoughtDraft] = useState<{
     note: BookNote;
@@ -4955,26 +4958,57 @@ function ReaderScreen({
     jumpWithin(safe, `[data-chapter-section="${safe}"]`, "start");
   }, [clearTextSelection, goToPage, jumpWithin, onProgress, paged, showLivePosition]);
 
+  // transform 始终表示逻辑页；手指和松手后的短动画只控制额外的 translate。
+  // 两者分开后，不必为了每个触摸采样或动画帧重新渲染正文。
+  const pageAnimation = useRef<Animation | null>(null);
+  const swipeRef = useRef<{ id: number; x: number; y: number; t: number; dragging: boolean; offset: number } | null>(null);
+  const turnedRef = useRef(false);
+
+  const stopPageMotion = useCallback(() => {
+    pageAnimation.current?.cancel();
+    pageAnimation.current = null;
+    articleRef.current?.style.removeProperty("translate");
+  }, []);
+
+  useLayoutEffect(() => () => {
+    swipeRef.current = null;
+    stopPageMotion();
+  }, [paged, chapterIndex, pageStep, stopPageMotion]);
+
   const turnPage = useCallback((delta: number) => {
-    const next = pageIndexRef.current + delta;
-    if (next < 0) {
-      if (chapterIndex > 0) changeChapter(chapterIndex - 1, "last");
+    const article = articleRef.current;
+    const from = pageIndexRef.current;
+    const next = from + delta;
+    const offset = article ? parseFloat(getComputedStyle(article).translate) || 0 : 0;
+    stopPageMotion();
+    if (next < 0 && chapterIndex > 0) {
+      changeChapter(chapterIndex - 1, "last");
       return;
     }
-    if (next >= pageCount) {
-      if (chapterIndex < bookRef.current.chapters.length - 1) changeChapter(chapterIndex + 1);
+    if (next >= pageCount && chapterIndex + 1 < bookRef.current.chapters.length) {
+      changeChapter(chapterIndex + 1);
       return;
     }
-    goToPage(next);
-  }, [chapterIndex, changeChapter, goToPage, pageCount]);
+    const target = Math.max(0, Math.min(pageCount - 1, next));
+    if (target !== from) goToPage(target);
+    // 逻辑页前移一栏，视觉偏移就要补回同一栏，松手这一帧才与上一帧相连。
+    const remaining = offset + (target - from) * pageStep;
+    if (article && remaining && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      pageAnimation.current = article.animate(
+        [{ translate: `${remaining}px` }, { translate: "0px" }],
+        { duration: 240, easing: "cubic-bezier(0.22, 0.75, 0.18, 1)" }
+      );
+    }
+  }, [chapterIndex, changeChapter, goToPage, pageCount, pageStep, stopPageMotion]);
 
   const turnPageRef = useRef(turnPage);
   useEffect(() => {
     turnPageRef.current = turnPage;
   }, [turnPage]);
 
+  const pageKeysBlocked = showReaderMenu || showSettings || showChapters || Boolean(thoughtDraft) || askAiText !== null;
   useEffect(() => {
-    if (!paged) return;
+    if (!paged || pageKeysBlocked) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
@@ -4992,17 +5026,7 @@ function ReaderScreen({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [paged]);
-
-  const swipeRef = useRef<{ x: number; y: number; t: number } | null>(null);
-  const turnedRef = useRef(false);
-  const cancelSpringRef = useRef<(() => void) | null>(null);
-
-  // 拖拽期间的橡皮筋阻尼：位移越大越"粘手"，不分是不是真的翻到头，纯按距离压。
-  const dampPageDrag = (rawDx: number) => {
-    const limit = pageStep > 0 ? pageStep * 3 : 300;
-    return rawDx * (1 - Math.min(0.8, Math.abs(rawDx) / limit));
-  };
+  }, [paged, pageKeysBlocked]);
 
   // 选区可能是拖动系统选择手柄结束的，那一下不落在正文元素上，只能听 document。
   useEffect(() => {
@@ -5045,114 +5069,62 @@ function ReaderScreen({
   }, [popup]);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    swipeRef.current = { x: event.clientX, y: event.clientY, t: performance.now() };
-    cancelSpringRef.current?.();
-    cancelSpringRef.current = null;
     textSelection.viewportHandlers.onPointerDown(event);
+    if (!event.isPrimary || event.button !== 0) return;
+    turnedRef.current = false;
+    if (!paged) return;
+    swipeRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, t: performance.now(), dragging: false, offset: 0 };
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     textSelection.viewportHandlers.onPointerMove(event);
-    if (!paged) return;
-    const start = swipeRef.current;
-    if (!start) return;
-    // 进了选区状态就把跟手让出去：同一次手势不该既拖选区又拖页面。
-    if (textSelection.active || textSelection.dragging) {
-      if (isDragging) {
-        setIsDragging(false);
-        setDragX(0);
-      }
+    const swipe = swipeRef.current;
+    const article = articleRef.current;
+    if (!swipe || swipe.id !== event.pointerId || !article) return;
+    if (textSelection.active || textSelection.dragging || window.getSelection()?.isCollapsed === false) {
+      swipeRef.current = null;
+      stopPageMotion();
       return;
     }
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed) {
-      if (isDragging) {
-        setIsDragging(false);
-        setDragX(0);
-      }
-      return;
+    const dx = event.clientX - swipe.x;
+    if (!swipe.dragging) {
+      if (Math.abs(dx) < 8 || Math.abs(dx) <= Math.abs(event.clientY - swipe.y)) return;
+      swipe.dragging = true;
+      swipe.offset = parseFloat(getComputedStyle(article).translate) || 0;
+      stopPageMotion();
+      setGlossTarget(null);
     }
-    const dx = event.clientX - start.x;
-    const dy = event.clientY - start.y;
-    if (!isDragging) {
-      // 横向位移明显超过纵向、且过了一个小阈值，才判定是翻页手势，
-      // 避免跟纵向滚动、轻点误判打架。
-      if (Math.abs(dx) < 8 || Math.abs(dx) <= Math.abs(dy)) return;
-      setIsDragging(true);
-    }
-    setDragX(dampPageDrag(dx));
+    // 章内让纸页和手指等距，当前章边缘只露出少量留白。
+    const atEdge = dx > 0 ? pageIndexRef.current === 0 : pageIndexRef.current === pageCount - 1;
+    const distance = atEdge ? dx / (3 + Math.abs(dx) / 80) : dx;
+    article.style.translate = `${swipe.offset + distance}px`;
   };
 
   const handlePointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
-    swipeRef.current = null;
     textSelection.viewportHandlers.onPointerCancel(event);
-    if (isDragging) {
-      cancelSpringRef.current?.();
-      cancelSpringRef.current = null;
-      setIsDragging(false);
-      setDragX(0);
-    }
+    if (swipeRef.current?.id !== event.pointerId) return;
+    if (swipeRef.current.dragging) turnPage(0);
+    swipeRef.current = null;
   };
 
   const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const start = swipeRef.current;
-    swipeRef.current = null;
     textSelection.viewportHandlers.onPointerUp(event);
-    // 进了选区状态就先把翻页让出去：同一次手势不该既调选区又翻页。
-    if (textSelection.active || textSelection.dragging) {
-      if (isDragging) {
-        setIsDragging(false);
-        setDragX(0);
-      }
+    const start = swipeRef.current;
+    if (!start || start.id !== event.pointerId) return;
+    swipeRef.current = null;
+    if (textSelection.active || textSelection.dragging || window.getSelection()?.isCollapsed === false) {
+      stopPageMotion();
       return;
     }
-    // 正在划词就别把这一下当成翻页手势。
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed) {
-      if (isDragging) {
-        setIsDragging(false);
-        setDragX(0);
-      }
-      return;
-    }
-    if (!paged || !start) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
-
-    if (isDragging) {
-      // 手指已经在实时跟手了：按位移+速度判定完成翻页还是弹回原位，
-      // 两种情况都交给弹簧把视觉位置遛到 0，CSS transition 这时候必须是关着的
-      // （isDragging 一直保持到弹簧 onDone 才关，避免弹簧的每一帧又被 CSS 过渡二次拖尾）。
-      const elapsed = Math.max(1, performance.now() - start.t);
-      const velocity = (dx / elapsed) * 1000;
-      const step = pageStep || 1;
-      const shouldTurn = Math.abs(dx) > step * 0.35 || Math.abs(velocity) > 500;
-      const settle = () => {
-        cancelSpringRef.current = null;
-        setIsDragging(false);
-      };
-      if (shouldTurn) {
-        turnedRef.current = true;
-        const delta = dx < 0 ? 1 : -1;
-        turnPage(delta);
-        cancelSpringRef.current = springTo(setDragX, {
-          from: dampPageDrag(dx) - delta * step,
-          to: 0,
-          velocity,
-          onDone: settle,
-        });
-      } else {
-        cancelSpringRef.current = springTo(setDragX, {
-          from: dampPageDrag(dx),
-          to: 0,
-          velocity,
-          onDone: settle,
-        });
-      }
+    if (start.dragging) {
+      turnedRef.current = true;
+      const speed = Math.abs(dx) / Math.max(1, performance.now() - start.t);
+      const advance = Math.abs(dx) > pageStep * 0.35 || (Math.abs(dx) >= 16 && speed > 0.5);
+      turnPage(advance ? (dx < 0 ? 1 : -1) : 0);
       return;
     }
-
-    // 没有触发实时跟手（比如很短促的一下）时，退回原来「松手一次性判定」的翻页/点击逻辑。
     if (Math.abs(dx) > 44 && Math.abs(dx) > Math.abs(dy)) {
       turnedRef.current = true;
       turnPage(dx < 0 ? 1 : -1);
@@ -5228,7 +5200,6 @@ function ReaderScreen({
       showReaderMenu ||
       textSelection.active ||
       activePopup ||
-      isDragging ||
       !settings.englishMode)
   ) {
     setGlossTarget(null);
@@ -5272,10 +5243,10 @@ function ReaderScreen({
           ref={articleRef}
           className={`reader-article is-font-${settings.fontFamily} ${
             customSelect ? "is-custom-select" : ""
-          } ${isDragging ? "is-dragging" : ""}`}
+          }`}
           style={
             paged
-              ? { transform: `translateX(${-pageIndex * pageStep + dragX}px)` }
+              ? { transform: `translateX(${-pageIndex * pageStep}px)` }
               : undefined
           }
           onClick={handleArticleClick}
@@ -6337,6 +6308,8 @@ export default function MotingApp() {
   useViewportFill();
   // 书库里只有书目；正文在 contentRef 里，打开哪本读哪本。
   const [books, setBooks] = useState<BookMeta[]>([]);
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [listenQuery, setListenQuery] = useState("");
   const [notes, setNotes] = useState<BookNote[]>([]);
   const [chats, setChats] = useState<BookAiChat[]>([]);
   const chatsRef = useRef(chats);
@@ -6861,17 +6834,20 @@ export default function MotingApp() {
         storedMetadata,
       ]) => {
         if (cancelled) return;
-        await recoverReadingBackups(storedBooks);
-        // 恢复阅读器前先获取进度；网络不通时限时回到本机数据，不阻塞启动。
-        const cold = new AbortController();
-        const coldTimer = window.setTimeout(() => cold.abort(), 2500);
-        try {
-          const session = await getSyncSession(cold.signal);
-          if (session.connected) await runProgressSync({ signal: cold.signal });
-        } catch {
-          if (!cancelled) setSyncMessage("先使用本机进度，联网后同步");
-        } finally { window.clearTimeout(coldTimer); }
-        let metas = await getAllBooks();
+        const recovered = await recoverReadingBackups(storedBooks);
+        // 书架可以先用本机资料显示，由启动后的同步检查补齐。直接回到书内时先对齐跨设备进度。
+        const restoreBook = viewNeedsContent(viewRef.current);
+        if (restoreBook) {
+          const cold = new AbortController();
+          const coldTimer = window.setTimeout(() => cold.abort(), 2500);
+          try {
+            const session = await getSyncSession(cold.signal);
+            if (session.connected) await runProgressSync({ signal: cold.signal });
+          } catch {
+            if (!cancelled) setSyncMessage("先使用本机进度，联网后同步");
+          } finally { window.clearTimeout(coldTimer); }
+        }
+        let metas = recovered || restoreBook ? await getAllBooks() : storedBooks;
         if (!metas.length) {
           const demo = createDemoBook();
           await saveBook(demo);
@@ -7800,26 +7776,29 @@ export default function MotingApp() {
   const withContent = async (bookId: string, refreshProgress = false): Promise<Book | null> => {
     const token = ++openTokenRef.current;
     // 快速退出后紧接着重开，也要先等最后一次本地位置落库。
-    await flushProgressRef.current();
+    try { await flushProgressRef.current(); } catch { return null; }
     if (token !== openTokenRef.current) return null;
-    if (refreshProgress && syncConnectedRef.current) {
-      const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 2500);
-      try {
-        await runProgressSync({ signal: controller.signal, onApplied: scheduleSyncReload });
-      } catch { setSyncMessage("先使用本机进度，联网后同步"); }
-      finally { window.clearTimeout(timer); }
-    }
-    const chapters = await loadContent(bookId);
-    const fresh = await getAllBooks();
+    const readMeta = async () => {
+      if (refreshProgress && (syncConnectedRef.current || !syncSessionKnown)) {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 2500);
+        try {
+          const connected = syncConnectedRef.current || (await getSyncSession(controller.signal)).connected;
+          if (connected) await runProgressSync({ signal: controller.signal, onApplied: scheduleSyncReload });
+        } catch { setSyncMessage("先使用本机进度，联网后同步"); }
+        finally { window.clearTimeout(timer); }
+      }
+      return getDisplayBookMeta(bookId);
+    };
+    const [chapters, meta] = await Promise.all([
+      loadContent(bookId), readMeta().catch(() => undefined),
+    ]);
     if (token !== openTokenRef.current) return null;
-    booksRef.current = fresh;
-    setBooks(fresh);
-    const meta = booksRef.current.find((book) => book.id === bookId);
     if (!chapters || !meta) {
       showToast("这本书的正文读不出来了");
       return null;
     }
+    setBooks((current) => current.map((item) => item.id === bookId ? meta : item));
     return { ...meta, chapters };
   };
 
@@ -7837,10 +7816,10 @@ export default function MotingApp() {
   };
 
   const openPlayer = async (meta: BookMeta, startPlaying = false) => {
-    if (startPlaying) player.preparePlayback();
+    const cancelPreparation = startPlaying ? player.preparePlayback() : undefined;
     const book = await withContent(meta.id, true);
     if (!book) {
-      if (startPlaying) player.stop();
+      cancelPreparation?.();
       return;
     }
     navigate({ name: "player", bookId: book.id });
@@ -8116,6 +8095,8 @@ export default function MotingApp() {
       reportStorageError("save-demo", error);
     }
     commitContents(new Map());
+    setLibraryQuery("");
+    setListenQuery("");
     setBooks([metaOf(demo)]);
     setNotes([]);
     chatsRef.current = [];
@@ -8303,6 +8284,8 @@ export default function MotingApp() {
               />
             ) : frameView === "library" ? (
               <LibraryScreen
+                query={libraryQuery}
+                setQuery={setLibraryQuery}
                 books={books}
                 onImport={() => fileInputRef.current?.click()}
                 onFind={(query) => navigate({ name: "find", query })}
@@ -8314,6 +8297,8 @@ export default function MotingApp() {
               />
             ) : frameView === "listen" ? (
               <ListenScreen
+                query={listenQuery}
+                setQuery={setListenQuery}
                 books={books}
                 onPlay={(book) => openPlayer(book, true)}
                 onOpenPlayer={(book) => openPlayer(book, false)}

@@ -97,6 +97,7 @@ export function useAppNavigation(onChange?: () => void): AppNavigation {
   const [view, setView] = useState<AppView>({ name: "home" });
   const [backgroundView, setBackgroundView] = useState<MainView>("home");
   const viewRef = useRef<AppView>(view);
+  const backgroundRef = useRef<MainView>("home");
   const scrollsRef = useRef(new Map<string, number>());
   /** 本会话自己压进 history 的层数。为 0 时再 back 就退出应用了，得自己兜住。 */
   const depthRef = useRef(0);
@@ -108,12 +109,14 @@ export function useAppNavigation(onChange?: () => void): AppNavigation {
     }
   }, []);
 
-  const apply = useCallback((next: AppView) => {
+  const apply = useCallback((next: AppView, background?: MainView) => {
     onChange?.();
     (document.activeElement as HTMLElement | null)?.blur();
     viewRef.current = next;
     setView(next);
-    if (isTab(next)) setBackgroundView(next.name as MainView);
+    const tab = isTab(next) ? next.name as MainView : background ?? backgroundRef.current;
+    backgroundRef.current = tab;
+    setBackgroundView(tab);
     try {
       window.localStorage.setItem(VIEW_KEY, JSON.stringify(next));
     } catch {
@@ -125,7 +128,7 @@ export function useAppNavigation(onChange?: () => void): AppNavigation {
     (next: AppView) => {
       remember();
       depthRef.current += 1;
-      window.history.pushState({ view: next, depth: depthRef.current }, "");
+      window.history.pushState({ view: next, depth: depthRef.current, tab: backgroundRef.current }, "");
       apply(next);
     },
     [apply, remember]
@@ -134,7 +137,7 @@ export function useAppNavigation(onChange?: () => void): AppNavigation {
   const replace = useCallback(
     (next: AppView) => {
       remember();
-      window.history.replaceState({ view: next, depth: depthRef.current }, "");
+      window.history.replaceState({ view: next, depth: depthRef.current, tab: backgroundRef.current }, "");
       apply(next);
     },
     [apply, remember]
@@ -191,9 +194,9 @@ export function useAppNavigation(onChange?: () => void): AppNavigation {
   useEffect(() => {
     const onPop = (event: PopStateEvent) => {
       remember();
-      const state = event.state as { view?: AppView; depth?: number } | null;
+      const state = event.state as { view?: AppView; depth?: number; tab?: MainView } | null;
       depthRef.current = state?.depth ?? 0;
-      apply(state?.view ?? { name: "home" });
+      apply(state?.view ?? { name: "home" }, state?.tab);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -206,6 +209,14 @@ export function useAppNavigation(onChange?: () => void): AppNavigation {
   // 项目里同类的 mount 同步（use-text-selection 的能力探测）也按这个写法豁免。
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
+    // 刷新时原来的历史条目仍在。重新垫一层会丢掉真正来处，也会让历史每刷新一次就变长。
+    const current = window.history.state;
+    if (current?.view?.name && Number.isInteger(current.depth) && current.depth >= 0) {
+      depthRef.current = current.depth;
+      const parent = parentOf(current.view);
+      apply(current.view, TAB_VIEWS.has(current.tab) ? current.tab : isTab(parent) ? parent.name as MainView : "home");
+      return;
+    }
     const saved = readSaved();
     if (!saved) {
       window.history.replaceState({ view: { name: "home" }, depth: 0 }, "");
@@ -217,11 +228,11 @@ export function useAppNavigation(onChange?: () => void): AppNavigation {
       return;
     }
     const parent = parentOf(saved);
-    setBackgroundView(isTab(parent) ? (parent.name as MainView) : "home");
+    const tab = isTab(parent) ? parent.name as MainView : "home";
     window.history.replaceState({ view: parent, depth: 0 }, "");
     depthRef.current = 1;
-    window.history.pushState({ view: saved, depth: 1 }, "");
-    apply(saved);
+    window.history.pushState({ view: saved, depth: 1, tab }, "");
+    apply(saved, tab);
   }, [apply]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
