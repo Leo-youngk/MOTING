@@ -66,6 +66,7 @@ import { useKeyboardInset } from "../hooks/use-keyboard-inset";
 import { useViewportFill } from "../hooks/use-viewport-fill";
 import { useSpeechPlayer, type SleepMode } from "../hooks/use-speech-player";
 import { AiRequestError, streamAiChat } from "../lib/ai";
+import { CONTINUE_ANSWER, summarizeChat } from "../lib/chat-rounds";
 import { bookAiMessages } from "../lib/ai-context";
 import { fallbackAiProvider } from "../lib/ai-providers";
 import {
@@ -1718,6 +1719,7 @@ function NotesScreen({
         .filter((chat) => chat.turns.length)
         .map((chat) => ({ chat, book: books.find((b) => b.id === chat.bookId) }))
         .filter((entry): entry is { chat: BookAiChat; book: BookMeta } => Boolean(entry.book))
+        .map((entry) => ({ ...entry, ...summarizeChat(entry.chat.turns) }))
         .sort((a, b) => b.chat.updatedAt - a.chat.updatedAt),
     [chats, books]
   );
@@ -1727,10 +1729,7 @@ function NotesScreen({
   const visibleShelves = shelves.filter(({ book }) => matches(book));
   const visibleChats = chatShelves.filter(({ book }) => matches(book));
   const totalNotes = shelves.reduce((sum, entry) => sum + entry.count, 0);
-  const totalRounds = chatShelves.reduce(
-    (sum, { chat }) => sum + chat.turns.filter((turn) => turn.role === "user").length,
-    0
-  );
+  const totalRounds = chatShelves.reduce((sum, entry) => sum + entry.rounds, 0);
 
   if (!shelves.length && !chatShelves.length) {
     return (
@@ -1799,11 +1798,7 @@ function NotesScreen({
           <p className="no-results">没有找到匹配的书籍。</p>
         ) : (
           <div className="card-list">
-            {visibleChats.map(({ book, chat }) => {
-              // 列表里露最近问的那一句：回答是 Markdown，截一段下来全是星号和井号。
-              const asked = chat.turns.filter((turn) => turn.role === "user");
-              const last = asked[asked.length - 1];
-              const rounds = asked.length;
+            {visibleChats.map(({ book, chat, rounds, lastQuestion }) => {
               return (
                 <button
                   type="button"
@@ -1815,7 +1810,7 @@ function NotesScreen({
                     <BookCover book={book} size="small" />
                     <span>
                       <strong>{displayTitle(book.title)}</strong>
-                      <small>{last?.content.slice(0, 30) || book.author}</small>
+                      <small>{lastQuestion.slice(0, 30) || book.author}</small>
                       <em>{rounds} 轮对话</em>
                     </span>
                   </span>
@@ -2812,6 +2807,10 @@ function fallbackMark(answeredBy: string, settings: ReaderSettings): Pick<AiChat
   return answeredBy && answeredBy !== settings.aiModel ? { model: answeredBy } : {};
 }
 
+const EMPTY_CHAT_TURNS: AiChatTurn[] = [];
+const INITIAL_CHAT_MESSAGES = 8;
+const OLDER_CHAT_MESSAGES = 16;
+
 /** 划词后「问 AI」，多轮聊天面板；模型设置默认收起，把注意力留给原文和对话。 */
 function AiAskPanel({
   text,
@@ -2835,7 +2834,7 @@ function AiAskPanel({
   const configured = Boolean(settings.aiBaseUrl && settings.aiModel);
   const [localTurns, setTurns] = useState<AiChatTurn[]>(initialTurns);
   const turns = useMemo(
-    () => mergeChatTurns(localTurns, initialTurns),
+    () => localTurns === initialTurns ? initialTurns : mergeChatTurns(localTurns, initialTurns),
     [localTurns, initialTurns]
   );
   const [question, setQuestion] = useState("");
@@ -2846,6 +2845,12 @@ function AiAskPanel({
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   // 这次打开后发出的最新一问（turns 下标）。它连同回答至少占一屏，问题才能停在顶栏下面。
   const [pinned, setPinned] = useState<number | null>(null);
+  const [visibleCount, setVisibleCount] = useState(INITIAL_CHAT_MESSAGES);
+  const windowStart = Math.max(0, turns.length - visibleCount);
+  const firstVisible = windowStart > 0 && turns[windowStart]?.role === "assistant" &&
+    turns[windowStart - 1]?.role === "user" ? windowStart - 1 : windowStart;
+  const previousAnchor = useRef<{ element: Element; top: number } | null>(null);
+  const followOpeningEnd = useRef(true);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
@@ -2856,7 +2861,7 @@ function AiAskPanel({
   const atBottomRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const streamTextRef = useRef({ content: "", reasoning: "" });
-  const streamingTurnRef = useRef<{ id: string; replyTo?: string }>({ id: "" });
+  const [liveText, setLiveText] = useState({ content: "", reasoning: "" });
   const [activeAnswerId, setActiveAnswerId] = useState("");
   const streamFrameRef = useRef<number | null>(null);
 
@@ -2890,6 +2895,22 @@ function AiAskPanel({
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }, []);
 
+  const showOlder = () => {
+    followOpeningEnd.current = false;
+    const element = threadRef.current?.querySelector("[data-chat-turn]");
+    if (element) previousAnchor.current = { element, top: element.getBoundingClientRect().top };
+    setVisibleCount((count) => count + OLDER_CHAT_MESSAGES);
+  };
+
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    const anchor = previousAnchor.current;
+    if (scroller && anchor?.element.isConnected) {
+      scroller.scrollTop += anchor.element.getBoundingClientRect().top - anchor.top;
+    }
+    previousAnchor.current = null;
+  }, [visibleCount]);
+
   // 消息区变矮（键盘弹起、输入框长高）时，原来停在底部的继续停在底部。
   // 内容长高则不跟着滚：回答在问题下面往下长，读到哪由人自己决定。
   useEffect(() => {
@@ -2899,6 +2920,7 @@ function AiAskPanel({
     let height = scroller.clientHeight;
     const observer = new ResizeObserver(() => {
       scroller.style.setProperty("--chat-viewport", `${scroller.clientHeight}px`);
+      if (followOpeningEnd.current) scroller.scrollTop = scroller.scrollHeight;
       if (scroller.clientHeight !== height) {
         height = scroller.clientHeight;
         if (atBottomRef.current) scroller.scrollTop = scroller.scrollHeight;
@@ -2955,25 +2977,22 @@ function AiAskPanel({
     if (streamFrameRef.current !== null) return;
     streamFrameRef.current = window.requestAnimationFrame(() => {
       streamFrameRef.current = null;
-      const { content, reasoning } = streamTextRef.current;
-      const { id, replyTo } = streamingTurnRef.current;
-      setTurns((prev) => {
-        if (!prev.length) return prev;
-        const next = [...prev];
-        next[next.length - 1] = { id, replyTo, role: "assistant", content, reasoning };
-        return next;
-      });
+      setLiveText(streamTextRef.current);
     });
   }, []);
 
   // 找最近一次「带了新片段」的用户提问，用来判断眼下这段是不是已经问过。
   // text === "" 是从历史入口直接打开、没有选中文字的情况，不算新片段。
-  const lastQuote = [...turns].reverse().find((t) => t.role === "user" && t.quote)?.quote;
+  const lastQuote = useMemo(() => {
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (turns[i].role === "user" && turns[i].quote) return turns[i].quote;
+    }
+  }, [turns]);
   const isFreshQuote = text !== "" && lastQuote !== text;
   const canSend = configured && !busy && (question.trim().length > 0 || isFreshQuote);
 
   /** preset 是点起手提问进来的，不走输入框，所以不能拿 canSend 拦。 */
-  const ask = (preset?: string) => {
+  const ask = (preset?: string, continuation = false) => {
     if (busy || !configured) return;
     const userText =
       (preset ?? question).trim() || (isFreshQuote ? "帮我讲讲这段话" : "");
@@ -2982,7 +3001,7 @@ function AiAskPanel({
       id: makeId("turn"),
       role: "user",
       content: userText,
-      ...(isFreshQuote ? { quote: text } : {}),
+      ...(continuation ? { continuation: true } : isFreshQuote ? { quote: text } : {}),
     };
     // 之前没答上来的空回答不留：界面上本来就不显示，发给模型的历史里也不该有。
     const history: AiChatTurn[] = [...turns.filter(isAnsweredTurn), userTurn];
@@ -3001,7 +3020,8 @@ function AiAskPanel({
   const run = async (history: AiChatTurn[]) => {
     const assistantId = makeId("turn");
     const replyTo = history.at(-1)?.id;
-    streamingTurnRef.current = { id: assistantId, replyTo };
+    followOpeningEnd.current = false;
+    setLiveText({ content: "", reasoning: "" });
     setActiveAnswerId(assistantId);
     setTurns([...history, { id: assistantId, replyTo, role: "assistant", content: "", reasoning: "" }]);
     setBusy(true);
@@ -3055,10 +3075,12 @@ function AiAskPanel({
     }
   };
 
-  const renderTurn = (turn: AiChatTurn, index: number) => {
+  const renderTurn = (stored: AiChatTurn, index: number) => {
+    const streaming = busy && stored.id === activeAnswerId;
+    const turn = streaming ? { ...stored, ...liveText } : stored;
     if (turn.role === "user") {
       return (
-        <div className="ai-ask__turn-user" key={turn.id ?? index}>
+        <div className="ai-ask__turn-user" data-chat-turn key={turn.id ?? index}>
           <div className="ai-ask__bubble">
             {turn.quote ? <blockquote className="ai-ask__quote-sent">{turn.quote}</blockquote> : null}
             <p className="ai-ask__question">{turn.content}</p>
@@ -3066,11 +3088,10 @@ function AiAskPanel({
         </div>
       );
     }
-    const streaming = busy && turn.id === activeAnswerId;
     const failure = turn.error || (turn.id === activeAnswerId ? error : "");
     const reasoningOpen = openReasoning.has(index);
     return (
-      <div className="ai-ask__turn-assistant" key={turn.id ?? index}>
+      <div className="ai-ask__turn-assistant" data-chat-turn key={turn.id ?? index}>
         {turn.reasoning ? (
           <div className={`ai-ask__reasoning${reasoningOpen ? " is-open" : ""}`}>
             <button
@@ -3118,7 +3139,7 @@ function AiAskPanel({
             <p className="ai-ask__error">{failure}</p>
             {index === turns.length - 1 ? (
               <button type="button" className="ai-ask__retry" disabled={busy}
-                onClick={() => turn.content ? ask("请从中断处继续完成回答，不要重复已经给出的内容。") : retry()}>
+                onClick={() => turn.content ? ask(CONTINUE_ANSWER, true) : retry()}>
                 <RefreshCw size={14} />
                 {turn.content ? "继续回答" : "重试"}
               </button>
@@ -3153,6 +3174,9 @@ function AiAskPanel({
       <div
         className="ai-chat__scroll"
         ref={scrollRef}
+        onPointerDown={() => { followOpeningEnd.current = false; }}
+        onWheel={() => { followOpeningEnd.current = false; }}
+        onKeyDown={() => { followOpeningEnd.current = false; }}
         onScroll={(event) => {
           const scroller = event.currentTarget;
           atBottomRef.current =
@@ -3174,10 +3198,13 @@ function AiAskPanel({
             </div>
           ) : null}
 
-          {turns.slice(0, pinned ?? turns.length).map(renderTurn)}
+          {firstVisible > 0 ? (
+            <button type="button" className="ai-chat__older" onClick={showOlder}>查看更早的对话</button>
+          ) : null}
+          {turns.slice(firstVisible, pinned ?? turns.length).map((turn, i) => renderTurn(turn, firstVisible + i))}
           {pinned !== null ? (
             <div className="ai-chat__latest" ref={latestRef}>
-              {turns.slice(pinned).map((turn, offset) => renderTurn(turn, pinned + offset))}
+              {turns.slice(Math.max(firstVisible, pinned)).map((turn, i) => renderTurn(turn, Math.max(firstVisible, pinned) + i))}
               <div ref={endRef} />
             </div>
           ) : (
@@ -8168,7 +8195,7 @@ export default function MotingApp() {
               ? player.toggle
               : undefined
           }
-          chatTurns={selectedBookChat?.turns ?? []}
+          chatTurns={selectedBookChat?.turns ?? EMPTY_CHAT_TURNS}
           onChatChange={(turns) => updateChat(selectedBook.id, turns)}
           onBack={() => goBack({ name: "library" })}
           onProgress={(position) => handleReadProgress(selectedBook, position)}
@@ -8462,7 +8489,7 @@ export default function MotingApp() {
       {chatBook ? (
         <AiAskPanel
           text=""
-          initialTurns={chats.find((c) => c.bookId === chatBook.id)?.turns ?? []}
+          initialTurns={chats.find((c) => c.bookId === chatBook.id)?.turns ?? EMPTY_CHAT_TURNS}
           onTurnsChange={(turns) => updateChat(chatBook.id, turns)}
           book={chatBook}
           loadBook={async () => {

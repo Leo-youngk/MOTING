@@ -24,7 +24,7 @@
 
 列表返回 `{ data, nextCursor, syncVersion, syncedOnly: true }`。每页最多扫描 `limit` 条候选记录和约 8 MB；过滤后可能是空页。**只要 `nextCursor` 不是 null 就继续请求**，保留原筛选参数。遍历期间固定云端上界；之后的新修改在下一轮遍历可见。`syncVersion`/记录 `version` 是云端单调版本，不是毫秒时间。
 
-对话详情返回 `{ bookId, bookTitle, updatedAt, version, totalTurns, turns, nextCursor, syncedOnly: true }`，支持 `limit` 和 `cursor`。每页最多 100 条轮次，保留全文，不截断回答。对话在遍历期间更新时返回 `409 conversation_changed`，重新从第一页读取。`turns[].index` 是原对话顺序；`incomplete: true` 表示这条回答保存时未完成。
+对话详情返回 `{ bookId, bookTitle, updatedAt, version, roundCount, totalTurns, turns, nextCursor, syncedOnly: true }`，支持 `limit` 和 `cursor`。列表和详情的 `roundCount` 表示已有正文回答的提问数，重试和续写归入原问题。列表的 `turnCount` 和详情的 `totalTurns` 都是消息条数。每页最多 100 条消息，保留全文，不截断回答。对话在遍历期间更新时返回 `409 conversation_changed`，重新从第一页读取。`turns[].index` 是原对话顺序；`incomplete: true` 表示这条回答保存时未完成。
 
 一次跨句划线可能有多个分段。完整摘录按 `bookId`、`groupId` 聚合；各段含 `sentenceId` 与可选的 `start`/`end`。同组的 `thought` 可能重复，合并时去重。书目查询返回章节数量，笔记自身带章节名。
 

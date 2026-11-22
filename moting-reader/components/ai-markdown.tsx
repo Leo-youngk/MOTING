@@ -25,7 +25,7 @@ const Block = memo(function Block({ text }: { text: string }) {
  * streaming：回答还在往外出字。最后一块先用 remend 把没写完的 `**`、`` ` ``、链接补齐，
  * 不然半截的加粗先露出星号、等配对的那个到了又突然变粗，一闪一闪。
  */
-export function AiMarkdown({ content, streaming = false }: { content: string; streaming?: boolean }) {
+export const AiMarkdown = memo(function AiMarkdown({ content, streaming = false }: { content: string; streaming?: boolean }) {
   const blocks = markdownBlocks(content);
   return blocks.map((block, index) => (
     <Block
@@ -33,4 +33,4 @@ export function AiMarkdown({ content, streaming = false }: { content: string; st
       text={streaming && index === blocks.length - 1 ? remend(block, { linkMode: "text-only" }) : block}
     />
   ));
-}
+});
