@@ -80,7 +80,7 @@ interface SpeechPlayerState {
   /** 切换失败的原因。原音色会继续播，用户可以重试。 */
   voiceError: string;
   /** 在点击事件里先激活媒体元素，再异步读取正文。 */
-  preparePlayback: () => void;
+  preparePlayback: () => (() => void) | undefined;
   start: (bookId: string, position?: BookPosition) => void;
   toggle: () => void;
   stop: () => void;
@@ -502,10 +502,13 @@ export function useSpeechPlayer({
     audio.load();
   }, []);
 
+  const preparationRef = useRef(0);
   const preparePlayback = useCallback(() => {
+    const preparation = ++preparationRef.current;
+    const token = tokenRef.current;
     const audio = reusableAudio(audioRef);
     audioRef.current = audio;
-    if (playingRef.current && !audio.paused) return;
+    if (playingRef.current) return;
     audio.onended = null;
     audio.onpause = null;
     audio.onplay = null;
@@ -522,7 +525,14 @@ export function useSpeechPlayer({
     releaseClip();
     // 这次调用只在点击事件中激活同一个元素；真正音频的播放结果由播放器处理。
     void audio.play().catch(() => undefined);
-  }, [releaseClip]);
+    // 旧的开书操作可能在新书已经开播后才返回，只能撤销自己激活的静音占位。
+    return () => {
+      if (preparation !== preparationRef.current || token !== tokenRef.current ||
+          playingRef.current || audio.src !== silentClipUrl()) return;
+      waitingForClipRef.current = false;
+      silenceAudio();
+    };
+  }, [releaseClip, silenceAudio]);
 
   /** 目录里这一章（续页并进来）的时长表，锁屏进度条和「拖到第几秒」共用。 */
   const listenFor = useCallback((book: Book, chapterIndex: number): ListenChapter => {

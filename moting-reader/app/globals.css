@@ -3643,14 +3643,8 @@ html[data-keyboard-open] .mini-player {
     calc(var(--safe-bottom) + 52px);
   column-fill: auto;
   column-gap: 48px;
-  transition: transform 260ms cubic-bezier(0.32, 0.72, 0, 1);
+  transition-property: none;
   will-change: transform;
-}
-
-/* 手指实时跟手和松手后的弹簧结算都是逐帧 JS 改 transform，这段时间必须关掉
-   CSS 过渡，否则每一帧都会被 260ms 缓动再拖尾一次，手感会发糊。 */
-.reader-shell.is-paged .reader-article.is-dragging {
-  transition: none;
 }
 
 .reader-shell.is-paged .reader-title {
@@ -4514,8 +4508,12 @@ html[data-keyboard-open] .mini-player {
   transition: opacity var(--sheet-exit) ease;
 }
 
+/* 退场时仍挡住底下的按键，连续点关闭不能顺便打开下一层。 */
 .modal-backdrop.is-closing {
   opacity: 0;
+}
+
+.modal-backdrop.is-closing .modal-sheet {
   pointer-events: none;
 }
 

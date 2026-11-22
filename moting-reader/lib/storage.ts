@@ -279,8 +279,8 @@ function rememberReadingBackup(bookId: string, data: string): void {
   catch { /* IndexedDB 已保存，localStorage 不可用时仍可恢复。 */ }
 }
 
-export async function recoverReadingBackups(books: BookMeta[]): Promise<void> {
-  if (typeof window === "undefined") return;
+export async function recoverReadingBackups(books: BookMeta[]): Promise<boolean> {
+  if (typeof window === "undefined") return false;
   const entries: ReadingPositionEntry[] = [];
   for (const book of books) {
     try {
@@ -292,7 +292,8 @@ export async function recoverReadingBackups(books: BookMeta[]): Promise<void> {
       entries.push({ bookId: book.id, position, savedAt: position.updatedAt, lastOpenedAt: position.updatedAt });
     } catch { /* 单条损坏的兜底不影响书库。 */ }
   }
-  await saveReadingPositions(entries, { bootstrap: true });
+  const recovered = await saveReadingPositions(entries, { bootstrap: true });
+  return recovered.length > 0;
 }
 
 function queueProgress(
@@ -524,24 +525,30 @@ export async function getAllBooks(): Promise<BookMeta[]> {
     patches.filter((entry): entry is [string, BookMetadataPatch] => Boolean(entry[1] && typeof entry[1] === "object"))
   );
   return metas
-    .map((meta) => {
-      const record = positionById.get(meta.id);
-      // 阅读进度有自己的保存时钟。书目 updatedAt 还会因资料、听书状态等变化而更新，
-      // 不能拿它和 reading-position 的 savedAt 比，否则无关的书目写入会让旧位置复活。
-      const storedPositionAt = record
-        ? Math.max(record.savedAt, record.position.updatedAt ?? 0)
-        : 0;
-      const legacyPositionAt = meta.readingPosition?.updatedAt ?? 0;
-      const merged = record && storedPositionAt >= legacyPositionAt
-        ? {
-            ...meta,
-            readingPosition: record.position,
-            lastOpenedAt: Math.max(meta.lastOpenedAt, record.lastOpenedAt),
-          }
-        : meta;
-      return applyBookMetadata(merged, patchById.get(meta.id));
-    })
+    .map((meta) => displayBookMeta(meta, positionById.get(meta.id), patchById.get(meta.id)))
     .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
+}
+
+function displayBookMeta(meta: BookMeta, record?: StoredReadingPosition, patch?: BookMetadataPatch): BookMeta {
+  // 书目本身的更新时间也会因封面或听书而改变，阅读位置必须比较自己的时钟。
+  const legacyClock = meta.readingPosition?.updatedAt ?? 0;
+  const useRecord = record && Math.max(record.savedAt, record.position.updatedAt ?? 0) >= legacyClock;
+  return applyBookMetadata(useRecord
+    ? { ...meta, readingPosition: record.position, lastOpenedAt: Math.max(meta.lastOpenedAt, record.lastOpenedAt) }
+    : meta, patch);
+}
+
+/** 打开一本书只读取它自己的书目、进度和封面补丁。 */
+export async function getDisplayBookMeta(bookId: string): Promise<BookMeta | undefined> {
+  const db = await openDatabase();
+  const tx = db.transaction([BOOK_STORE, SETTINGS_STORE], "readonly");
+  const settings = tx.objectStore(SETTINGS_STORE);
+  const [meta, position, patch] = await Promise.all([
+    requestToPromise(tx.objectStore(BOOK_STORE).get(bookId) as IDBRequest<BookMeta | undefined>),
+    requestToPromise(settings.get(readingPositionKey(bookId))),
+    requestToPromise(settings.get(bookMetadataKey(bookId)) as IDBRequest<BookMetadataPatch | undefined>),
+  ]);
+  return meta && displayBookMeta(meta, validPosition(position) ? position : undefined, patch);
 }
 
 /**

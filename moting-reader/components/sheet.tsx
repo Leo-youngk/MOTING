@@ -213,7 +213,7 @@ function useSheetDrag(onClose: () => void) {
   const [dragging, setDragging] = useState(false);
 
   const onPointerDown = useCallback((event: ReactPointerEvent) => {
-    if (!event.isPrimary || startRef.current) return;
+    if (!event.isPrimary || event.button !== 0 || startRef.current) return;
     startRef.current = { id: event.pointerId, y: event.clientY };
     setDragging(true);
     try {
@@ -242,13 +242,19 @@ function useSheetDrag(onClose: () => void) {
       if (travelled > SHEET_DISMISS_PX) onClose();
       else setOffset(0);
     };
+    const onCancel = (event: PointerEvent) => {
+      if (startRef.current?.id !== event.pointerId) return;
+      startRef.current = null;
+      setDragging(false);
+      setOffset(0);
+    };
     document.addEventListener("pointermove", onMove, { passive: false });
     document.addEventListener("pointerup", onUp);
-    document.addEventListener("pointercancel", onUp);
+    document.addEventListener("pointercancel", onCancel);
     return () => {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
-      document.removeEventListener("pointercancel", onUp);
+      document.removeEventListener("pointercancel", onCancel);
     };
   }, [dragging, onClose]);
 
