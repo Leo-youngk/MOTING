@@ -1,5 +1,8 @@
 @import "tailwindcss";
-@import "./fonts.css";
+
+/* 宋体（Noto Serif SC）的 200 条 @font-face 有 203KB / 61KB gz，而外壳界面一律黑体、
+   根本用不到它。它现在挂在 /fonts.css 上由 layout 异步加载：进首屏的样式只留外壳，
+   正文用到时才补上字形。 */
 
 /* 外壳这一层是「云朵软白」：几乎纯白的底 + 纯白大圆角卡片 + 柔和的大范围落影，
    卡片靠落影浮起来，不靠底色压灰。文字用墨蓝，强调色取图标小熊的腮红粉。
@@ -209,6 +212,14 @@ html {
   background: var(--paper);
   color-scheme: light;
   overscroll-behavior-y: none;
+  /* 页面整体不允许左右滑动：只要有一个超宽的子元素（长书名、长链接、一条没断行的英文），
+     iOS 就会把整页拿去做橡皮筋横拖。用 clip 而不是 hidden——hidden 会把另一轴一起
+     变成滚动容器，clip 只裁这一轴，纵向滚动不受影响。 */
+  overflow-x: clip;
+  /* iOS 横屏会自动把正文字号放大一档。阅读页每屏排多少字是脚本按实际宽度算的，
+     被系统偷偷放大就会把最后半行挤到下一屏。锁成 100%，缩放交给应用自己的字号设置。 */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 /* 阅读配色挂在 <html> 上而不是 .reader-shell 上：PWA 全屏时 iOS 拿根元素的底色
@@ -380,6 +391,13 @@ input,
 select {
   color: inherit;
   font: inherit;
+}
+
+/* 不给按钮留双击缩放的等待时间，点下去就是点下去。 */
+button,
+[role="button"],
+a {
+  touch-action: manipulation;
 }
 
 button {

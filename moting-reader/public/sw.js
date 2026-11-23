@@ -5,7 +5,7 @@
 // Workers 每次发版只留新版文件，缓存里的旧页面要是缺了自己那一版的脚本，就再也跑不起来。
 //
 // 图标、manifest 这些文件名不带内容哈希，改了它们要顺手把版本号加一，否则已装的 PWA 永远拿旧的。
-const CACHE_NAME = "moting-shell-v22";
+const CACHE_NAME = "moting-shell-v23";
 const SHELL_FILES = [
   "/manifest.webmanifest",
   "/icon-192.png",
@@ -13,6 +13,8 @@ const SHELL_FILES = [
   "/icon-maskable-512.png",
   "/apple-touch-icon.png",
   "/bear-mark.png",
+  // 宋体子集不在首屏样式里，离线阅读时得单独备一份。
+  "/fonts.css",
 ];
 /** 记着缓存里那份页面用到了哪些 /assets/ 文件，用来提示当前页面有可用更新。 */
 const ASSET_LIST_KEY = "/__shell-assets.json";

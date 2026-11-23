@@ -52,6 +52,24 @@ test("production manifest includes every hashed asset, including lazy chunks", a
   assert.deepEqual(manifest.assets, expected);
 });
 
+// 宋体子集（/fonts.css，200 条 @font-face）曾经被 globals.css 直接 @import 进首屏样式，
+// 每次冷启动都要背着 62KB gz 的字体声明——而外壳界面一律黑体，根本用不到。
+// 拆出去之后没人注意就可能被重新 @import 回去，这里把它钉住。
+test("首屏样式里没有宋体 @font-face，它们只在 /fonts.css 里", async () => {
+  const { readdir } = await import("node:fs/promises");
+  const assetsRoot = new URL("dist/client/assets/", root);
+  const files = (await readdir(assetsRoot)).filter((name) => name.endsWith(".css"));
+  assert.ok(files.length > 0);
+  for (const name of files) {
+    const css = await readFile(new URL(name, assetsRoot), "utf8");
+    // 只数 @font-face：字体名还会出现在 --font-serif 的 fallback 链里，那不算。
+    assert.equal((css.match(/@font-face/g) || []).length, 0, `${name} 不该带 @font-face`);
+  }
+  const fonts = await readFile(new URL("dist/client/fonts.css", root), "utf8");
+  assert.match(fonts, /Noto Serif SC/);
+  assert.match(fonts, /font-display: swap/);
+});
+
 // use-app-navigation 换掉 window.__VINEXT_RSC_NAVIGATE__，让应用自己的后退不去服务器取 RSC
 // （取不到就整页重载，读完书返回书库会白屏重开）。前提是 vinext 在 popstate 发生时才读这个入口；
 // 升级 vinext 后这里不过，说明那一招失效了，返回书库又会去拉 RSC。

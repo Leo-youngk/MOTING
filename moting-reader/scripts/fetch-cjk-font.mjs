@@ -1,5 +1,5 @@
 /**
- * 把 Noto Serif SC 的 woff2 分片抓到 public/fonts/ 并生成本地 @font-face。
+ * 把 Noto Serif SC 的 woff2 分片抓到 public/fonts/ 并生成本地 @font-face（public/fonts.css）。
  * Google 已经按字频把字体切成上百个 unicode-range 片段，浏览器只会下正文用到的那几片，
  * 所以仓库里体积大，实际传输很小。字体是 SIL OFL 1.1。
  */
@@ -65,7 +65,7 @@ for (const { label, body } of faces) {
 }
 
 await writeFile(
-  new URL("../app/fonts.css", import.meta.url),
+  new URL("../public/fonts.css", import.meta.url),
   `/* 由 scripts/fetch-cjk-font.mjs 生成，不要手改。Noto Serif SC，SIL OFL 1.1。 */\n\n${blocks.join(
     "\n\n"
   )}\n`
