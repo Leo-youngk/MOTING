@@ -144,6 +144,21 @@ function aiError(message: string, status: number): Response {
   );
 }
 
+/**
+ * 跨站请求的拦截。
+ *
+ * `/api/tts` 合成用的是本站的微软朗读额度，`/api/ai/*` 是代用户转发到服务商的出口。
+ * 两者都没鉴权（单用户应用，只想给自己用），所以至少要拦住别处网页发起的跨站调用——
+ * 否则任何人写一句 fetch 就能拿这个部署白刷合成额度，把人刷到被上游限流。
+ *
+ * 只认浏览器自报的 `Sec-Fetch-Site`：老 WebKit 不发这个头，缺省当同源放行；
+ * 发了且不是 same-origin / none 才拒。不是安全边界，但足够挡掉顺手白嫆。
+ */
+function crossSiteRequest(request: Request): boolean {
+  const site = request.headers.get("sec-fetch-site");
+  return site !== null && site !== "same-origin" && site !== "none";
+}
+
 /** 用户填的接口地址，转发前只做最基本的校验：必须是 https，防止拿这个转发口子当开放代理打内网/奇怪协议。 */
 function normalizeAiBaseUrl(raw: unknown): string | null {
   if (typeof raw !== "string" || !raw.trim() || raw.length > 2048) return null;
@@ -151,6 +166,9 @@ function normalizeAiBaseUrl(raw: unknown): string | null {
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== "https:") return null;
+    // 地址里的 IPv6 字面量（含 [::1]、[::ffff:7f00:1]、[::]）一律不受理。
+    // 这是唯一还能绕过下面那些 IPv4 前缀判断的写法，而 AI 服务商的地址从来都是域名。
+    if (parsed.hostname.startsWith("[")) return null;
     const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
     const blockedHost =
       host === "localhost" ||
@@ -173,6 +191,7 @@ function normalizeAiBaseUrl(raw: unknown): string | null {
  *  不落盘，密钥只在这一次请求里过一下手；日志只记模型名和状态码，不记密钥和对话内容。 */
 async function handleAiModels(request: Request): Promise<Response> {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+  if (crossSiteRequest(request)) return aiError("不接受跨站请求", 403);
 
   let payload: Record<string, unknown>;
   try {
@@ -223,6 +242,7 @@ async function handleAiModels(request: Request): Promise<Response> {
 
 async function handleAiChat(request: Request): Promise<Response> {
   if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+  if (crossSiteRequest(request)) return aiError("不接受跨站请求", 403);
 
   let payload: Record<string, unknown>;
   try {
@@ -353,6 +373,9 @@ async function handleSpeech(
 ): Promise<Response> {
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
+  }
+  if (crossSiteRequest(request)) {
+    return Response.json({ error: "不接受跨站请求" }, { status: 403 });
   }
 
   let payload: Record<string, unknown>;
