@@ -1,9 +1,9 @@
-精准的最小门槛：类型、静态检查和单测。构建与发布验证留在本地，
-因为 `npm test` 会先跑一次完整 build，推一次要等好几分钟。
-
-ffmpeg 是 HLS 用例的测试音频来源（`tests/fixture-audio.ts`）。装上一方面让这些
-用例真的跑起来，一方面让下面那条断言把它钉住——哪天镜像变化导致 ffmpeg 没了，
-用例会静默变成 skip，那就是假的绿。
+# 最小门槛：类型、静态检查、构建、单测。
+# 不跑 deploy:dry-run：那要再多等一轮 wrangler，这套是给每次推送用的。
+#
+# ffmpeg 是 HLS 用例的测试音频来源（tests/fixture-audio.ts）。装它有两个作用：
+# 让需要真实 MP3 的用例真的跑起来，并且让 `ffmpeg -version` 这一步成为硬门槛——
+# 哪天镜像变了、ffmpeg 没了，用例会静默变成 skip，这里要当场红，不能是假的绿。
 name: CI
 
 on:
