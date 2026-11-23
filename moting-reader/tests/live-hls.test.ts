@@ -5,11 +5,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleLiveHls, processLiveHlsJob } from "../worker/live-hls.ts";
+import { fixtureAudio, MISSING_FFMPEG } from "./fixture-audio.ts";
 
-const audio = new Uint8Array(execFileSync("ffmpeg", [
-  "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-  "-ar", "24000", "-ac", "1", "-b:a", "48k", "-f", "mp3", "pipe:1",
-]));
+const audio = fixtureAudio();
+const audioBytes = audio ?? new Uint8Array();
+const skipAudio = audio ? false : MISSING_FFMPEG;
 
 function fixture() {
   const objects = new Map<string, Uint8Array>();
@@ -38,13 +38,13 @@ function fixture() {
   return { bucket, queue, jobs, run };
 }
 
-test("independent Queue creates a growing EVENT playlist with valid packed MP3 and completed manifest", async () => {
+test("independent Queue creates a growing EVENT playlist with valid packed MP3 and completed manifest", { skip: skipAudio }, async () => {
   const { bucket, queue, jobs, run } = fixture();
   const session = await (await run("session", {
     method: "POST", body: JSON.stringify({ text: "测试。" .repeat(250), voice: "zh-CN-YunjianNeural" }),
   })).json() as { id: string; url: string };
   assert.equal(jobs.length, 1);
-  const synth = async () => ({ audio, boundaries: [] });
+  const synth = async () => ({ audio: audioBytes, boundaries: [] });
   await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
   const before = await (await run(`${session.id}/playlist.m3u8`)).text();
   assert.match(before, /#EXT-X-PLAYLIST-TYPE:EVENT/);
@@ -81,14 +81,14 @@ test("unready and malformed sessions do not expose media or enqueue synthesis", 
   assert.equal((await run(`${session.id}/segment-0.mp3`)).status, 404);
 });
 
-test("already queued sessions retain five-segment numbering after the producer is upgraded", async () => {
+test("already queued sessions retain five-segment numbering after the producer is upgraded", { skip: skipAudio }, async () => {
   const { bucket, queue, jobs, run } = fixture();
   const session = await (await run("session", { method: "POST", body: JSON.stringify({ text: "兼容。".repeat(300), voice: "zh-CN-YunjianNeural" }) })).json() as { id: string };
   const key = `live-hls-v1/${session.id}/state.json`;
   const stored = JSON.parse(new TextDecoder().decode(bucket.objects.get(key)!));
   delete stored.groupSize; // The deployed v2 producer did not persist this field.
   await bucket.put(key, JSON.stringify(stored));
-  const synth = async () => ({ audio, boundaries: [] });
+  const synth = async () => ({ audio: audioBytes, boundaries: [] });
   await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, synth);
   const first = await (await run(`${session.id}/status`)).json() as { segments: { number: number }[] };
   assert.deepEqual(first.segments.map(part => part.number), [0, 1, 2, 3, 4]);
@@ -110,7 +110,7 @@ test("rollback rejects v4 media sessions without replacing their transport state
   let synthesized = false;
   await processLiveHlsJob(jobs.shift()!, bucket as unknown as R2Bucket, queue as unknown as Queue, async () => {
     synthesized = true;
-    return { audio, boundaries: [] };
+    return { audio: audioBytes, boundaries: [] };
   });
   assert.equal(synthesized, false);
   assert.equal(jobs.length, 0);

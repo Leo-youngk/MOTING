@@ -1,0 +1,54 @@
+精准的最小门槛：类型、静态检查和单测。构建与发布验证留在本地，
+因为 `npm test` 会先跑一次完整 build，推一次要等好几分钟。
+
+ffmpeg 是 HLS 用例的测试音频来源（`tests/fixture-audio.ts`）。装上一方面让这些
+用例真的跑起来，一方面让下面那条断言把它钉住——哪天镜像变化导致 ffmpeg 没了，
+用例会静默变成 skip，那就是假的绿。
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: moting-reader
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: moting-reader/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 测试音频需要的 ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 静态检查
+        run: npm run lint
+
+      # tests/worker-ai.test.mjs 直接 import dist/server/index.js：先构建，
+      # 否则跑的是仓库里上一次留下的产物，绿得不明不白。
+      - name: 构建
+        run: npm run build
+
+      - name: 单元测试
+        run: node --experimental-strip-types --test tests/*.test.*

@@ -6,13 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleLiveHls, processLiveHlsJob } from "../worker/live-hls.ts";
 import { BREAK_GAP_SECONDS, mp3DurationSeconds } from "../lib/speech-batch.ts";
+import { fixtureAudio, MISSING_FFMPEG } from "./fixture-audio.ts";
 
 // 1 秒正弦波，24kHz 48kbps 单声道 MP3，格式跟云健的一样。
-const audio = new Uint8Array(execFileSync("ffmpeg", [
-  "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-  "-ar", "24000", "-ac", "1", "-b:a", "48k", "-f", "mp3", "pipe:1",
-]));
-const AUDIO_SECONDS = mp3DurationSeconds(audio);
+// 没有 ffmpeg 时 AUDIO_SECONDS 为 0，所有依赖真实音频的用例都标成 skip。
+const audio = fixtureAudio();
+const skipAudio = audio ? false : MISSING_FFMPEG;
+const audioBytes = audio ?? new Uint8Array();
+const AUDIO_SECONDS = audio ? mp3DurationSeconds(audio) : 0;
 // 假装最后一个字在 0.5 秒读完，后面全是「自带静音」。
 const SPEECH_END = 0.5;
 const boundaries = [{ offset: 0, duration: SPEECH_END * 10_000_000, text: "x" }];
@@ -50,7 +51,7 @@ async function prepare(text: string, format?: number) {
   const calls: string[] = [];
   const synth = async (part: string) => {
     calls.push(part);
-    return { audio, boundaries };
+    return { audio: audioBytes, boundaries };
   };
   while (jobs.length) {
     const job = jobs.shift()!;
@@ -72,7 +73,7 @@ const TEXT =
   "＊　＊　＊\n\n" +
   "那年春天，雪化得特别晚。";
 
-test("结构化会话：换章、标题、句末按设计的停顿整理每片结尾", async () => {
+test("结构化会话：换章、标题、句末按设计的停顿整理每片结尾", { skip: skipAudio }, async () => {
   const { state, calls } = await prepare(TEXT, 2);
   assert.equal(state.complete, true);
   assert.ok(!calls.some((part) => part.includes("＊")), "全是符号的片不送去合成");
@@ -94,7 +95,7 @@ test("结构化会话：换章、标题、句末按设计的停顿整理每片�
   }
 });
 
-test("结构化会话整理过停顿的分片（packed MP3）能被 ffmpeg 完整解码", async () => {
+test("结构化会话整理过停顿的分片（packed MP3）能被 ffmpeg 完整解码", { skip: skipAudio }, async () => {
   const { playlist, run, id } = await prepare(TEXT, 2);
   const directory = mkdtempSync(join(tmpdir(), "moting-live-structure-"));
   try {
@@ -109,7 +110,7 @@ test("结构化会话整理过停顿的分片（packed MP3）能被 ffmpeg 完�
   }
 });
 
-test("老客户端建的会话（不带 format）照旧切片、原样拼接", async () => {
+test("老客户端建的会话（不带 format）照旧切片、原样拼接", { skip: skipAudio }, async () => {
   const legacy = "第一句。\n第二句。\n".repeat(20);
   const { state, calls } = await prepare(legacy);
   assert.ok(calls.length >= 1);

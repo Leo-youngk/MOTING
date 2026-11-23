@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { packedAudio, handleHls } from "../worker/hls.ts";
+import { fixtureAudio, MISSING_FFMPEG } from "./fixture-audio.ts";
 
 test("packed audio ID3 carries a big endian 33-bit timestamp", () => {
   const bytes = packedAudio(new Uint8Array([1, 2, 3]), 121.056);
@@ -17,7 +18,10 @@ test("packed audio ID3 carries a big endian 33-bit timestamp", () => {
 });
 
 // Real MP3 frames; generated fixture is transport test audio, not upstream TTS.
-const audio = new Uint8Array(execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-ar", "24000", "-ac", "1", "-b:a", "48k", "-f", "mp3", "pipe:1"]));
+// 没有 ffmpeg 时用空音频把依赖它的用例标成 skip，整份单测不能跟着变红。
+const audio = fixtureAudio();
+const audioBytes = audio ?? new Uint8Array();
+const skipAudio = audio ? false : MISSING_FFMPEG;
 function memoryBucket() {
   const objects = new Map<string, { bytes: Uint8Array; customMetadata?: Record<string, string> }>();
   return {
@@ -30,9 +34,9 @@ function memoryBucket() {
   };
 }
 
-test("prepared VOD uses cached audio, exact byte ranges, valid decoder input and no synthesis during playback", async () => {
+test("prepared VOD uses cached audio, exact byte ranges, valid decoder input and no synthesis during playback", { skip: skipAudio }, async () => {
   const bucket = memoryBucket(); let calls = 0;
-  const synth = async () => { calls++; return { audio }; };
+  const synth = async () => { calls++; return { audio: audioBytes }; };
   const request = (path: string, body?: unknown, headers?: HeadersInit) => new Request(`https://test/api/sync/hls/${path}`, body ? { method: "POST", body: JSON.stringify(body) } : { headers });
   const run = (req: Request) => handleHls(req, bucket as unknown as R2Bucket, synth);
   const clip = await (await run(request("prepare", { text: "测试。".repeat(80) }))).json() as { id: string; parts: { offset: number; length: number; duration: number }[] };
@@ -49,7 +53,7 @@ test("prepared VOD uses cached audio, exact byte ranges, valid decoder input and
   assert.equal(segment.status, 206);
   assert.equal(Number(segment.headers.get("content-length")), first.length);
   const bytes = new Uint8Array(await segment.arrayBuffer());
-  assert.deepEqual(bytes, packedAudio(audio, 0));
+  assert.deepEqual(bytes, packedAudio(audioBytes, 0));
   assert.equal(calls, generated);
   assert.equal((await run(request(`audio/${clip.id}.mp3`, undefined, { range: "bytes=99999999-" }))).status, 416);
   const dir = mkdtempSync(join(tmpdir(), "moting-hls-"));
